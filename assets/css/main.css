@@ -184,6 +184,20 @@ body {
   background-color: rgba(0, 0, 0, 0.1);
 }
 
+.disconnect-connection {
+  color: #e74c3c;
+}
+
+.disconnect-connection:hover {
+  background-color: rgba(231, 76, 60, 0.15);
+  color: #c0392b;
+}
+
+/* 已连接的连接项始终显示动作区，让断开按钮可见 */
+.connection-item[data-connected="true"] .connection-actions {
+  opacity: 1;
+}
+
 .no-connections {
   padding: 12px;
   text-align: center;

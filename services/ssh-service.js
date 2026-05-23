@@ -3,6 +3,43 @@ const {EventEmitter} = require('events');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
+
+// 把任意字符串安全地包成 POSIX shell 单引号字面量，防注入
+function shellQuote(str) {
+    return `'${String(str).replace(/'/g, `'\\''`)}'`;
+}
+
+// 严格校验：八进制权限串（3-4 位 0-7）
+function isValidOctalPermissions(p) {
+    return typeof p === 'string' && /^[0-7]{3,4}$/.test(p);
+}
+
+// 严格校验：Unix 用户名/组名
+function isValidUnixName(n) {
+    return typeof n === 'string' && /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(n);
+}
+
+// 已知主机指纹文件（TOFU 信任模型）
+const KNOWN_HOSTS_FILE = path.join(os.homedir(), '.sshl', 'known_hosts.json');
+function loadKnownHosts() {
+    try {
+        return JSON.parse(fs.readFileSync(KNOWN_HOSTS_FILE, 'utf8')) || {};
+    } catch {
+        return {};
+    }
+}
+function saveKnownHost(hostKey, fingerprint) {
+    try {
+        const data = loadKnownHosts();
+        data[hostKey] = fingerprint;
+        const dir = path.dirname(KNOWN_HOSTS_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, {recursive: true, mode: 0o700});
+        fs.writeFileSync(KNOWN_HOSTS_FILE, JSON.stringify(data, null, 2), {mode: 0o600});
+    } catch (e) {
+        console.warn('保存 known_hosts 失败:', e.message);
+    }
+}
 
 /**
  * SSH服务类 - 使用单例模式管理SSH连接
@@ -20,7 +57,22 @@ class SshService extends EventEmitter {
         this.userInfoCache = new Map(); // 存储UID/GID到用户名/组名的映射缓存
 
         // 设置定期清理过期连接
-        setInterval(() => this.cleanExpiredConnections(), 30000); // 每30秒清理一次
+        this._cleanupTimer = setInterval(() => this.cleanExpiredConnections(), 30000); // 每30秒清理一次
+    }
+
+    /**
+     * 销毁服务：清理定时器并断开所有连接
+     */
+    dispose() {
+        if (this._cleanupTimer) {
+            clearInterval(this._cleanupTimer);
+            this._cleanupTimer = null;
+        }
+        for (const [, conn] of this.connectionPool.entries()) {
+            try { conn.client?.end(); } catch {}
+        }
+        this.connectionPool.clear();
+        this.sessions.clear();
     }
 
     /**
@@ -113,6 +165,25 @@ class SshService extends EventEmitter {
      * @private
      */
     createConnectOptions(connectionDetails) {
+        const hostKey = `${connectionDetails.host}:${connectionDetails.port || 22}`;
+        // TOFU host key 校验：首次连接保存指纹，后续比对，变化则拒绝
+        const hostVerifier = (key) => {
+            const fp = crypto.createHash('sha256').update(key).digest('base64');
+            const known = loadKnownHosts();
+            const expected = known[hostKey];
+            if (!expected) {
+                console.log(`首次连接 ${hostKey}，保存主机指纹 SHA256:${fp}`);
+                saveKnownHost(hostKey, fp);
+                return true;
+            }
+            if (expected !== fp) {
+                console.error(`主机指纹不匹配 ${hostKey}: 期望 ${expected}, 实际 ${fp}`);
+                this.emit('host-key-mismatch', {hostKey, expected, actual: fp});
+                return false;
+            }
+            return true;
+        };
+
         // 连接配置
         const connectOptions = {
             host: connectionDetails.host,
@@ -127,42 +198,13 @@ class SshService extends EventEmitter {
             keepaliveCountMax: 3, // 最多3次keepalive失败后断开
             // 添加错误处理级别配置
             debug: false, // 生产环境关闭调试
-            // 安全配置
-            hostVerifier: () => true, // 在生产环境中应该实现proper host key verification
-            // 简化算法配置，使用更兼容的默认算法
-            algorithms: {
-                kex: ['diffie-hellman-group14-sha256', 'diffie-hellman-group14-sha1'],
-                cipher: ['aes128-ctr', 'aes256-ctr'],
-                hmac: ['hmac-sha2-256', 'hmac-sha1'],
-                compress: ['none']
-            }
+            hostVerifier
+            // 算法：使用 ssh2 默认值（包含 curve25519/aes-gcm 等现代快算法，且与 OpenSSH 默认兼容）
         };
 
-        // 检测本地网络连接并应用特殊设置
+        // 局域网仅放宽超时，不强制绑定 localAddress（避免选错接口导致首次连接慢/超时）
         if (/^(192\.168\.|10\.|172\.16\.)/.test(connectionDetails.host)) {
-            console.log('本地网络连接，添加特殊连接选项');
-            connectOptions.forceIPv4 = true;
-            connectOptions.localHostname = '0.0.0.0';
-            connectOptions.hostVerifier = () => true;
-            connectOptions.readyTimeout = 60000; // 增加超时时间到60秒
-
-            // 设置本地IP绑定
-            try {
-                const interfaces = require('os').networkInterfaces();
-                const localIPs = Object.values(interfaces)
-                    .flat()
-                    .filter(iface => !iface.internal && iface.family === 'IPv4')
-                    .map(iface => iface.address);
-
-                if (localIPs.length > 0) {
-                    console.log(`可用的本地IP: ${localIPs.join(', ')}`);
-                    // 默认使用第一个非内部IPv4地址
-                    connectOptions.localAddress = localIPs[0];
-                    console.log(`使用本地地址: ${connectOptions.localAddress}`);
-                }
-            } catch (err) {
-                console.warn('获取本地IP地址失败:', err);
-            }
+            connectOptions.readyTimeout = 60000;
         }
 
         // 根据认证类型选择认证方式
@@ -194,6 +236,8 @@ class SshService extends EventEmitter {
      * @private
      */
     setupConnection(conn, connectionObj, connectOptions, connectionKey) {
+        const t0 = Date.now();
+        console.log(`[timing] ${connectionKey} 开始 TCP+SSH 握手`);
         return new Promise((resolve, reject) => {
             // 设置事件监听
             conn.on('ready', () => {
@@ -201,7 +245,7 @@ class SshService extends EventEmitter {
                 connectionObj.isConnected = true;
                 connectionObj.refCount++;
                 this.connectionPool.set(connectionKey, connectionObj);
-                console.log(`连接成功: ${connectionKey}, 当前引用计数: ${connectionObj.refCount}`);
+                console.log(`[timing] ${connectionKey} ready 耗时 ${Date.now() - t0}ms, refCount=${connectionObj.refCount}`);
                 resolve();
             });
             
@@ -408,6 +452,7 @@ class SshService extends EventEmitter {
      * @returns {Promise<Object>} - 会话信息
      */
     async connect(connectionDetails) {
+        const tConnect = Date.now();
         try {
             if (!connectionDetails || !connectionDetails.host || !connectionDetails.username) {
                 throw new Error('缺少必要的连接参数');
@@ -446,7 +491,7 @@ class SshService extends EventEmitter {
             }
 
             // 创建会话ID
-            const sessionId = Date.now().toString();
+            const sessionId = crypto.randomUUID();
 
             // 获取或创建连接
             const { conn, connectionObj, isNew, connectionKey, connectOptions } = 
@@ -481,15 +526,18 @@ class SshService extends EventEmitter {
             }
             
             // 创建shell会话
+            const tShell = Date.now();
             const stream = await this.createShellSession(sessionId, conn);
-            
+            console.log(`[timing] shell 启动耗时 ${Date.now() - tShell}ms`);
+
             // 更新会话，设置stream
             const session = this.sessions.get(sessionId);
             if (session) {
                 session.stream = stream;
                 this.sessions.set(sessionId, session);
             }
-            
+
+            console.log(`[timing] connect 总耗时 ${Date.now() - tConnect}ms (会话 ${sessionId})`);
             return { sessionId };
         } catch (error) {
             console.error('SSH连接失败:', error);
@@ -1143,8 +1191,10 @@ class SshService extends EventEmitter {
                 return this.listFilesViaUserSession(sessionId, remotePath);
             }
             
-            // 使用 ls -la 命令获取详细文件信息，禁用颜色输出
-            const command = `LANG=C.UTF-8 LC_ALL=C.UTF-8 ls -la --color=never "${remotePath}" 2>/dev/null || LANG=C.UTF-8 LC_ALL=C.UTF-8 ls -la --color=never "${remotePath}/" 2>/dev/null`;
+            // 使用 ls -la 命令获取详细文件信息，禁用颜色输出。路径用单引号包裹防止注入
+            const safePath = shellQuote(remotePath);
+            const safePathSlash = shellQuote(remotePath.endsWith('/') ? remotePath : remotePath + '/');
+            const command = `LANG=C.UTF-8 LC_ALL=C.UTF-8 ls -la --color=never ${safePath} 2>/dev/null || LANG=C.UTF-8 LC_ALL=C.UTF-8 ls -la --color=never ${safePathSlash} 2>/dev/null`;
             
             let result;
             try {
@@ -1911,16 +1961,21 @@ class SshService extends EventEmitter {
      * @returns {Promise<boolean>}
      */
     async changeFilePermissions(sessionId, remotePath, permissions) {
+        if (!isValidOctalPermissions(permissions)) {
+            throw new Error('权限格式不合法，必须为 3-4 位八进制数字');
+        }
+        if (typeof remotePath !== 'string' || !remotePath) {
+            throw new Error('远程路径不能为空');
+        }
+
         const sessionResult = await this.ensureActiveSession(sessionId, 'changeFilePermissions');
         if (!sessionResult.success) {
             throw new Error(sessionResult.error);
         }
-        
-        const session = sessionResult.session;
 
         try {
-            // 使用 chmod 命令修改权限
-            const command = `chmod ${permissions} "${remotePath}"`;
+            // 使用 chmod 命令修改权限，路径用单引号安全包裹防止注入
+            const command = `chmod ${permissions} ${shellQuote(remotePath)}`;
             await this.executeCommand(sessionId, command);
             return true;
         } catch (error) {
@@ -1938,17 +1993,25 @@ class SshService extends EventEmitter {
      * @returns {Promise<boolean>}
      */
     async changeFileOwner(sessionId, remotePath, owner, group = null) {
+        if (!isValidUnixName(owner)) {
+            throw new Error('所有者名称不合法');
+        }
+        if (group && !isValidUnixName(group)) {
+            throw new Error('组名称不合法');
+        }
+        if (typeof remotePath !== 'string' || !remotePath) {
+            throw new Error('远程路径不能为空');
+        }
+
         const sessionResult = await this.ensureActiveSession(sessionId, 'changeFileOwner');
         if (!sessionResult.success) {
             throw new Error(sessionResult.error);
         }
-        
-        const session = sessionResult.session;
 
         try {
-            // 使用 chown 命令修改所有者
+            // 校验过的 owner/group + 单引号包裹路径，防注入
             const ownerGroup = group ? `${owner}:${group}` : owner;
-            const command = `chown ${ownerGroup} "${remotePath}"`;
+            const command = `chown ${ownerGroup} ${shellQuote(remotePath)}`;
             await this.executeCommand(sessionId, command);
             return true;
         } catch (error) {

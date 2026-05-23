@@ -753,6 +753,17 @@ function initializeApp() {
 
     // 添加连接项点击事件委托
     document.addEventListener('click', async function (event) {
+        // 断开连接按钮（必须放在最前，避免冒泡触发其它处理）
+        if (event.target.closest('.disconnect-connection')) {
+            const btn = event.target.closest('.disconnect-connection');
+            const sessionId = btn.getAttribute('data-session-id');
+            event.stopPropagation();
+            if (sessionId && window.terminalManager) {
+                await window.terminalManager.disconnectSession(sessionId);
+            }
+            return;
+        }
+
         // 编辑连接按钮
         if (event.target.closest('.edit-connection')) {
             const btn = event.target.closest('.edit-connection');

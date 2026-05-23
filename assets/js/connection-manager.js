@@ -21,25 +21,36 @@ class ConnectionManager {
 
             if (connections && connections.length > 0) {
                 connections.forEach(connection => {
-                    // 检查连接是否有会话
+                    // 检查该连接是否有活跃会话（不论是否在前台）
                     const existingSessionInfo = window.sessionManager.getSessionByConnectionId(connection.id);
-                    // 如果有会话，并且是当前活跃会话，则显示为活跃
-                    const isActive = existingSessionInfo !== null &&
+                    const isConnected = existingSessionInfo !== null;
+                    // 是否是当前前台会话
+                    const isActive = isConnected &&
                         existingSessionInfo.sessionId === window.currentSessionId;
 
-                    const statusClass = isActive ? 'online' : 'offline';
+                    const statusClass = isConnected ? 'online' : 'offline';
 
                     const item = document.createElement('div');
                     item.className = 'connection-item';
                     item.setAttribute('data-id', connection.id);
                     item.setAttribute('data-active', isActive ? 'true' : 'false');
+                    item.setAttribute('data-connected', isConnected ? 'true' : 'false');
                     // 储存名称，但不使用title属性（会显示原生工具提示）
                     item.setAttribute('data-name', connection.name);
+
+                    const disconnectBtn = isConnected ? `
+                            <button class="icon-button disconnect-connection" data-session-id="${existingSessionInfo.sessionId}" title="断开连接">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M18.36 6.64a9 9 0 11-12.73 0"/>
+                                    <line x1="12" y1="2" x2="12" y2="12"/>
+                                </svg>
+                            </button>` : '';
 
                     item.innerHTML = `
                         <div class="connection-status-indicator ${statusClass}"></div>
                         <div class="connection-name">${connection.name}</div>
                         <div class="connection-actions">
+                            ${disconnectBtn}
                             <button class="icon-button edit-connection" data-id="${connection.id}" title="编辑连接">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
@@ -77,25 +88,23 @@ class ConnectionManager {
         }
     }
     
-    // 更新活跃连接项
+    // 更新活跃连接项：data-active 只标记当前前台会话；指示器 online/offline 基于该连接是否有活跃会话
+    // 已连接但还没断开按钮的项动态注入按钮；已断开则移除按钮
     updateActiveConnectionItem(activeConnectionId) {
-        console.log(`[updateActiveConnectionItem] 更新活跃连接指示器，当前活跃连接: ${activeConnectionId}, 当前会话: ${window.currentSessionId}`);
-        
-        // 获取所有连接项
         const connectionItems = document.querySelectorAll('.connection-item');
-        
+
         connectionItems.forEach(item => {
             const itemConnectionId = item.getAttribute('data-id');
-            // 只有传入的activeConnectionId才应该显示为活跃
-            const shouldBeActive = itemConnectionId === activeConnectionId;
-            
-            // 更新data-active属性
-            item.setAttribute('data-active', shouldBeActive ? 'true' : 'false');
-            
-            // 更新指示器样式
+            const isForeground = itemConnectionId === activeConnectionId;
+            const sessionInfo = window.sessionManager.getSessionByConnectionId(itemConnectionId);
+            const isConnected = sessionInfo !== null;
+
+            item.setAttribute('data-active', isForeground ? 'true' : 'false');
+            item.setAttribute('data-connected', isConnected ? 'true' : 'false');
+
             const indicator = item.querySelector('.connection-status-indicator');
             if (indicator) {
-                if (shouldBeActive) {
+                if (isConnected) {
                     indicator.classList.remove('offline');
                     indicator.classList.add('online');
                 } else {
@@ -103,8 +112,23 @@ class ConnectionManager {
                     indicator.classList.add('offline');
                 }
             }
-            
-            console.log(`[updateActiveConnectionItem] 连接 ${itemConnectionId}: ${shouldBeActive ? '活跃' : '非活跃'}`);
+
+            // 同步断开按钮
+            const actions = item.querySelector('.connection-actions');
+            const existingBtn = item.querySelector('.disconnect-connection');
+            if (isConnected && !existingBtn && actions) {
+                const btn = document.createElement('button');
+                btn.className = 'icon-button disconnect-connection';
+                btn.setAttribute('data-session-id', sessionInfo.sessionId);
+                btn.setAttribute('title', '断开连接');
+                btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>`;
+                actions.insertBefore(btn, actions.firstChild);
+            } else if (!isConnected && existingBtn) {
+                existingBtn.remove();
+            } else if (isConnected && existingBtn) {
+                // 更新 sessionId（可能因重连而变化）
+                existingBtn.setAttribute('data-session-id', sessionInfo.sessionId);
+            }
         });
     }
     

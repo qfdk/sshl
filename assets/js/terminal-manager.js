@@ -409,36 +409,52 @@ class TerminalManager {
         // 为关闭按钮添加事件监听
         const closeBtn = tab.querySelector('.close-tab');
         if (closeBtn) {
-            closeBtn.addEventListener('click', async function () {
-                try {
-                    await window.api.ssh.disconnect(sessionId);
-    
-                    // 移除会话
-                    window.sessionManager.removeSession(sessionId);
-    
-                    window.terminalManager.activeTerminal = null;
-                    window.currentSessionId = null;
-                    window.terminalFitAddon = null;
-    
-                    const terminalContainer = document.getElementById('terminal-container');
-                    if (terminalContainer) {
-                        terminalContainer.innerHTML = '';
-                    }
-    
-                    const placeholder = document.getElementById('terminal-placeholder');
-                    if (placeholder) {
-                        placeholder.classList.remove('hidden');
-                    }
-    
-                    // 更新连接状态和服务器信息
-                    window.uiManager.updateConnectionStatus(false);
-                    window.uiManager.updateServerInfo(false);
-                    await window.connectionManager.loadConnections();
-                } catch (error) {
-                    console.error('断开连接失败:', error);
-                }
-            });
+            closeBtn.addEventListener('click', () => this.disconnectSession(sessionId));
         }
+    }
+
+    /**
+     * 断开指定会话；如果是当前活跃会话，会清理终端 UI。
+     * 切换连接不会触发此方法（切换只换前台显示）。
+     */
+    async disconnectSession(sessionId) {
+        if (!sessionId) return;
+        const isActive = window.currentSessionId === sessionId;
+
+        try {
+            await window.api.ssh.disconnect(sessionId);
+        } catch (error) {
+            console.error('断开连接失败:', error);
+        }
+
+        // 始终移除会话记录
+        window.sessionManager.removeSession(sessionId);
+
+        if (isActive) {
+            this.activeTerminal = null;
+            window.currentSessionId = null;
+            window.terminalFitAddon = null;
+
+            const terminalContainer = document.getElementById('terminal-container');
+            if (terminalContainer) {
+                terminalContainer.innerHTML = '';
+            }
+
+            const placeholder = document.getElementById('terminal-placeholder');
+            if (placeholder) {
+                placeholder.classList.remove('hidden');
+            }
+
+            const tabsContainer = document.getElementById('terminal-tabs-left');
+            if (tabsContainer) {
+                tabsContainer.innerHTML = '';
+            }
+
+            window.uiManager.updateConnectionStatus(false);
+            window.uiManager.updateServerInfo(false);
+        }
+
+        await window.connectionManager.loadConnections();
     }
     
     // 确保终端可见

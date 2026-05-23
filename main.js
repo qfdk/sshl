@@ -2,7 +2,29 @@ const {app, BrowserWindow, ipcMain, dialog, protocol} = require('electron');
 const path = require('path');
 const ejs = require('ejs');
 const fs = require('fs');
+const fsp = require('fs/promises');
 const os = require('os');
+
+// 命令行开关必须在 app.ready 之前设置，否则会被忽略
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors,BlockInsecurePrivateNetworkRequests');
+
+// 本地文件操作根目录白名单（防路径穿越）
+const LOCAL_FS_ROOTS = [os.homedir(), os.tmpdir()];
+function assertLocalPathAllowed(p) {
+    if (typeof p !== 'string' || !p) {
+        throw new Error('非法路径');
+    }
+    const resolved = path.resolve(p);
+    const ok = LOCAL_FS_ROOTS.some(root => {
+        const r = path.resolve(root);
+        return resolved === r || resolved.startsWith(r + path.sep);
+    });
+    if (!ok) {
+        throw new Error('路径越界，仅允许操作家目录或临时目录下的文件');
+    }
+    return resolved;
+}
 
 // 惰性加载服务 - 仅在需要时才加载模块
 let _sshService = null;
@@ -54,15 +76,6 @@ function registerProtocols() {
             console.error('Protocol error:', error);
         }
     });
-}
-
-// 将命令行参数设置逻辑分离到单独的函数
-function setupCommandLineArgs() {
-    // 移除已废弃的 allowRendererProcessReuse = false (Electron 28+)
-    // 保持默认的渲染进程复用以提升性能
-    app.commandLine.appendSwitch('no-sandbox');
-    app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors');
-    app.commandLine.appendSwitch('disable-features', 'BlockInsecurePrivateNetworkRequests');
 }
 
 /**
@@ -236,12 +249,35 @@ function handleDownloadProgress(progressData) {
 app.whenReady().then(() => {
     // 注册协议处理器
     registerProtocols();
-    
-    // 设置命令行参数
-    setupCommandLineArgs();
-    
+
     // 创建窗口
     createWindow();
+
+    // 预热 SSH 栈：require 模块 + 构造 Client 触发 native binding 完整初始化
+    // + 预解析已保存连接的 DNS。避免重启后首次连接的冷启动开销
+    setImmediate(async () => {
+        try {
+            getSshService();
+            const {Client} = require('ssh2');
+            // 构造一次但不连接，强制 ssh2 加载 cpu-features / native binding
+            const probe = new Client();
+            try { probe.end(); } catch {}
+
+            // 预解析已保存连接的 host，热 OS DNS 缓存
+            try {
+                const dns = require('dns').promises;
+                const conns = getConfigStore().getConnections();
+                const hosts = [...new Set(conns.map(c => c?.host).filter(Boolean))];
+                await Promise.all(hosts.map(h =>
+                    dns.lookup(h).catch(() => null)
+                ));
+            } catch (e) {
+                console.warn('DNS 预解析失败:', e.message);
+            }
+        } catch (e) {
+            console.warn('SSH 服务预热失败:', e.message);
+        }
+    });
 
     app.on('activate', function () {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -250,6 +286,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', function () {
     if (process.platform !== 'darwin') app.quit();
+});
+
+// 退出时清理 SSH 服务的定时器和连接池
+app.on('before-quit', () => {
+    if (_sshService && typeof _sshService.dispose === 'function') {
+        try { _sshService.dispose(); } catch (e) { console.warn('SSH 服务清理失败:', e.message); }
+    }
 });
 
 /**
@@ -283,20 +326,21 @@ const fileOperationHandlers = {
 
     // 列出本地文件
     'file:list-local': createIpcHandler(async (event, directory) => {
-        const files = fs.readdirSync(directory);
-        const fileDetails = files.map(file => {
-            const filePath = path.join(directory, file);
-            const stats = fs.statSync(filePath);
+        const safeDir = assertLocalPathAllowed(directory);
+        const entries = await fsp.readdir(safeDir, { withFileTypes: true });
+        const fileDetails = await Promise.all(entries.map(async entry => {
+            const filePath = path.join(safeDir, entry.name);
+            const stats = await fsp.stat(filePath).catch(() => null);
             return {
-                name: file,
-                isDirectory: stats.isDirectory(),
-                size: stats.size,
-                modifyTime: stats.mtime
+                name: entry.name,
+                isDirectory: entry.isDirectory(),
+                size: stats?.size ?? 0,
+                modifyTime: stats?.mtime ?? new Date()
             };
-        });
+        }));
 
         // 添加父目录条目（如果不在根目录）
-        if (path.dirname(directory) !== directory) {
+        if (path.dirname(safeDir) !== safeDir) {
             fileDetails.unshift({
                 name: '..',
                 isDirectory: true,
@@ -322,37 +366,16 @@ const fileOperationHandlers = {
     
     // 删除本地文件
     'file:delete-local': createIpcHandler(async (event, filePath) => {
-        fs.unlinkSync(filePath);
+        const safePath = assertLocalPathAllowed(filePath);
+        await fsp.unlink(safePath);
         return { success: true };
     }),
 
     // 删除本地目录
     'file:delete-local-directory': createIpcHandler(async (event, dirPath) => {
-        try {
-            // 首先尝试删除空目录
-            fs.rmdirSync(dirPath);
-            return { success: true };
-        } catch (error) {
-            // 如果目录非空，则递归删除
-            if (error.code === 'ENOTEMPTY') {
-                const removeDir = (dir) => {
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    for (const entry of entries) {
-                        const fullPath = path.join(dir, entry.name);
-                        if (entry.isDirectory()) {
-                            removeDir(fullPath);
-                        } else {
-                            fs.unlinkSync(fullPath);
-                        }
-                    }
-                    fs.rmdirSync(dir);
-                };
-
-                removeDir(dirPath);
-                return { success: true };
-            }
-            throw error; // 重新抛出其他错误
-        }
+        const safeDir = assertLocalPathAllowed(dirPath);
+        await fsp.rm(safeDir, { recursive: true, force: true });
+        return { success: true };
     }),
 
     // 创建远程目录

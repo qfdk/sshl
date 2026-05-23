@@ -2,13 +2,14 @@ const Store = require('electron-store');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 class ConfigStore {
   constructor() {
     // Create ~/.sshl directory if it doesn't exist
     this.sshlDir = path.join(os.homedir(), '.sshl');
     if (!fs.existsSync(this.sshlDir)) {
-      fs.mkdirSync(this.sshlDir, { mode: 0o700 }); // Set permissions to only allow owner access
+      fs.mkdirSync(this.sshlDir, { mode: 0o700, recursive: true }); // Set permissions to only allow owner access
     }
 
     // Main configuration store (non-sensitive data)
@@ -80,7 +81,7 @@ class ConfigStore {
 
     } else {
       // New connection - assign an ID
-      cleanConnection.id = Date.now().toString();
+      cleanConnection.id = crypto.randomUUID();
       connections.push(cleanConnection);
 
       // Save sensitive data separately

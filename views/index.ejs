@@ -16,8 +16,11 @@
         <link rel="stylesheet" href="app://<%= cssPath %>">
     <% }); %>
 
-    <!-- xterm.css will be loaded dynamically -->
-    
+    <!-- 预加载 xterm.js 与 fit addon，避免首次连接时再动态下载（之前会让首连接卡 5-10s） -->
+    <link rel="stylesheet" href="app://node_modules/xterm/css/xterm.css">
+    <script src="app://node_modules/xterm/lib/xterm.js"></script>
+    <script src="app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+
     <!-- ES Module 兼容性检查 -->
     <script src="app://assets/js/polyfill.js"></script>
 </head>
