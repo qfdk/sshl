@@ -56,9 +56,39 @@ class SshService extends EventEmitter {
         this.commandQueue = new Map(); // 存储每个连接的命令队列
         this.fileManagerSessions = new Map(); // 存储连接到文件管理会话的映射
         this.userInfoCache = new Map(); // 存储UID/GID到用户名/组名的映射缓存
+        this.sftpInstances = new Map(); // connectionKey → 共享 SFTP 实例，避免每次操作开新 channel 累计到 sshd MaxSessions
 
         // 设置定期清理过期连接
         this._cleanupTimer = setInterval(() => this.cleanExpiredConnections(), 30000); // 每30秒清理一次
+    }
+
+    /**
+     * 获取或建立连接的共享 SFTP 实例。
+     * 每次操作都新开 SFTP channel 累积到 sshd MaxSessions 会"Channel open failure"，
+     * 因此每个 connectionKey 复用一个 SFTP；通道关闭/出错自动清空缓存让下次重开。
+     * @param {Object} session - 含 conn 和 connectionKey
+     * @returns {Promise<Object>} - SFTPWrapper
+     */
+    getSftp(session) {
+        return new Promise((resolve, reject) => {
+            const key = session.connectionKey;
+            const cached = this.sftpInstances.get(key);
+            if (cached) return resolve(cached);
+
+            session.conn.sftp((err, sftp) => {
+                if (err) return reject(err);
+                const clear = () => {
+                    if (this.sftpInstances.get(key) === sftp) {
+                        this.sftpInstances.delete(key);
+                    }
+                };
+                sftp.once('close', clear);
+                sftp.once('end', clear);
+                sftp.once('error', clear);
+                this.sftpInstances.set(key, sftp);
+                resolve(sftp);
+            });
+        });
     }
 
     /**
@@ -101,6 +131,7 @@ class SshService extends EventEmitter {
         }
         this.connectionPool.clear();
         this.sessions.clear();
+        this.sftpInstances.clear();
     }
 
     /**
@@ -122,6 +153,8 @@ class SshService extends EventEmitter {
                 this.userInfoCache.delete(key); // 清理用户信息缓存
                 this.execStatus.delete(key); // 同时清理exec状态
                 this.fileManagerSessions.delete(key); // 同时清理文件管理会话映射
+                const sftp = this.sftpInstances.get(key);
+                if (sftp) { try { sftp.end(); } catch {} this.sftpInstances.delete(key); }
             }
         }
     }
@@ -307,25 +340,23 @@ class SshService extends EventEmitter {
             });
             
             conn.on('end', () => {
-                // 连接结束处理
                 console.log(`连接结束: ${connectionKey}`);
                 connectionObj.isConnected = false;
                 connectionObj.refCount = 0;
-                // 移除已结束的连接
                 if (this.connectionPool.get(connectionKey) === connectionObj) {
                     this.connectionPool.delete(connectionKey);
                 }
+                this.sftpInstances.delete(connectionKey);
             });
-            
+
             conn.on('close', () => {
-                // 连接关闭处理
                 console.log(`连接关闭: ${connectionKey}`);
                 connectionObj.isConnected = false;
                 connectionObj.refCount = 0;
-                // 移除已关闭的连接
                 if (this.connectionPool.get(connectionKey) === connectionObj) {
                     this.connectionPool.delete(connectionKey);
                 }
+                this.sftpInstances.delete(connectionKey);
             });
             
             // 连接
@@ -1216,21 +1247,8 @@ class SshService extends EventEmitter {
         }
 
         return new Promise((resolve, reject) => {
-            fileSession.conn.sftp((err, sftp) => {
-                if (err) {
-                    console.warn('SFTP不可用，尝试使用SSH命令:', err.message);
-                    // 标记SFTP不可用，避免重复尝试
-                    this.sftpStatus.set(connectionKey, false);
-                    // 如果SFTP不可用，使用SSH命令作为备用方案
-                    this.listFilesWithSSH(fileSessionId, remotePath)
-                        .then(resolve)
-                        .catch(reject);
-                    return;
-                }
-
-                // 标记SFTP可用
+            this.getSftp(fileSession).then(sftp => {
                 this.sftpStatus.set(connectionKey, true);
-                
                 sftp.readdir(remotePath, async (err, list) => {
                     if (err) {
                         console.warn('SFTP readdir失败，尝试使用SSH命令:', err.message);
@@ -1281,6 +1299,10 @@ class SshService extends EventEmitter {
                         })));
                     }
                 });
+            }).catch(err => {
+                console.warn('SFTP不可用，回退到 SSH 命令:', err.message);
+                this.sftpStatus.set(connectionKey, false);
+                this.listFilesWithSSH(fileSessionId, remotePath).then(resolve).catch(reject);
             });
         });
     }
@@ -1789,95 +1811,52 @@ class SshService extends EventEmitter {
         
         const session = sessionResult.session;
 
+        const sftp = await this.getSftp(session);
         return new Promise((resolve, reject) => {
-            session.conn.sftp((err, sftp) => {
-                if (err) {
-                    reject(err);
-                    return;
+            const transferOptions = {
+                concurrency: 64,
+                chunkSize: 32768,
+                step: (total_transferred, _chunk, total) => {
+                    const progress = Math.round((total_transferred / total) * 100);
+                    this.emit('transfer-progress', sessionId, {
+                        type: 'upload',
+                        path: remotePath,
+                        progress,
+                        transferred: total_transferred,
+                        total
+                    });
                 }
-
-                // 使用选项优化传输性能
-                const transferOptions = {
-                    concurrency: 64, // 增加并发数
-                    chunkSize: 32768, // 32KB chunks
-                    step: (total_transferred, chunk, total) => {
-                        // 发送进度事件
-                        const progress = Math.round((total_transferred / total) * 100);
-                        this.emit('transfer-progress', sessionId, {
-                            type: 'upload',
-                            path: remotePath,
-                            progress,
-                            transferred: total_transferred,
-                            total
-                        });
-                    }
-                };
-                
-                sftp.fastPut(localPath, remotePath, transferOptions, (err) => {
-                    if (err) {
-                        reject(err);
-                        return;
-                    }
-                    resolve();
-                });
+            };
+            sftp.fastPut(localPath, remotePath, transferOptions, (err) => {
+                if (err) return reject(err);
+                resolve();
             });
         });
     }
 
     /**
      * 创建远程目录
-     * @param {string} sessionId - 会话ID
-     * @param {string} remotePath - 远程路径
-     * @returns {Promise<void>}
      */
     async createDirectory(sessionId, remotePath) {
         const sessionResult = await this.ensureActiveSession(sessionId, 'createDirectory');
-        if (!sessionResult.success) {
-            throw new Error(sessionResult.error);
-        }
-        
-        const session = sessionResult.session;
-
+        if (!sessionResult.success) throw new Error(sessionResult.error);
+        const sftp = await this.getSftp(sessionResult.session);
         return new Promise((resolve, reject) => {
-            session.conn.sftp((err, sftp) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-
-                sftp.mkdir(remotePath, (err) => {
-                    if (err) {
-                        reject(err);
-                        return;
-                    }
-                    resolve();
-                });
-            });
+            sftp.mkdir(remotePath, (err) => err ? reject(err) : resolve());
         });
     }
 
     /**
      * 上传目录
-     * @param {string} sessionId - 会话ID
-     * @param {string} localPath - 本地路径
-     * @param {string} remotePath - 远程路径
-     * @returns {Promise<boolean>}
      */
     async uploadDirectory(sessionId, localPath, remotePath) {
         const sessionResult = await this.ensureActiveSession(sessionId, 'uploadDirectory');
         if (!sessionResult.success) {
             throw new Error(sessionResult.error);
         }
-        
-        const session = sessionResult.session;
 
-        // Get SFTP instance once for the entire operation
-        const sftp = await new Promise((resolve, reject) => {
-            session.conn.sftp((err, sftp) => {
-                if (err) reject(err);
-                else resolve(sftp);
-            });
-        });
+        const session = sessionResult.session;
+        const sftp = await this.getSftp(session);
 
         // Create remote directory
         try {
@@ -1955,28 +1934,11 @@ class SshService extends EventEmitter {
         
         const session = sessionResult.session;
 
+        const parentDir = path.dirname(localPath);
+        if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, {recursive: true});
+        const sftp = await this.getSftp(session);
         return new Promise((resolve, reject) => {
-            session.conn.sftp((err, sftp) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-
-                // Create parent directory if it doesn't exist
-                const parentDir = path.dirname(localPath);
-                if (!fs.existsSync(parentDir)) {
-                    fs.mkdirSync(parentDir, {recursive: true});
-                }
-
-                // Use fastGet to download the file
-                sftp.fastGet(remotePath, localPath, (err) => {
-                    if (err) {
-                        reject(err);
-                        return;
-                    }
-                    resolve();
-                });
-            });
+            sftp.fastGet(remotePath, localPath, (err) => err ? reject(err) : resolve());
         });
     }
 
@@ -2000,13 +1962,7 @@ class SshService extends EventEmitter {
             fs.mkdirSync(localPath, { recursive: true });
         }
 
-        // 获取SFTP
-        const sftp = await new Promise((resolve, reject) => {
-            session.conn.sftp((err, sftp) => {
-                if (err) reject(err);
-                else resolve(sftp);
-            });
-        });
+        const sftp = await this.getSftp(session);
 
         // 读取远程目录
         const list = await new Promise((resolve, reject) => {
