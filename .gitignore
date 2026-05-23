@@ -358,3 +358,6 @@ dist
 
 # Build output
 /release
+
+# Claude Code 本地配置
+.claude/

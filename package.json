@@ -41,7 +41,7 @@
       "category": "public.app-category.utilities",
       "icon": "icon.png",
       "target": [
-        "zip"
+        "dir"
       ]
     }
   }

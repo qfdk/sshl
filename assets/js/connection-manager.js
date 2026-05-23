@@ -208,14 +208,29 @@ class ConnectionManager {
                         // 更新会话ID
                         window.currentSessionId = result.sessionId;
 
-                        // 创建新终端, 先清空容器
-                        const terminalInfo = await window.terminalManager.initTerminal(result.sessionId, null, true, true);
+                        // 创建新终端, 先清空容器（不在 initTerminal 内拉 buffer）
+                        const terminalInfo = await window.terminalManager.initTerminal(result.sessionId, null, false, true);
                         // 保存到会话管理器
                         window.sessionManager.addSession(result.sessionId, connectionId, {
                             term: terminalInfo.term,
                             buffer: '',
                             name: connection.name
                         });
+
+                        // 同步：fetch buffer → write → activate，保证 active:false 协议下数据不丢
+                        try {
+                            const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
+                            if (bufferResult?.success && bufferResult.buffer && terminalInfo?.term) {
+                                terminalInfo.term.write(bufferResult.buffer);
+                            }
+                        } catch (err) {
+                            console.warn(`[switchToSession reconnect] buffer 加载失败:`, err);
+                        }
+                        try {
+                            await window.api.ssh.activateSession(result.sessionId);
+                        } catch (err) {
+                            console.warn(`[switchToSession reconnect] activate 失败:`, err);
+                        }
 
                         // 更新UI
                         window.uiManager.updateConnectionStatus(true, connection.name);
@@ -273,52 +288,44 @@ class ConnectionManager {
             window.currentSessionId = sessionInfo.sessionId;
             window.sessionManager.setSessionActive(sessionInfo.sessionId, true);
 
-            // 异步在后端激活会话
-            window.api.ssh.activateSession(sessionInfo.sessionId).then(activateResult => {
-                // 检查是否返回了新的会话ID（重新连接的情况）
-                if (activateResult && activateResult.sessionId && activateResult.sessionId !== sessionInfo.sessionId) {
-                    console.log(`[switchToSession] 会话已重新连接，更新会话ID: ${activateResult.sessionId}`);
-                    // 更新当前会话ID
-                    window.currentSessionId = activateResult.sessionId;
-                    // 更新会话管理器中的会话ID
-                    window.sessionManager.updateSessionId(sessionInfo.sessionId, activateResult.sessionId);
-                    // 更新sessionInfo引用
-                    sessionInfo.sessionId = activateResult.sessionId;
-                }
-            }).catch(err => {
-                console.warn(`[switchToSession] 在后端激活会话失败: ${err.message}`, err);
-            });
-
             // 设置SSH数据和关闭处理
             this.setupSSHHandlers();
 
-            // 先初始化终端显示空白内容，再异步设置缓冲区
+            // 先初始化空终端（不在 initTerminal 内拉 buffer）
             const terminalResult = await window.terminalManager.initTerminal(
-                sessionInfo.sessionId, 
-                sessionInfo.session, 
-                false,  // 不显示缓冲区，稍后再加载
-                true    // 先清空容器
+                sessionInfo.sessionId,
+                sessionInfo.session,
+                false,
+                true
             );
-            
+
             if (!terminalResult) {
                 throw new Error('终端初始化失败');
             }
             window.terminalManager.activeTerminal = terminalResult.term;
-            
-            // 异步加载会话缓冲区
-            setTimeout(async () => {
-                try {
-                    // 获取缓冲区数据
-                    const bufferResult = await window.api.ssh.getSessionBuffer(sessionInfo.sessionId);
-                    if (bufferResult && bufferResult.success && bufferResult.buffer && 
-                        window.terminalManager.activeTerminal) {
-                        // 写入缓冲区数据
-                        window.terminalManager.activeTerminal.write(bufferResult.buffer);
-                    }
-                } catch (err) {
-                    console.warn(`[switchToSession] 加载缓冲区数据失败:`, err);
+
+            // 同步：fetch buffer → write → activate。
+            // 顺序必须是先拿 buffer 再 activate，否则 active:false 协议下 ssh-service
+            // 会把缓冲区里 bufferReadLen 之后的内容补 emit，和这里写入的 buffer 重复。
+            try {
+                const bufferResult = await window.api.ssh.getSessionBuffer(sessionInfo.sessionId);
+                if (bufferResult?.success && bufferResult.buffer && window.terminalManager.activeTerminal) {
+                    window.terminalManager.activeTerminal.write(bufferResult.buffer);
                 }
-            }, 50);
+            } catch (err) {
+                console.warn(`[switchToSession] 加载缓冲区数据失败:`, err);
+            }
+            try {
+                const activateResult = await window.api.ssh.activateSession(sessionInfo.sessionId);
+                if (activateResult?.sessionId && activateResult.sessionId !== sessionInfo.sessionId) {
+                    console.log(`[switchToSession] 会话已重新连接，更新会话ID: ${activateResult.sessionId}`);
+                    window.currentSessionId = activateResult.sessionId;
+                    window.sessionManager.updateSessionId(sessionInfo.sessionId, activateResult.sessionId);
+                    sessionInfo.sessionId = activateResult.sessionId;
+                }
+            } catch (err) {
+                console.warn(`[switchToSession] 在后端激活会话失败:`, err);
+            }
 
             // 异步加载连接信息和更新UI
             window.api.config.getConnections().then(connections => {
@@ -481,27 +488,23 @@ class ConnectionManager {
             this.isConnecting = true;
             window.uiManager.createLoadingOverlay('正在连接服务器...');
 
-            // 使用原始连接方法
             const result = await window.api.ssh.connect(connection);
 
             if (result && result.success) {
                 window.currentSessionId = result.sessionId;
 
-                // 更新连接信息，包括会话ID
                 await window.api.config.saveConnection({
                     ...connection,
                     sessionId: result.sessionId
                 });
 
-                // 初始化终端
                 const terminalInfo = await window.terminalManager.initTerminal(
                     result.sessionId,
                     null,
-                    false,  // 不在 initTerminal 内部加载缓冲区，下面同步写入
-                    true    // 先清空容器
+                    false,
+                    true
                 );
 
-                // 保存到会话管理器
                 if (terminalInfo) {
                     window.sessionManager.addSession(result.sessionId, connection.id, {
                         term: terminalInfo.term,
@@ -510,8 +513,6 @@ class ConnectionManager {
                     });
                 }
 
-                // 同步写入缓冲区（含欢迎消息和 PS1），让 loading 消失时立即可见
-                // 然后 activateSession 让 ssh-service 开始通过 'ssh:data' emit 后续增量数据
                 try {
                     const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
                     if (bufferResult && bufferResult.success && bufferResult.buffer && terminalInfo?.term) {
@@ -520,6 +521,7 @@ class ConnectionManager {
                 } catch (err) {
                     console.warn(`[连接] 加载缓冲区数据失败:`, err);
                 }
+
                 try {
                     await window.api.ssh.activateSession(result.sessionId);
                 } catch (err) {
@@ -678,20 +680,20 @@ class ConnectionManager {
                     });
                 }
                 
-                // 异步加载会话缓冲区
-                setTimeout(async () => {
-                    try {
-                        // 获取缓冲区数据
-                        const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
-                        if (bufferResult && bufferResult.success && bufferResult.buffer && 
-                            window.terminalManager.activeTerminal) {
-                            // 写入缓冲区数据
-                            window.terminalManager.activeTerminal.write(bufferResult.buffer);
-                        }
-                    } catch (err) {
-                        console.warn(`[表单连接] 加载缓冲区数据失败:`, err);
+                // 同步：fetch buffer → write → activate，与 connectToSaved 保持一致
+                try {
+                    const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
+                    if (bufferResult?.success && bufferResult.buffer && terminalInfo?.term) {
+                        terminalInfo.term.write(bufferResult.buffer);
                     }
-                }, 50);
+                } catch (err) {
+                    console.warn(`[表单连接] 加载缓冲区数据失败:`, err);
+                }
+                try {
+                    await window.api.ssh.activateSession(result.sessionId);
+                } catch (err) {
+                    console.warn(`[表单连接] 激活会话失败:`, err);
+                }
 
                 // 更新连接列表（已包含活跃状态更新）
                 await this.loadConnections();

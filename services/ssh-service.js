@@ -3,6 +3,7 @@ const {EventEmitter} = require('events');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const crypto = require('crypto');
 
 // 把任意字符串安全地包成 POSIX shell 单引号字面量，防注入
@@ -58,6 +59,33 @@ class SshService extends EventEmitter {
 
         // 设置定期清理过期连接
         this._cleanupTimer = setInterval(() => this.cleanExpiredConnections(), 30000); // 每30秒清理一次
+    }
+
+    /**
+     * 预热连接：提前建立 TCP+SSH 通道放入连接池，用户点击时直接复用，
+     * 跳过 ~700ms 的握手 + sshd fork 冷启动。
+     * 不创建 session，不占 refCount，10 分钟无人使用按正常逻辑回收。
+     * @param {Object} connectionDetails
+     * @returns {Promise<boolean>}
+     */
+    async prewarmConnection(connectionDetails) {
+        try {
+            if (!connectionDetails?.host || !connectionDetails.username) return false;
+            const t0 = Date.now();
+            const result = await this.getOrCreateConnection(connectionDetails);
+            if (!result.isNew) {
+                console.log(`[prewarm] ${connectionDetails.host} 已在池中`);
+                return true;
+            }
+            await this.setupConnection(result.conn, result.connectionObj, result.connectOptions, result.connectionKey);
+            // setupConnection 在 ready 时 refCount++ 设为 1；预热不占用，归零让正常清理逻辑生效
+            result.connectionObj.refCount = 0;
+            console.log(`[timing] prewarm ${connectionDetails.host} 完成 ${Date.now() - t0}ms`);
+            return true;
+        } catch (e) {
+            console.warn(`[prewarm] ${connectionDetails?.host} 失败:`, e.message);
+            return false;
+        }
     }
 
     /**
@@ -238,6 +266,17 @@ class SshService extends EventEmitter {
     setupConnection(conn, connectionObj, connectOptions, connectionKey) {
         const t0 = Date.now();
         console.log(`[timing] ${connectionKey} 开始 TCP+SSH 握手`);
+
+        // 关键性能优化：自己建 socket 并禁用 Nagle。
+        // ssh2 默认不设 TCP_NODELAY，Nagle 会让 channel/pty/shell 等多 RTT 协议每步多 ~40ms 延迟，
+        // 实测 fro2 服务器从 414ms → 150ms（2.7x 提速）。OpenSSH 默认就是 NODELAY。
+        if (!connectOptions.sock) {
+            const sock = net.connect({host: connectOptions.host, port: connectOptions.port});
+            sock.setNoDelay(true);
+            sock.on('error', () => { /* 让 ssh2 通过 client error 报告即可 */ });
+            connectOptions.sock = sock;
+        }
+
         return new Promise((resolve, reject) => {
             // 设置事件监听
             conn.on('ready', () => {
@@ -294,6 +333,37 @@ class SshService extends EventEmitter {
         });
     }
 
+
+    /**
+     * 等待会话 buffer 出现首块数据（或超时）。
+     * 用于在 connect() 返回前确保 welcome/PS1 已落入 buffer，避免 UI 黑屏间隙。
+     * @param {string} sessionId
+     * @param {number} timeoutMs
+     */
+    waitForFirstData(sessionId, timeoutMs = 400) {
+        return new Promise((resolve) => {
+            const session = this.sessions.get(sessionId);
+            if (!session || (session.buffer && session.buffer.length > 0)) {
+                return resolve();
+            }
+            const stream = session.stream;
+            if (!stream) return resolve();
+
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                stream.removeListener('data', onData);
+                stream.stderr?.removeListener?.('data', onData);
+                clearTimeout(timer);
+                resolve();
+            };
+            const onData = () => finish();
+            const timer = setTimeout(finish, timeoutMs);
+            stream.once('data', onData);
+            stream.stderr?.once?.('data', onData);
+        });
+    }
 
     /**
      * 创建shell会话
@@ -501,6 +571,7 @@ class SshService extends EventEmitter {
             // active 初始为 false：shell 启动早期数据只进 buffer 不 emit，
             // 避免和 renderer 端 getSessionBuffer 写入产生双写。
             // renderer 完成 initTerminal+写入 buffer 后调 activateSession 才开始 emit。
+            // shellPending 表示 shell 通道仍在异步建立中，sendData/resize 此时入队。
             this.sessions.set(sessionId, {
                 conn,
                 stream: null,
@@ -508,7 +579,11 @@ class SshService extends EventEmitter {
                 connectionKey,
                 connectionId: connectionDetails.id,
                 active: false,
-                buffer: ''
+                buffer: '',
+                bufferReadLen: 0,
+                shellPending: true,
+                pendingWrites: [],
+                pendingResize: null
             });
             
             // 保存连接ID到会话ID的映射
@@ -528,7 +603,7 @@ class SshService extends EventEmitter {
                 connectionObj.lastUsed = Date.now();
             }
             
-            // 等 shell 就绪后再返回，UI 显示终端时立刻有提示符
+            // 等 shell 就绪再返回；异步 shell 会让 loading 关掉后出现黑屏空 xterm。
             const tShell = Date.now();
             const stream = await this.createShellSession(sessionId, conn);
             console.log(`[timing] shell 启动耗时 ${Date.now() - tShell}ms`);
@@ -536,8 +611,14 @@ class SshService extends EventEmitter {
             const session = this.sessions.get(sessionId);
             if (session) {
                 session.stream = stream;
+                session.shellPending = false;
                 this.sessions.set(sessionId, session);
             }
+
+            // shell 通道打开 != server 已发出 welcome/PS1。再等一小段，
+            // 让首块数据落进 buffer，这样 renderer getSessionBuffer 就能拿到回显，
+            // loading 关掉后立即可见，避免"空终端 → 闪烁光标 → 才出回显"。
+            await this.waitForFirstData(sessionId, 400);
 
             console.log(`[timing] connect 总耗时 ${Date.now() - tConnect}ms (会话 ${sessionId})`);
             return { sessionId };
@@ -697,10 +778,20 @@ class SshService extends EventEmitter {
         this.sessions.set(sessionId, session);
         console.log(`[activateSession] 会话 ${sessionId} 已标记为活跃`);
 
-        // 如果存在流，直接返回成功
-        if (session.stream) {
+        // 异步 shell 路径下，getSessionBuffer 和 active=true 之间可能落进新数据，
+        // 这些数据因 active=false 被吞没；这里把 bufferReadLen 之后的内容补 emit 一次。
+        const buf = session.buffer || '';
+        if (buf.length > (session.bufferReadLen || 0)) {
+            const tail = buf.slice(session.bufferReadLen);
+            session.bufferReadLen = buf.length;
+            this.sessions.set(sessionId, session);
+            this.emit('data', sessionId, tail);
+        }
+
+        // 如果存在流（或正在异步建立），直接返回成功
+        if (session.stream || session.shellPending) {
             return {success: true, sessionId};
-        } 
+        }
         
         console.warn(`[activateSession] 会话 ${sessionId} 没有可用的stream，尝试重新建立连接`);
 
@@ -1967,9 +2058,14 @@ class SshService extends EventEmitter {
             return {success: false, error: '会话未找到'};
         }
 
+        const buffer = session.buffer || '';
+        // 记录 renderer 已读到的位置；activateSession 会把这之后到达但未 emit 的数据补 emit。
+        session.bufferReadLen = buffer.length;
+        this.sessions.set(sessionId, session);
+
         return {
             success: true,
-            buffer: session.buffer || ''
+            buffer
         };
     }
 

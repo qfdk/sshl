@@ -253,26 +253,37 @@ app.whenReady().then(() => {
     // 创建窗口
     createWindow();
 
-    // 预热 SSH 栈：require 模块 + 构造 Client 触发 native binding 完整初始化
-    // + 预解析已保存连接的 DNS。避免重启后首次连接的冷启动开销
+    // 预热 SSH 栈：模块/native binding/DNS + 对有凭据的连接预建 TCP+SSH，
+    // 让用户首次点击时直接复用池中连接，跳过 ~700ms 冷启动握手。
     setImmediate(async () => {
         try {
-            getSshService();
+            const sshService = getSshService();
             const {Client} = require('ssh2');
-            // 构造一次但不连接，强制 ssh2 加载 cpu-features / native binding
             const probe = new Client();
             try { probe.end(); } catch {}
 
-            // 预解析已保存连接的 host，热 OS DNS 缓存
+            const conns = getConfigStore().getConnections();
+
+            // DNS 预热
             try {
                 const dns = require('dns').promises;
-                const conns = getConfigStore().getConnections();
                 const hosts = [...new Set(conns.map(c => c?.host).filter(Boolean))];
-                await Promise.all(hosts.map(h =>
-                    dns.lookup(h).catch(() => null)
-                ));
+                await Promise.all(hosts.map(h => dns.lookup(h).catch(() => null)));
             } catch (e) {
                 console.warn('DNS 预解析失败:', e.message);
+            }
+
+            // SSH 连接预热：只对有可用凭据的（不需要弹密码），并发但限流避免一窝蜂
+            const warmable = conns.filter(c => {
+                if (!c?.host || !c?.username) return false;
+                if (c.authType === 'privateKey') return !!c.privateKey;
+                return !!c.password;
+            });
+            if (warmable.length === 0) return;
+            console.log(`[prewarm] 开始预热 ${warmable.length} 个连接`);
+            // 串行避免并发握手把网络/server 打爆
+            for (const c of warmable) {
+                await sshService.prewarmConnection(c).catch(() => null);
             }
         } catch (e) {
             console.warn('SSH 服务预热失败:', e.message);

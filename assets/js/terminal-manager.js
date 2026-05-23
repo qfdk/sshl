@@ -259,48 +259,29 @@ class TerminalManager {
             const term = result.term;
             const fitAddon = result.fitAddon;
     
-            // 确保终端可见并聚焦
             container.style.display = 'block';
-            setTimeout(() => {
-                if (term) {
-                    try {
-                        term.focus();
-                    } catch (err) {
-                        console.warn(`[initTerminal] 无法聚焦终端:`, err);
+
+            // showBuffer=false 时由调用方自行拉缓冲区（避免重复 IPC）
+            if (showBuffer) {
+                let sessionBuffer = '';
+                try {
+                    if (window.api?.ssh?.getSessionBuffer) {
+                        const updatedSessionInfo = await window.api.ssh.getSessionBuffer(sessionId);
+                        if (updatedSessionInfo && updatedSessionInfo.success) {
+                            sessionBuffer = updatedSessionInfo.buffer || '';
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`[initTerminal] 获取会话缓冲区失败:`, err);
+                    if (existingSession && existingSession.buffer) {
+                        sessionBuffer = existingSession.buffer;
                     }
                 }
-            }, 50);
-    
-            // 获取会话缓冲区数据
-            let sessionBuffer = '';
-            try {
-                // 从服务获取最新的会话缓冲区
-                if (window.api && window.api.ssh && window.api.ssh.getSessionBuffer) {
-                    const updatedSessionInfo = await window.api.ssh.getSessionBuffer(sessionId);
-                    if (updatedSessionInfo && updatedSessionInfo.success) {
-                        sessionBuffer = updatedSessionInfo.buffer || '';
-                        console.log(`[initTerminal] 成功从服务获取缓冲区，长度: ${sessionBuffer.length}`);
-                    }
+                if (sessionBuffer) {
+                    term.write(sessionBuffer);
+                } else if (existingSession && existingSession.buffer) {
+                    term.write(existingSession.buffer);
                 }
-            } catch (err) {
-                console.warn(`[initTerminal] 获取会话缓冲区失败:`, err);
-                // 使用本地缓存的缓冲区作为后备
-                if (existingSession && existingSession.buffer) {
-                    sessionBuffer = existingSession.buffer;
-                    console.log(`[initTerminal] 使用本地缓存的缓冲区，长度: ${sessionBuffer.length}`);
-                }
-            }
-    
-            // 恢复缓冲区数据
-            if (showBuffer && sessionBuffer) {
-                console.log(`[initTerminal] 恢复会话 ${sessionId} 的终端缓冲区`);
-                term.write(sessionBuffer);
-            } else if (showBuffer && existingSession && existingSession.buffer) {
-                console.log(`[initTerminal] 恢复会话 ${sessionId} 的终端缓冲区（使用现有会话）`);
-                term.write(existingSession.buffer);
-            } else {
-                console.log(`[initTerminal] 不显示会话 ${sessionId} 的缓冲区数据`);
-                // 不写入缓冲区数据
             }
     
             // 设置全局变量
@@ -350,36 +331,22 @@ class TerminalManager {
             if (placeholder) {
                 placeholder.classList.add('hidden');
             }
-    
-            // 确保终端可见并聚焦
-            container.style.display = 'block';
-            setTimeout(() => {
-                if (term) {
-                    try {
-                        term.focus();
-                    } catch (err) {
-                        console.warn(`[initTerminal] 无法聚焦终端:`, err);
+
+            // 合并 focus + fit + resize 到一次 rAF，比叠加 50ms/100ms setTimeout 更快也更稳
+            requestAnimationFrame(() => {
+                try { term.focus(); } catch (err) { console.warn(`[initTerminal] 聚焦失败:`, err); }
+                if (!fitAddon) return;
+                try {
+                    fitAddon.fit();
+                    const dimensions = fitAddon.proposeDimensions();
+                    if (dimensions && window.api?.ssh) {
+                        window.api.ssh.resize(sessionId, dimensions.cols, dimensions.rows)
+                            .catch(err => console.error('初始化调整终端大小失败:', err));
                     }
+                } catch (err) {
+                    console.warn(`[initTerminal] 调整终端大小出错:`, err);
                 }
-            }, 50);
-    
-            // 调整终端大小并发送尺寸信息
-            setTimeout(() => {
-                if (fitAddon) {
-                    try {
-                        fitAddon.fit();
-    
-                        // 获取并发送终端尺寸
-                        const dimensions = fitAddon.proposeDimensions();
-                        if (dimensions && window.api && window.api.ssh) {
-                            window.api.ssh.resize(sessionId, dimensions.cols, dimensions.rows)
-                                .catch(err => console.error('初始化调整终端大小失败:', err));
-                        }
-                    } catch (err) {
-                        console.warn(`[initTerminal] 调整终端大小出错:`, err);
-                    }
-                }
-            }, 100);
+            });
     
             return {term, fitAddon};
         } catch (error) {
