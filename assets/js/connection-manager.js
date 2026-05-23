@@ -493,14 +493,11 @@ class ConnectionManager {
                     sessionId: result.sessionId
                 });
 
-                // 添加一个小延迟，让服务器有时间发送欢迎消息
-                await new Promise(resolve => setTimeout(resolve, 100));
-
-                // 初始化终端 - 先创建空白终端，稍后添加内容
+                // 初始化终端
                 const terminalInfo = await window.terminalManager.initTerminal(
-                    result.sessionId, 
-                    null, 
-                    false,  // 不显示缓冲区，稍后再加载
+                    result.sessionId,
+                    null,
+                    false,  // 不在 initTerminal 内部加载缓冲区，下面同步写入
                     true    // 先清空容器
                 );
 
@@ -512,21 +509,22 @@ class ConnectionManager {
                         name: connection.name
                     });
                 }
-                
-                // 异步加载会话缓冲区
-                setTimeout(async () => {
-                    try {
-                        // 获取缓冲区数据
-                        const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
-                        if (bufferResult && bufferResult.success && bufferResult.buffer && 
-                            window.terminalManager.activeTerminal) {
-                            // 写入缓冲区数据
-                            window.terminalManager.activeTerminal.write(bufferResult.buffer);
-                        }
-                    } catch (err) {
-                        console.warn(`[连接] 加载缓冲区数据失败:`, err);
+
+                // 同步写入缓冲区（含欢迎消息和 PS1），让 loading 消失时立即可见
+                // 然后 activateSession 让 ssh-service 开始通过 'ssh:data' emit 后续增量数据
+                try {
+                    const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
+                    if (bufferResult && bufferResult.success && bufferResult.buffer && terminalInfo?.term) {
+                        terminalInfo.term.write(bufferResult.buffer);
                     }
-                }, 50);
+                } catch (err) {
+                    console.warn(`[连接] 加载缓冲区数据失败:`, err);
+                }
+                try {
+                    await window.api.ssh.activateSession(result.sessionId);
+                } catch (err) {
+                    console.warn(`[连接] 激活会话失败:`, err);
+                }
 
                 // 更新状态
                 window.uiManager.updateConnectionStatus(true, connection.name);

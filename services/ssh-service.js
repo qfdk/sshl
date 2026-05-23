@@ -498,13 +498,16 @@ class SshService extends EventEmitter {
                 await this.getOrCreateConnection(connectionDetails);
             
             // 创建会话对象
+            // active 初始为 false：shell 启动早期数据只进 buffer 不 emit，
+            // 避免和 renderer 端 getSessionBuffer 写入产生双写。
+            // renderer 完成 initTerminal+写入 buffer 后调 activateSession 才开始 emit。
             this.sessions.set(sessionId, {
                 conn,
                 stream: null,
                 details: connectionDetails,
                 connectionKey,
                 connectionId: connectionDetails.id,
-                active: true,
+                active: false,
                 buffer: ''
             });
             
@@ -525,12 +528,11 @@ class SshService extends EventEmitter {
                 connectionObj.lastUsed = Date.now();
             }
             
-            // 创建shell会话
+            // 等 shell 就绪后再返回，UI 显示终端时立刻有提示符
             const tShell = Date.now();
             const stream = await this.createShellSession(sessionId, conn);
             console.log(`[timing] shell 启动耗时 ${Date.now() - tShell}ms`);
 
-            // 更新会话，设置stream
             const session = this.sessions.get(sessionId);
             if (session) {
                 session.stream = stream;
@@ -609,6 +611,11 @@ class SshService extends EventEmitter {
             return { success: true, session, sessionId };
         }
 
+        // shell 正在异步建立中，调用方可走入队路径，无需重连
+        if (!session.stream && session.shellPending) {
+            return { success: true, session, sessionId };
+        }
+
         if (!session.stream) {
             console.error(`[${operationName}] 会话 ${sessionId} 的shell未启动`);
             try {
@@ -655,6 +662,13 @@ class SshService extends EventEmitter {
 
         // 确保data是字符串格式
         const dataStr = typeof data === 'string' ? data : data.toString('utf8');
+
+        // shell 还在异步建立：把数据排队，等就绪后 flush
+        if (!session.stream && session.shellPending) {
+            session.pendingWrites = session.pendingWrites || [];
+            session.pendingWrites.push(dataStr);
+            return { success: true };
+        }
 
         try {
             session.stream.write(dataStr);
@@ -779,6 +793,12 @@ class SshService extends EventEmitter {
         }
         
         const session = sessionResult.session;
+
+        // shell 还未就绪：仅记录目标尺寸，就绪后应用
+        if (!session.stream && session.shellPending) {
+            session.pendingResize = { rows, cols };
+            return { success: true };
+        }
 
         try {
             session.stream.setWindow(rows, cols, 0, 0);
