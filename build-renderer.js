@@ -21,14 +21,24 @@ if (!fs.existsSync(distDir)) {
 
 console.log('开始构建渲染进程HTML...');
 
+// 将 5 个 CSS 合并成单文件，省 4 次 app:// 协议往返
+const cssDir = path.join(__dirname, 'assets', 'css');
+const cssOrder = ['main.css', 'connection-dialog.css', 'file-manager.css', 'terminal.css', 'buttons.css'];
+const bundledCss = cssOrder.map(f => `/* ${f} */\n${fs.readFileSync(path.join(cssDir, f), 'utf8')}`).join('\n\n');
+const bundleOutDir = path.join(distDir, 'assets', 'css');
+fs.mkdirSync(bundleOutDir, {recursive: true});
+fs.writeFileSync(path.join(bundleOutDir, 'bundle.css'), bundledCss);
+console.log(`✓ CSS bundle: ${(bundledCss.length / 1024).toFixed(1)} KB`);
+
 // 编译EJS模板
 ejs.renderFile(
     path.join(viewsDir, 'index.ejs'),
     {
         title: 'SSHL客户端',
-        connections: [], // 空数组,由渲染进程通过IPC获取
+        connections: [],
         basePath: __dirname,
-        rendererScript: 'app://dist/assets/js/renderer.js' // 生产环境使用打包后的bundle
+        rendererScript: 'app://dist/assets/js/renderer.js',
+        cssBundle: 'app://dist/assets/css/bundle.css' // 生产用合并 CSS
     },
     { root: viewsDir },
     (err, html) => {

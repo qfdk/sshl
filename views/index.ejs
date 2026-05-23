@@ -3,26 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <title><%= title %></title>
-    <!-- Use absolute paths for CSS files -->
-    <% const assetPaths = [
-        'assets/css/main.css',
-        'assets/css/connection-dialog.css',
-        'assets/css/file-manager.css',
-        'assets/css/terminal.css',
-        'assets/css/buttons.css'
-    ] %>
+    <!-- CSS：生产用合并 bundle（少 4 次 app:// 往返），开发各自加载 -->
+    <% if (typeof cssBundle !== 'undefined' && cssBundle) { %>
+        <link rel="stylesheet" href="<%= cssBundle %>">
+    <% } else { %>
+        <% ['assets/css/main.css','assets/css/connection-dialog.css','assets/css/file-manager.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
+            <link rel="stylesheet" href="app://<%= cssPath %>">
+        <% }); %>
+    <% } %>
 
-    <% assetPaths.forEach(function(cssPath) { %>
-        <link rel="stylesheet" href="app://<%= cssPath %>">
-    <% }); %>
-
-    <!-- 预加载 xterm.js 与 fit addon，避免首次连接时再动态下载（之前会让首连接卡 5-10s） -->
+    <!-- xterm.css 预加载，xterm.js (~283KB) 不预加载——用 preload 提前下载
+         但不解析；terminal-manager.js 首次创建终端时才 import 解析。
+         这样 app 启动跳过 xterm parse (~300ms)，第一次连接的代价已被 SSH 握手掩盖。 -->
     <link rel="stylesheet" href="app://node_modules/xterm/css/xterm.css">
-    <script src="app://node_modules/xterm/lib/xterm.js"></script>
-    <script src="app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
-
-    <!-- ES Module 兼容性检查 -->
-    <script src="app://assets/js/polyfill.js"></script>
+    <link rel="preload" as="script" href="app://node_modules/xterm/lib/xterm.js">
+    <link rel="preload" as="script" href="app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js">
 </head>
 <body>
 <div class="app-container">

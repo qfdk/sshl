@@ -118,10 +118,10 @@ function createWindow() {
         renderAndLoadInterface();
     }
 
-    // 窗口准备好后最大化并显示
+    // 先 show 再 maximize：用户感知更快（看见窗口立刻出现，再一帧最大化）
     mainWindow.once('ready-to-show', () => {
-        mainWindow.maximize();
         mainWindow.show();
+        mainWindow.maximize();
     });
 
     // 窗口关闭时删除临时文件
@@ -247,10 +247,7 @@ function handleDownloadProgress(progressData) {
 
 // 应用初始化
 app.whenReady().then(() => {
-    // 注册协议处理器
     registerProtocols();
-
-    // 创建窗口
     createWindow();
 
     // 预热 SSH 栈：模块/native binding/DNS + 对有凭据的连接预建 TCP+SSH，
