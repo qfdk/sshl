@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Build the renderer payload for the Tauri app.
- *   1. Mirror ../assets, ../views, and the xterm npm packages into tauri-app/src/.
- *   2. Render views/index.ejs to tauri-app/src/index.html with Tauri-friendly paths
+ *   1. Mirror ./assets, ./views, and the xterm npm packages into ./src/.
+ *   2. Render views/index.ejs to ./src/index.html with Tauri-friendly paths
  *      (no app:// protocol, no /node_modules, ipc-bridge.js injected before main).
  *   3. Patch terminal-manager.js's hard-coded app:// xterm paths to use vendor/.
  */
@@ -10,8 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const ejs = require('ejs');
 
-const ROOT = path.resolve(__dirname, '..');
-const OUT_DIR = path.resolve(__dirname, 'src');
+const ROOT = __dirname;
+const OUT_DIR = path.join(ROOT, 'src');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
 
 function rmrf(p) {
