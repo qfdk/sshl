@@ -33,9 +33,11 @@ cpDir(path.join(ROOT, 'views'), path.join(OUT_DIR, 'views'));
 fs.mkdirSync(path.join(OUT_DIR, 'vendor/xterm/lib'), { recursive: true });
 fs.mkdirSync(path.join(OUT_DIR, 'vendor/xterm/css'), { recursive: true });
 fs.mkdirSync(path.join(OUT_DIR, 'vendor/xterm-addon-fit/lib'), { recursive: true });
+fs.mkdirSync(path.join(OUT_DIR, 'vendor/xterm-addon-canvas/lib'), { recursive: true });
 fs.copyFileSync(path.join(NODE_MODULES, 'xterm/lib/xterm.js'), path.join(OUT_DIR, 'vendor/xterm/lib/xterm.js'));
 fs.copyFileSync(path.join(NODE_MODULES, 'xterm/css/xterm.css'), path.join(OUT_DIR, 'vendor/xterm/css/xterm.css'));
 fs.copyFileSync(path.join(NODE_MODULES, 'xterm-addon-fit/lib/xterm-addon-fit.js'), path.join(OUT_DIR, 'vendor/xterm-addon-fit/lib/xterm-addon-fit.js'));
+fs.copyFileSync(path.join(NODE_MODULES, 'xterm-addon-canvas/lib/xterm-addon-canvas.js'), path.join(OUT_DIR, 'vendor/xterm-addon-canvas/lib/xterm-addon-canvas.js'));
 
 // 2. Patch terminal-manager.js's hard-coded app:// xterm references
 const tmPath = path.join(OUT_DIR, 'assets/js/terminal-manager.js');

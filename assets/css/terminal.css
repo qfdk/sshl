@@ -1,12 +1,12 @@
-/* 终端基本样式 —— font-family/font-size 交给 xterm options 控制 */
+/* 终端基本样式 —— font-family/font-size/line-height 交给 xterm options 控制 */
+/* 适度内边距：文字与窗口边框之间留呼吸感（背景色与 xterm theme.background 一致，不会出现可见接缝） */
 .terminal-container .xterm {
-    line-height: 1.2 !important;
-    padding: 18px 10px 12px !important;
+    padding: 8px !important;
 }
 
 /* 简单颜色修复 */
 .terminal-container {
-    background-color: #1e1e1e !important;
+    background-color: #1e1e2e !important;
 }
 
 /* 修复终端容器尺寸 */
@@ -28,7 +28,7 @@
 .terminal-container .xterm-viewport {
     overflow-y: auto !important;
     scrollbar-width: thin !important;
-    scrollbar-color: #444 #1e1e1e !important;
+    scrollbar-color: #444 #1e1e2e !important;
 }
 
 /* 优化终端滚动条 */
@@ -37,7 +37,7 @@
 }
 
 .terminal-container .xterm-viewport::-webkit-scrollbar-track {
-    background: #1e1e1e !important;
+    background: #1e1e2e !important;
 }
 
 .terminal-container .xterm-viewport::-webkit-scrollbar-thumb {

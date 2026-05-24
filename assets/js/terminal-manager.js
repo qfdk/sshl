@@ -3,6 +3,88 @@
 
 import { getTerminalSettings } from './settings.js';
 
+// Palette index → "#rrggbb"（xterm 256 色标准调色板）
+const ANSI_BASE_16 = [
+    '#000000','#cd3131','#0dbc79','#e5e510','#2472c8','#bc3fbc','#11a8cd','#e5e5e5',
+    '#666666','#f14c4c','#23d18b','#f5f543','#3b8eea','#d670d6','#29b8db','#e5e5e5'
+];
+function paletteToHex(idx) {
+    if (idx < 16) return ANSI_BASE_16[idx];
+    if (idx >= 232) {
+        const v = 8 + (idx - 232) * 10;
+        const h = Math.min(255, v).toString(16).padStart(2, '0');
+        return '#' + h + h + h;
+    }
+    const n = idx - 16;
+    const r = Math.floor(n / 36), g = Math.floor((n % 36) / 6), b = n % 6;
+    const lvl = v => (v === 0 ? 0 : 55 + v * 40).toString(16).padStart(2, '0');
+    return '#' + lvl(r) + lvl(g) + lvl(b);
+}
+
+// 采样 xterm 当前渲染区，取众数 bg color → "#rrggbb" 或 null（全部 default）
+function sampleDominantBg(term) {
+    try {
+        const buf = term.buffer.active;
+        const rows = term.rows, cols = term.cols;
+        const counts = new Map();
+        // 采样 4 个角 + 中心，每个 sample 取若干 cell
+        const samples = [
+            [0, 0], [0, cols - 1],
+            [rows - 1, 0], [rows - 1, cols - 1],
+            [rows >> 1, cols >> 1],
+            [rows >> 1, 0], [rows >> 1, cols - 1],
+        ];
+        for (const [y, x] of samples) {
+            const line = buf.getLine(buf.viewportY + y);
+            if (!line) continue;
+            const cell = line.getCell(x);
+            if (!cell) continue;
+            const mode = cell.getBgColorMode();
+            const c = cell.getBgColor();
+            let hex;
+            if (mode === 0) continue; // default → 用 theme.background，跳过
+            else if (mode === (1 << 24)) hex = paletteToHex(c); // P16/P256
+            else if (mode === (1 << 25)) {                       // RGB
+                hex = '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
+                          + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
+                          + (c & 0xff).toString(16).padStart(2, '0');
+            } else continue;
+            counts.set(hex, (counts.get(hex) || 0) + 1);
+        }
+        if (counts.size === 0) return null;
+        let best = null, max = 0;
+        for (const [k, v] of counts) if (v > max) { best = k; max = v; }
+        return best;
+    } catch (_) {
+        return null;
+    }
+}
+
+// OSC 11 payload → "#rrggbb"
+// 支持 "rgb:RRRR/GGGG/BBBB"、"rgb:RR/GG/BB"、"#rrggbb"、"#rgb"
+function parseOscColor(data) {
+    if (!data) return null;
+    const s = String(data).trim();
+    if (s.startsWith('#')) {
+        if (/^#[0-9a-fA-F]{6}$/.test(s)) return s.toLowerCase();
+        if (/^#[0-9a-fA-F]{3}$/.test(s)) {
+            return '#' + [...s.slice(1)].map(c => c + c).join('').toLowerCase();
+        }
+        return null;
+    }
+    const m = s.match(/^rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)$/);
+    if (!m) return null;
+    const toHex2 = (h) => {
+        if (h.length === 0) return '00';
+        // X11 spec: 1/2/3/4 hex digits, scale to 8-bit
+        const v = parseInt(h, 16);
+        const max = (1 << (h.length * 4)) - 1;
+        const b = Math.round((v / max) * 255);
+        return b.toString(16).padStart(2, '0');
+    };
+    return ('#' + toHex2(m[1]) + toHex2(m[2]) + toHex2(m[3])).toLowerCase();
+}
+
 // 防抖函数
 function debounce(func, wait) {
     let timeout;
@@ -86,7 +168,7 @@ class TerminalManager {
                                 fontSize: userSettings.fontSize,
                                 fontFamily: userSettings.fontFamily,
                                 theme: {
-                                    background: '#1e1e1e',
+                                    background: '#1e1e2e',
                                     foreground: '#f0f0f0',
                                     cursor: '#ffffff'
                                 },
@@ -156,7 +238,7 @@ class TerminalManager {
                         fontSize: userSettings.fontSize,
                         fontFamily: userSettings.fontFamily,
                         theme: {
-                            background: '#1e1e1e',
+                            background: '#1e1e2e',
                             foreground: '#f0f0f0',
                             cursor: '#ffffff'
                         },
@@ -171,7 +253,7 @@ class TerminalManager {
     
                     term.open(container);
                     fitAddon.fit();
-    
+
                     // 添加窗口大小调整事件监听器
                     window.addEventListener('resize', () => {
                         fitAddon.fit();
@@ -215,6 +297,12 @@ class TerminalManager {
 
         const placeholder = document.getElementById('terminal-placeholder');
         if (placeholder) placeholder.classList.add('hidden');
+
+        // 切回该 session 时恢复其上次 OSC 11 报告的背景色（Ghostty extend 风格）
+        if (entry.bgColor) {
+            const c = document.getElementById('terminal-container');
+            if (c) c.style.backgroundColor = entry.bgColor;
+        }
 
         requestAnimationFrame(() => {
             try { entry.term.focus(); } catch (err) { console.warn('[showTerminal] focus 失败:', err); }
@@ -274,7 +362,7 @@ class TerminalManager {
                 fontSize: userSettings.fontSize,
                 fontFamily: userSettings.fontFamily,
                 theme: {
-                    background: '#1e1e1e',
+                    background: '#1e1e2e',
                     foreground: '#FBF74B',
                     cursor: '#FBF74B'
                 },
@@ -284,6 +372,50 @@ class TerminalManager {
             };
 
             const { term, fitAddon } = await this.createXterm(host, termOptions);
+
+            // 自适应 padding 颜色：每次渲染采样实际 cell bg → 同步到 host/container
+            // 让 padding 区域永远跟当前程序的背景色一致（vim/nvim 切主题也无缝）
+            const applyBg = (color) => {
+                if (!color) return;
+                host.style.backgroundColor = color;
+                if (this.activeSessionId === sessionId) {
+                    const c = document.getElementById('terminal-container');
+                    if (c) c.style.backgroundColor = color;
+                }
+                const e = this.terminals.get(sessionId);
+                if (e) e.bgColor = color;
+            };
+            const renderTick = debounce(() => {
+                const c = sampleDominantBg(term);
+                if (c) applyBg(c);
+            }, 60);
+            try {
+                term.onRender(renderTick);
+            } catch (err) {
+                console.warn('[initTerminal] onRender 订阅失败:', err);
+            }
+
+            // OSC 11（程序显式设置背景色）→ 优先级最高
+            // 让"padding"颜色永远跟随当前程序的 bg，消除 vim/nvim 全屏时的可见黑边
+            try {
+                term.parser.registerOscHandler(11, (data) => {
+                    const color = parseOscColor(data);
+                    if (!color) return false;
+                    try {
+                        term.options.theme = { ...(term.options.theme || {}), background: color };
+                    } catch (_) {}
+                    host.style.backgroundColor = color;
+                    if (this.activeSessionId === sessionId) {
+                        const c = document.getElementById('terminal-container');
+                        if (c) c.style.backgroundColor = color;
+                    }
+                    const e = this.terminals.get(sessionId);
+                    if (e) e.bgColor = color;
+                    return true;
+                });
+            } catch (err) {
+                console.warn('[initTerminal] OSC 11 handler 注册失败:', err);
+            }
 
             // 数据处理器绑定到该 session（每个 xterm 各自独立）
             let dataDisposer = null;
