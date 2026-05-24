@@ -329,14 +329,8 @@ class UIManager {
                 sidebar.classList.toggle('collapsed');
 
                 // 更新箭头方向
-                const arrowIcon = sidebarToggle.querySelector('svg path');
-                if (sidebar.classList.contains('collapsed')) {
-                    // 侧边栏已折叠，箭头指向右侧 (>)
-                    arrowIcon.setAttribute('d', 'M9 18l6-6-6-6');
-                } else {
-                    // 侧边栏已展开，箭头指向左侧 (<)
-                    arrowIcon.setAttribute('d', 'M15 18l-6-6 6-6');
-                }
+                const collapsed = sidebar.classList.contains('collapsed');
+                sidebarToggle.innerHTML = window.Icons.svg(collapsed ? 'chevron-right' : 'chevron-left', 16);
 
                 // 侧边栏展开时，隐藏任何可能显示的工具提示
                 if (!sidebar.classList.contains('collapsed')) {

@@ -40,10 +40,7 @@ class ConnectionManager {
 
                     const disconnectBtn = isConnected ? `
                             <button class="icon-button disconnect-connection" data-session-id="${existingSessionInfo.sessionId}" title="断开连接">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M18.36 6.64a9 9 0 11-12.73 0"/>
-                                    <line x1="12" y1="2" x2="12" y2="12"/>
-                                </svg>
+                                ${window.Icons.svg('power', 12)}
                             </button>` : '';
 
                     item.innerHTML = `
@@ -52,15 +49,10 @@ class ConnectionManager {
                         <div class="connection-actions">
                             ${disconnectBtn}
                             <button class="icon-button edit-connection" data-id="${connection.id}" title="编辑连接">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                                    <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                                </svg>
+                                ${window.Icons.svg('square-pen', 12)}
                             </button>
                             <button class="icon-button delete-connection" data-id="${connection.id}" title="删除连接">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
-                                </svg>
+                                ${window.Icons.svg('trash-2', 12)}
                             </button>
                         </div>
                     `;
@@ -121,7 +113,7 @@ class ConnectionManager {
                 btn.className = 'icon-button disconnect-connection';
                 btn.setAttribute('data-session-id', sessionInfo.sessionId);
                 btn.setAttribute('title', '断开连接');
-                btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>`;
+                btn.innerHTML = window.Icons.svg('power', 12);
                 actions.insertBefore(btn, actions.firstChild);
             } else if (!isConnected && existingBtn) {
                 existingBtn.remove();
