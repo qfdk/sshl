@@ -213,7 +213,6 @@ class TerminalManager {
         this.activeSessionId = sessionId;
         window.terminalFitAddon = entry.fitAddon;
 
-        this.createTerminalTab(sessionId);
         const placeholder = document.getElementById('terminal-placeholder');
         if (placeholder) placeholder.classList.add('hidden');
 
@@ -318,8 +317,6 @@ class TerminalManager {
             this.activeSessionId = sessionId;
             window.terminalFitAddon = fitAddon;
 
-            this.createTerminalTab(sessionId);
-
             const placeholder = document.getElementById('terminal-placeholder');
             if (placeholder) placeholder.classList.add('hidden');
 
@@ -365,31 +362,6 @@ class TerminalManager {
         }
     }
     
-    // 创建终端标签
-    createTerminalTab(sessionId) {
-        const tabsContainer = document.getElementById('terminal-tabs-left');
-        if (!tabsContainer) {
-            return;
-        }
-    
-        tabsContainer.innerHTML = '';
-    
-        const tab = document.createElement('div');
-        tab.className = 'terminal-tab active';
-        tab.innerHTML = `
-          <span>终端</span>
-          <button class="close-tab" data-session-id="${sessionId}">×</button>
-        `;
-    
-        tabsContainer.appendChild(tab);
-    
-        // 为关闭按钮添加事件监听
-        const closeBtn = tab.querySelector('.close-tab');
-        if (closeBtn) {
-            closeBtn.addEventListener('click', () => this.disconnectSession(sessionId));
-        }
-    }
-
     /**
      * 断开指定会话；如果是当前活跃会话，会清理终端 UI。
      * 切换连接不会触发此方法（切换只换前台显示）。
@@ -397,6 +369,24 @@ class TerminalManager {
     async disconnectSession(sessionId) {
         if (!sessionId) return;
         const isActive = window.currentSessionId === sessionId;
+
+        // 当前在文件管理标签或正在传输文件时，断开前需确认（Tauri 原生 confirm 不可靠，走 plugin dialog）
+        const fm = window.fileManager;
+        const transferring = fm && fm.activeTransfers > 0;
+        const onFileTab = window.activeTabId === 'file-manager';
+        if (transferring || onFileTab) {
+            const msg = transferring
+                ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？'
+                : '当前正在使用文件管理，断开连接会关闭文件传输。\n确定要断开吗？';
+            try {
+                const ok = await window.api.dialog.confirm(msg, '断开连接');
+                if (!ok) return;
+            } catch (err) {
+                console.error('[disconnectSession] confirm failed:', err);
+                // 兜底：dialog 不可用时退回原生 confirm
+                if (!confirm(msg)) return;
+            }
+        }
 
         try {
             await window.api.ssh.disconnect(sessionId);
@@ -415,9 +405,6 @@ class TerminalManager {
 
             const placeholder = document.getElementById('terminal-placeholder');
             if (placeholder) placeholder.classList.remove('hidden');
-
-            const tabsContainer = document.getElementById('terminal-tabs-left');
-            if (tabsContainer) tabsContainer.innerHTML = '';
 
             window.uiManager.updateConnectionStatus(false);
             window.uiManager.updateServerInfo(false);

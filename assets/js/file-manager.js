@@ -47,6 +47,7 @@ class FileManager {
         this.localFileCache = new LRUCache(50); // 增加缓存大小
         this.lastLocalDirectory = null; // 记住上次的本地目录
         this.fileManagerInitialized = false; // 文件管理器是否已初始化
+        this.activeTransfers = 0; // 正在进行的传输任务数
         
         // DOM 元素缓存
         this.domCache = {
@@ -500,6 +501,7 @@ class FileManager {
             return;
         }
 
+        this.activeTransfers++;
         try {
             // 显示传输状态栏
             window.uiManager.showTransferStatus(true);
@@ -547,9 +549,11 @@ class FileManager {
             console.error('上传文件失败:', error);
             alert(`上传文件失败: ${error.message}`);
             window.uiManager.showTransferStatus(false);
+        } finally {
+            this.activeTransfers = Math.max(0, this.activeTransfers - 1);
         }
     }
-    
+
     // 下载文件
     async downloadFile(remotePath, localFilePath) {
         if (!window.currentSessionId) {
@@ -557,19 +561,18 @@ class FileManager {
             return;
         }
 
-        try {
-            // 如果未指定本地路径，请求用户选择保存位置
-            if (!localFilePath) {
-                const result = await window.api.dialog.selectDirectory();
-                if (result.canceled) {
-                    return;
-                }
-
-                // 拼接完整路径（目录+文件名）
-                const fileName = this.path.basename(remotePath);
-                localFilePath = this.path.join(result.directoryPath, fileName);
+        // 如果未指定本地路径，请求用户选择保存位置（先于计数器，避免取消时残留）
+        if (!localFilePath) {
+            const result = await window.api.dialog.selectDirectory();
+            if (result.canceled) {
+                return;
             }
+            const fileName = this.path.basename(remotePath);
+            localFilePath = this.path.join(result.directoryPath, fileName);
+        }
 
+        this.activeTransfers++;
+        try {
             // 显示传输状态栏
             window.uiManager.showTransferStatus(true);
 
@@ -609,9 +612,11 @@ class FileManager {
             console.error('下载文件失败:', error);
             alert(`下载文件失败: ${error.message}`);
             window.uiManager.showTransferStatus(false);
+        } finally {
+            this.activeTransfers = Math.max(0, this.activeTransfers - 1);
         }
     }
-    
+
     // 删除远程文件
     async deleteRemoteFile(filePath) {
         if (!window.currentSessionId) {
@@ -619,7 +624,7 @@ class FileManager {
             return;
         }
 
-        if (!confirm(`确定要删除文件 "${this.path.basename(filePath)}" 吗？此操作不可恢复！`)) {
+        if (!(await window.api.dialog.confirm(`确定要删除文件 "${this.path.basename(filePath)}" 吗？此操作不可恢复！`, '删除文件'))) {
             return;
         }
 
@@ -660,7 +665,7 @@ class FileManager {
             return;
         }
 
-        if (!confirm(`确定要删除目录 "${this.path.basename(dirPath)}" 及其所有内容吗？此操作不可恢复！`)) {
+        if (!(await window.api.dialog.confirm(`确定要删除目录 "${this.path.basename(dirPath)}" 及其所有内容吗？此操作不可恢复！`, '删除目录'))) {
             return;
         }
 
@@ -746,6 +751,7 @@ class FileManager {
             return;
         }
 
+        this.activeTransfers++;
         try {
             // 显示传输状态栏
             window.uiManager.showTransferStatus(true);
@@ -791,9 +797,11 @@ class FileManager {
 
             // 出错立即隐藏进度条
             window.uiManager.showTransferStatus(false);
+        } finally {
+            this.activeTransfers = Math.max(0, this.activeTransfers - 1);
         }
     }
-    
+
     // 选择并上传目录
     async selectAndUploadDirectory(remotePath) {
         if (!window.currentSessionId) {
@@ -825,18 +833,16 @@ class FileManager {
             return;
         }
 
+        // 请求用户选择保存位置（先于计数器，避免取消时残留）
+        const result = await window.api.dialog.selectDirectory();
+        if (result.canceled) {
+            return;
+        }
+        const dirName = this.path.basename(remoteDirPath);
+        const localDirPath = this.path.join(result.directoryPath, dirName);
+
+        this.activeTransfers++;
         try {
-            // 请求用户选择保存位置
-            const result = await window.api.dialog.selectDirectory();
-            if (result.canceled) {
-                return;
-            }
-
-            // 获取目录名称
-            const dirName = this.path.basename(remoteDirPath);
-            // 与选择的路径连接
-            const localDirPath = this.path.join(result.directoryPath, dirName);
-
             // 显示传输状态栏
             window.uiManager.showTransferStatus(true);
 
@@ -876,12 +882,14 @@ class FileManager {
             console.error('下载文件夹失败:', error);
             alert(`下载文件夹失败: ${error.message}`);
             window.uiManager.showTransferStatus(false);
+        } finally {
+            this.activeTransfers = Math.max(0, this.activeTransfers - 1);
         }
     }
-    
+
     // 删除本地文件
     async deleteLocalFile(filePath) {
-        if (!confirm(`确定要删除文件 "${this.path.basename(filePath)}" 吗？此操作不可恢复！`)) {
+        if (!(await window.api.dialog.confirm(`确定要删除文件 "${this.path.basename(filePath)}" 吗？此操作不可恢复！`, '删除文件'))) {
             return;
         }
 
@@ -905,7 +913,7 @@ class FileManager {
     
     // 删除本地目录
     async deleteLocalDirectory(dirPath) {
-        if (!confirm(`确定要删除目录 "${this.path.basename(dirPath)}" 及其所有内容吗？此操作不可恢复！`)) {
+        if (!(await window.api.dialog.confirm(`确定要删除目录 "${this.path.basename(dirPath)}" 及其所有内容吗？此操作不可恢复！`, '删除目录'))) {
             return;
         }
 

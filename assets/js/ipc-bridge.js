@@ -122,6 +122,10 @@
         if (result == null) return { canceled: true, filePaths: [] };
         return { canceled: false, filePaths: [Array.isArray(result) ? result[0] : result] };
       },
+      confirm: async (message, title) => {
+        const { ask } = tauri.dialog || (await import('@tauri-apps/plugin-dialog'));
+        return await ask(message, { title: title || '确认', kind: 'warning' });
+      },
     },
   };
 

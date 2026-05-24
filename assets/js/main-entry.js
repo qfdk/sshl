@@ -797,7 +797,7 @@ function initializeApp() {
             const id = btn.getAttribute('data-id');
 
             try {
-                if (confirm('确定要删除这个连接吗?')) {
+                if (await window.api.dialog.confirm('确定要删除这个连接吗?', '删除连接')) {
                     if (window.api && window.api.config) {
                         const result = await window.api.config.deleteConnection(id);
                         if (result) {
