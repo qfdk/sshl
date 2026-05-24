@@ -40,7 +40,7 @@ class ConnectionManager {
 
                     const disconnectBtn = isConnected ? `
                             <button class="icon-button disconnect-connection" data-session-id="${existingSessionInfo.sessionId}" title="断开连接">
-                                ${window.Icons.svg('power', 12)}
+                                ${window.Icons.svg('power', 14, 2.5)}
                             </button>` : '';
 
                     item.innerHTML = `
@@ -49,10 +49,10 @@ class ConnectionManager {
                         <div class="connection-actions">
                             ${disconnectBtn}
                             <button class="icon-button edit-connection" data-id="${connection.id}" title="编辑连接">
-                                ${window.Icons.svg('square-pen', 12)}
+                                ${window.Icons.svg('square-pen', 14, 2.5)}
                             </button>
                             <button class="icon-button delete-connection" data-id="${connection.id}" title="删除连接">
-                                ${window.Icons.svg('trash-2', 12)}
+                                ${window.Icons.svg('trash-2', 14, 2.5)}
                             </button>
                         </div>
                     `;

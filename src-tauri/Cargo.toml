@@ -30,8 +30,10 @@ russh-sftp = "2"
 # Filesystem & paths
 dirs = "5"
 
-# Credential storage (macOS Keychain)
-keyring = { version = "3", features = ["apple-native"] }
+# Credential storage (AES-GCM file-based; no Keychain prompts on rebuild)
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
 
 # Utilities
 anyhow = "1"

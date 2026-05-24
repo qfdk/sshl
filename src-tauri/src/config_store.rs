@@ -1,14 +1,13 @@
 // Persistent connection storage — replaces electron-store + safeStorage.
-// Plaintext metadata in ~/.sshl/connections.json; passwords/passphrases in macOS Keychain.
+// Metadata in ~/.sshl/connections.json (plaintext); credentials encrypted via crypto_store.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
+use crate::crypto_store;
 use crate::error::{AppError, AppResult};
-
-const KEYRING_SERVICE: &str = "me.qfdk.sshl";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,12 +113,10 @@ pub async fn config_save_connection(
     let has_passphrase = connection.passphrase.is_some();
 
     if let Some(pw) = &connection.password {
-        keyring::Entry::new(KEYRING_SERVICE, &format!("{}:password", id))?
-            .set_password(pw)?;
+        crypto_store::set(&id, "password", pw)?;
     }
     if let Some(pp) = &connection.passphrase {
-        keyring::Entry::new(KEYRING_SERVICE, &format!("{}:passphrase", id))?
-            .set_password(pp)?;
+        crypto_store::set(&id, "passphrase", pp)?;
     }
 
     let stored = StoredConnection {
@@ -151,10 +148,8 @@ pub async fn config_delete_connection(
     store: tauri::State<'_, ConfigStore>,
     id: String,
 ) -> AppResult<()> {
-    let _ = keyring::Entry::new(KEYRING_SERVICE, &format!("{}:password", id))
-        .and_then(|e| e.delete_credential());
-    let _ = keyring::Entry::new(KEYRING_SERVICE, &format!("{}:passphrase", id))
-        .and_then(|e| e.delete_credential());
+    crypto_store::delete(&id, "password");
+    crypto_store::delete(&id, "passphrase");
 
     let mut all = store.read_all().await?;
     all.retain(|c| c.id != id);
@@ -164,36 +159,7 @@ pub async fn config_delete_connection(
     Ok(())
 }
 
-/// Used by ssh::connect — pulls password/passphrase from Keychain if not provided inline.
+/// Used by ssh::connect — pulls password/passphrase from the encrypted store.
 pub fn load_secret(connection_id: &str, kind: &str) -> Option<String> {
-    keyring::Entry::new(KEYRING_SERVICE, &format!("{}:{}", connection_id, kind))
-        .ok()
-        .and_then(|e| e.get_password().ok())
-}
-
-/// One-shot migration: copy secrets from the old `com.qfdk.sshl` Keychain service
-/// to the new `me.qfdk.sshl` service for every known connection, then delete the
-/// old entries. Safe to run on every startup — no-ops once nothing's left.
-pub fn migrate_legacy_keychain(connection_ids: &[String]) {
-    const LEGACY: &str = "com.qfdk.sshl";
-    for id in connection_ids {
-        for kind in ["password", "passphrase"] {
-            let entry_name = format!("{}:{}", id, kind);
-            let Ok(legacy) = keyring::Entry::new(LEGACY, &entry_name) else { continue };
-            let Ok(secret) = legacy.get_password() else { continue };
-            if let Ok(new) = keyring::Entry::new(KEYRING_SERVICE, &entry_name) {
-                if new.get_password().is_err() {
-                    if let Err(e) = new.set_password(&secret) {
-                        tracing::warn!("migrate: write new {entry_name} failed: {e}");
-                        continue;
-                    }
-                }
-            }
-            if let Err(e) = legacy.delete_credential() {
-                tracing::warn!("migrate: delete legacy {entry_name} failed: {e}");
-            } else {
-                tracing::info!("migrate: moved {entry_name} from {LEGACY} to {KEYRING_SERVICE}");
-            }
-        }
-    }
+    crypto_store::get(connection_id, kind)
 }

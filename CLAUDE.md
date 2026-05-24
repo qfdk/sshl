@@ -19,13 +19,14 @@ build-renderer.cjs    copies ./assets, ./views, xterm vendor → src/, renders H
 package.json          pnpm scripts: dev / build / build:renderer
 src/                  GENERATED (git-ignored). Output of build-renderer.cjs
 src-tauri/
-├── Cargo.toml        russh + russh-sftp + keyring + tokio + tracing
-├── tauri.conf.json   SSHL identity, 1280×800 maximized, app+dmg bundle
+├── Cargo.toml        russh + russh-sftp + aes-gcm + tokio + tracing
+├── tauri.conf.json   SSHL identity, 1280×800 maximized, app bundle
 └── src/
     ├── lib.rs        registers invoke_handlers + setup hook (prewarm, eviction)
     ├── ssh.rs        russh client + per-session shell pump (TCP_NODELAY, gated emit, warm pool)
     ├── sftp.rs       russh-sftp with cached SftpSession (avoids MaxSessions)
-    ├── config_store.rs  ~/.sshl/connections.json + macOS Keychain
+    ├── config_store.rs  ~/.sshl/connections.json metadata
+    ├── crypto_store.rs  AES-256-GCM file store for passwords/passphrases
     ├── local_fs.rs   home dir, list, delete (with modifyTime)
     ├── state.rs      AppState: sessions + warm_pool
     └── error.rs      AppError → Serialize for IPC
@@ -36,7 +37,7 @@ src-tauri/
 ```bash
 pnpm install
 pnpm dev               # build-renderer + tauri dev
-pnpm build             # build-renderer + tauri build → SSHL.app + .dmg
+pnpm build             # build-renderer + tauri build --bundles app → SSHL.app
 ```
 
 Output: `src-tauri/target/release/bundle/macos/SSHL.app`.
@@ -50,11 +51,10 @@ Output: `src-tauri/target/release/bundle/macos/SSHL.app`.
 - **TCP_NODELAY** is set on the raw `TcpStream` before handing to russh — saved ~250ms first-connect vs default Nagle behavior.
 - **waitForFirstData(400ms)** — `ssh_connect` await `SshSession.first_data` Notify (signaled by first `append_to_buffer`) before returning, so welcome/PS1 lands in buffer before the renderer fetches it. No black-screen gap.
 - **Warm pool** — `AppState.warm_pool` keyed by `host:port:user` holds pre-authenticated `Handle`s. `setup()` prewarms every saved connection with credentials at startup; `ssh_connect` consumes a hit to skip handshake+auth. Background task evicts entries older than 10min.
-- **Credentials** — connection metadata in `~/.sshl/connections.json` plaintext; passwords/passphrases under keyring service `me.qfdk.sshl`, entry `{id}:password` / `{id}:passphrase`.
+- **Credentials** — connection metadata in `~/.sshl/connections.json` plaintext; passwords/passphrases AES-256-GCM encrypted in `~/.sshl/secrets.json` with `~/.sshl/master.key` (32B, mode 0600). No Keychain — rebuild cdhash changes would reprompt the user every time.
 - **Symlink handling** in `file_list` follows the link via `sftp.metadata(path)` when `S_IFLNK` is set, so `/bin → /usr/bin` shows correctly. mtime is `seconds × 1000` for JS `Date()`.
 
 ## Known stubs / next work
 
 - `ssh_execute` minimal — used only by file-manager for `rm`. Improve only when needed.
 - DevTools build feature is on (`tauri = { features = ["devtools"] }`); strip before public release.
-- `keyring` Apple Keychain prompts on first save — no GUI tuning yet.

@@ -14,8 +14,6 @@ pub enum AppError {
     SessionNotFound(String),
     #[error("config error: {0}")]
     Config(String),
-    #[error("keyring error: {0}")]
-    Keyring(String),
     #[error("{0}")]
     Other(String),
 }
@@ -35,12 +33,6 @@ impl From<anyhow::Error> for AppError {
 impl From<russh::Error> for AppError {
     fn from(e: russh::Error) -> Self {
         AppError::Ssh(e.to_string())
-    }
-}
-
-impl From<keyring::Error> for AppError {
-    fn from(e: keyring::Error) -> Self {
-        AppError::Keyring(e.to_string())
     }
 }
 

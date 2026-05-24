@@ -1,4 +1,5 @@
 mod config_store;
+mod crypto_store;
 mod error;
 mod local_fs;
 mod sftp;
@@ -9,7 +10,7 @@ use std::time::Duration;
 
 use tauri::Manager;
 
-use config_store::{load_secret, migrate_legacy_keychain, ConfigStore};
+use config_store::{load_secret, ConfigStore};
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -89,9 +90,6 @@ async fn prewarm_saved_connections(app: &tauri::AppHandle) {
             return;
         }
     };
-    let ids: Vec<String> = conns.iter().map(|c| c.id.clone()).collect();
-    migrate_legacy_keychain(&ids);
-
     let state = app.state::<AppState>();
     for c in conns {
         let password = if c.has_password { load_secret(&c.id, "password") } else { None };
