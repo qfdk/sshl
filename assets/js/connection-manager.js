@@ -354,17 +354,19 @@ class ConnectionManager {
         document.getElementById('conn-port').value = connection.port || 22;
         document.getElementById('conn-username').value = connection.username || '';
         
-        // 设置认证类型
+        // 设置认证类型 —— 后端不持久化 authType，根据 privateKey 字段推断
+        const inferredAuthType = connection.authType
+            || (connection.privateKey ? 'privateKey' : 'password');
         const authTypeSelect = document.getElementById('auth-type');
-        authTypeSelect.value = connection.authType || 'password';
-        
+        authTypeSelect.value = inferredAuthType;
+
         // 触发认证类型变更事件，显示正确的字段
         authTypeSelect.dispatchEvent(new Event('change'));
-        
+
         // 根据认证类型填充相应字段
-        if (connection.authType === 'password') {
+        if (inferredAuthType === 'password') {
             document.getElementById('conn-password').value = connection.password || '';
-        } else if (connection.authType === 'privateKey') {
+        } else if (inferredAuthType === 'privateKey') {
             document.getElementById('conn-private-key-path').value = connection.privateKey || '';
             document.getElementById('conn-passphrase').value = connection.passphrase || '';
         }

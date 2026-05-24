@@ -167,7 +167,6 @@ class FileManager {
         }
 
         // 调试：检查 currentSessionId 的类型
-        console.log('loadRemoteFiles - currentSessionId:', window.currentSessionId, 'type:', typeof window.currentSessionId);
 
         try {
             // 规范化路径
@@ -1075,7 +1074,6 @@ class FileManager {
                 const row = e.target.closest('tr');
                 if (!row) {
                     // 如果点击在行外，显示目录操作
-                    const localPath = document.getElementById('local-path').value;
                     const remotePath = document.getElementById('remote-path').value;
                     e.preventDefault();
                     window.uiManager.showContextMenu(e.clientX, e.clientY, [
@@ -1321,7 +1319,6 @@ class FileManager {
         }
 
         // 调试：检查 currentSessionId 的类型
-        console.log('applyPermissions - currentSessionId:', window.currentSessionId, 'type:', typeof window.currentSessionId);
 
         // 验证权限格式
         if (!/^[0-7]{3}$/.test(permissions)) {
