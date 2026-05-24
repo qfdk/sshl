@@ -18,65 +18,66 @@
     display: inline;
 }
 
-/* Improve dialog buttons with icons */
+/* === Dialog 按钮统一规范 ===
+ * 共享 base：padding / radius / 字号 / 字重 / transition / 弹性布局
+ * 变体：filled (主) / outlined (次)
+ */
 .dialog-buttons {
     display: flex;
     justify-content: flex-end;
     gap: 10px;
 }
 
-.dialog-buttons button {
-    min-width: 90px;
-    padding: 10px 16px;
-    border-radius: 6px;
-    font-weight: 500;
-    transition: all 0.2s;
+.file-input-group {
     display: flex;
-    align-items: center;
-    justify-content: center;
     gap: 8px;
 }
 
+.dialog-buttons button,
+#browse-private-key {
+    font-size: 14px;
+    font-weight: 500;
+    padding: 9px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    white-space: nowrap;
+    line-height: 1.2;
+    border: 1px solid transparent;
+}
+
+.dialog-buttons button {
+    min-width: 88px;
+}
+
+/* Filled (主操作) */
 #connection-form button[type="submit"] {
     background-color: var(--primary-color);
     color: white;
-    border: none;
-}
-
-#connection-form button[type="submit"]::before {
-    content: "";
-    display: inline-block;
-    width: 16px;
-    height: 16px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14'/%3E%3Cpath d='M12 5l7 7-7 7'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: center;
-    background-size: contain;
+    border-color: var(--primary-color);
 }
 
 #connection-form button[type="submit"]:hover {
     background-color: var(--primary-hover);
+    border-color: var(--primary-hover);
 }
 
-#cancel-connection {
+/* Outlined (次操作 / 浏览) */
+#cancel-connection,
+#browse-private-key {
     background-color: white;
     color: #374151;
-    border: 1px solid #d1d5db;
+    border-color: #d1d5db;
 }
 
-#cancel-connection::before {
-    content: "";
-    display: inline-block;
-    width: 16px;
-    height: 16px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23374151' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'%3E%3C/line%3E%3Cline x1='6' y1='6' x2='18' y2='18'%3E%3C/line%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: center;
-    background-size: contain;
-}
-
-#cancel-connection:hover {
+#cancel-connection:hover,
+#browse-private-key:hover {
     background-color: #f3f4f6;
+    border-color: #9ca3af;
 }
 
 /* Improve form group spacing */

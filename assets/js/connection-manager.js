@@ -422,7 +422,7 @@ class ConnectionManager {
         // 更新提交按钮文本
         const submitBtn = document.getElementById('connection-submit-btn');
         if (submitBtn) {
-            submitBtn.textContent = '保存';
+            submitBtn.innerHTML = `${window.Icons.svg('save', 16)}保存`;
         }
         
         // 显示对话框
@@ -445,7 +445,13 @@ class ConnectionManager {
                 return;
             }
 
-            // 先清空终端容器，避免看到前一个会话的内容
+            // 如果双击的是当前正在显示的会话，无需做任何切换/清空操作
+            const existing = window.sessionManager.getSessionByConnectionId(id);
+            if (existing && existing.sessionId === window.currentSessionId) {
+                return;
+            }
+
+            // 先清空终端容器，避免看到前一个会话的内容（仅在确实要切换时）
             const terminalContainer = document.getElementById('terminal-container');
             if (terminalContainer) {
                 terminalContainer.innerHTML = '';
@@ -782,7 +788,7 @@ class ConnectionManager {
                     // 重置提交按钮文本
                     const submitBtn = document.getElementById('connection-submit-btn');
                     if (submitBtn) {
-                        submitBtn.textContent = '连接';
+                        submitBtn.innerHTML = `${window.Icons.svg('arrow-right', 16)}连接`;
                     }
                     
                     // 重新加载连接列表

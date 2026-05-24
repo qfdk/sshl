@@ -362,7 +362,7 @@ class UIManager {
                 // 重置提交按钮文本
                 const submitBtn = document.getElementById('connection-submit-btn');
                 if (submitBtn) {
-                    submitBtn.textContent = '连接';
+                    submitBtn.innerHTML = `${window.Icons.svg('arrow-right', 16)}连接`;
                 }
             });
         }
@@ -382,7 +382,7 @@ class UIManager {
                 // 重置提交按钮文本
                 const submitBtn = document.getElementById('connection-submit-btn');
                 if (submitBtn) {
-                    submitBtn.textContent = '连接';
+                    submitBtn.innerHTML = `${window.Icons.svg('arrow-right', 16)}连接`;
                 }
             });
         }
