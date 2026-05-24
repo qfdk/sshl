@@ -135,7 +135,15 @@ pub(crate) async fn do_handshake(
         .map_err(|e| AppError::Ssh(format!("ssh handshake: {e}")))?;
 
     let authed = if let Some(pk) = private_key {
-        let key = russh_keys::decode_secret_key(pk, passphrase)
+        // 用户可能传路径或 PEM 内容。PEM 以 "-----BEGIN" 开头，否则按路径读文件。
+        let pem = if pk.trim_start().starts_with("-----BEGIN") {
+            pk.to_string()
+        } else {
+            tokio::fs::read_to_string(pk)
+                .await
+                .map_err(|e| AppError::Ssh(format!("read key file {pk}: {e}")))?
+        };
+        let key = russh_keys::decode_secret_key(&pem, passphrase)
             .map_err(|e| AppError::Ssh(format!("decode key: {e}")))?;
         handle
             .authenticate_publickey(username, Arc::new(key))

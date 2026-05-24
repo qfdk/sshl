@@ -4,19 +4,19 @@
     <form id="connection-form">
       <div class="form-group">
         <label for="conn-name">名称</label>
-        <input type="text" id="conn-name" placeholder="我的服务器" required>
+        <input type="text" id="conn-name" placeholder="我的服务器" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
       <div class="form-group">
         <label for="conn-host">主机</label>
-        <input type="text" id="conn-host" placeholder="example.com 或 192.168.1.1" required>
+        <input type="text" id="conn-host" placeholder="example.com 或 192.168.1.1" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
       <div class="form-group">
         <label for="conn-port">端口</label>
-        <input type="number" id="conn-port" value="22" min="1" max="65535">
+        <input type="number" id="conn-port" value="22" min="1" max="65535" autocomplete="off">
       </div>
       <div class="form-group">
         <label for="conn-username">用户名</label>
-        <input type="text" id="conn-username" placeholder="root" required>
+        <input type="text" id="conn-username" placeholder="root" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
 
       <div class="form-group">
@@ -29,20 +29,20 @@
 
       <div class="form-group auth-password">
         <label for="conn-password">密码</label>
-        <input type="password" id="conn-password">
+        <input type="password" id="conn-password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
 
       <div class="form-group auth-key hidden">
         <label for="conn-private-key">私钥文件</label>
         <div class="file-input-group">
-          <input type="text" id="conn-private-key-path" readonly>
+          <input type="text" id="conn-private-key-path" readonly autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
           <button type="button" id="browse-private-key">浏览</button>
         </div>
       </div>
 
       <div class="form-group auth-key hidden">
         <label for="conn-passphrase">私钥密码 (可选)</label>
-        <input type="password" id="conn-passphrase">
+        <input type="password" id="conn-passphrase" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
 
       <div class="form-group">
