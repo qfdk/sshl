@@ -7,7 +7,7 @@
     <% if (typeof cssBundle !== 'undefined' && cssBundle) { %>
         <link rel="stylesheet" href="<%= cssBundle %>">
     <% } else { %>
-        <% ['assets/css/main.css','assets/css/connection-dialog.css','assets/css/file-manager.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
+        <% ['assets/css/main.css','assets/css/connection-dialog.css','assets/css/settings-dialog.css','assets/css/file-manager.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
             <link rel="stylesheet" href="app://<%= cssPath %>">
         <% }); %>
     <% } %>
@@ -53,6 +53,7 @@
     </div>
 </div>
 <%- include('partials/connection-dialog') %>
+<%- include('partials/settings-dialog') %>
 
 <!-- Load the modular JS files through the index entry point -->
 <script src="app://assets/js/icons.js"></script>

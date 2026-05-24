@@ -55,27 +55,31 @@
 }
 
 /* Filled (主操作) */
-#connection-form button[type="submit"] {
+#connection-form button[type="submit"],
+#settings-form button[type="submit"] {
     background-color: var(--primary-color);
     color: white;
     border-color: var(--primary-color);
 }
 
-#connection-form button[type="submit"]:hover {
+#connection-form button[type="submit"]:hover,
+#settings-form button[type="submit"]:hover {
     background-color: var(--primary-hover);
     border-color: var(--primary-hover);
 }
 
 /* Outlined (次操作 / 浏览) */
 #cancel-connection,
-#browse-private-key {
+#browse-private-key,
+#settings-cancel {
     background-color: white;
     color: #374151;
     border-color: #d1d5db;
 }
 
 #cancel-connection:hover,
-#browse-private-key:hover {
+#browse-private-key:hover,
+#settings-cancel:hover {
     background-color: #f3f4f6;
     border-color: #9ca3af;
 }
@@ -111,7 +115,7 @@
 }
 
 /* Add connection icon to the header */
-.dialog-content h3::before {
+#connection-dialog .dialog-content h3::before {
     content: "";
     display: inline-block;
     width: 20px;

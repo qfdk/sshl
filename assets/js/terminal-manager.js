@@ -1,6 +1,8 @@
 // terminal-manager.js
 // 专门处理终端相关功能
 
+import { getTerminalSettings } from './settings.js';
+
 // 防抖函数
 function debounce(func, wait) {
     let timeout;
@@ -77,11 +79,12 @@ class TerminalManager {
                     fitScript.onload = () => {
                         try {
                             // 创建终端实例
+                            const userSettings = getTerminalSettings();
                             const term = new Terminal({
                                 cursorBlink: true,
                                 cursorStyle: 'bar',
-                                fontSize: 14,
-                                fontFamily: 'monospace',
+                                fontSize: userSettings.fontSize,
+                                fontFamily: userSettings.fontFamily,
                                 theme: {
                                     background: '#1e1e1e',
                                     foreground: '#f0f0f0',
@@ -146,11 +149,12 @@ class TerminalManager {
             return new Promise((resolve, reject) => {
                 try {
                     // 创建终端实例
+                    const userSettings = getTerminalSettings();
                     const term = new Terminal({
                         cursorBlink: true,
                         cursorStyle: 'bar',
-                        fontSize: 14,
-                        fontFamily: 'monospace',
+                        fontSize: userSettings.fontSize,
+                        fontFamily: userSettings.fontFamily,
                         theme: {
                             background: '#1e1e1e',
                             foreground: '#f0f0f0',
@@ -264,11 +268,12 @@ class TerminalManager {
             host.style.inset = '0';
             container.appendChild(host);
 
+            const userSettings = getTerminalSettings();
             const termOptions = {
                 cursorBlink: true,
                 cursorStyle: 'bar',
-                fontSize: 14,
-                fontFamily: 'monospace',
+                fontSize: userSettings.fontSize,
+                fontFamily: userSettings.fontFamily,
                 theme: {
                     background: '#1e1e1e',
                     foreground: '#FBF74B',

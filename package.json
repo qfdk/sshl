@@ -8,7 +8,7 @@
   "scripts": {
     "tauri": "tauri",
     "build:renderer": "node build-renderer.cjs",
-    "build": "pnpm run build:renderer && pnpm tauri build",
+    "build": "pnpm run build:renderer && pnpm tauri build --bundles app",
     "dev": "pnpm run build:renderer && pnpm tauri dev"
   },
   "dependencies": {

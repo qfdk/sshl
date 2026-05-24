@@ -7,6 +7,7 @@ import terminalManager from './terminal-manager.js';
 import fileManager from './file-manager.js';
 import connectionManager from './connection-manager.js';
 import uiManager from './ui-manager.js';
+import { initSettingsUI } from './settings.js';
 
 // 添加自定义样式
 function addCustomStyles() {
@@ -697,6 +698,9 @@ function initializeApp() {
 
     // 初始化UI事件监听
     uiManager.initUIEvents();
+
+    // 初始化设置面板
+    initSettingsUI();
 
     // 设置路径输入框的回车键处理
     uiManager.setupEnterKeyHandler('remote-path', path => fileManager.loadRemoteFiles(path));

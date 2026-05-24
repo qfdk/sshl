@@ -1,0 +1,181 @@
+/* 终端设置对话框 —— 紧凑、现代风 */
+
+.settings-dialog-content {
+    max-width: 460px;
+    padding: 0;
+    overflow: hidden;
+}
+
+.settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #eef0f3;
+}
+
+.settings-header h3 {
+    margin: 0;
+    padding: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #111827;
+    border: none;
+}
+
+#settings-close {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    color: #6b7280;
+    border-radius: 4px;
+}
+
+#settings-close:hover {
+    background-color: #f3f4f6;
+    color: #111827;
+}
+
+#settings-form {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.settings-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.settings-field-grow {
+    flex: 1;
+}
+
+.settings-field label {
+    font-size: 12px;
+    font-weight: 500;
+    color: #6b7280;
+    letter-spacing: 0.02em;
+    margin: 0;
+    padding: 0;
+}
+
+.settings-field input[type="number"],
+.settings-field input[type="text"],
+.settings-field select {
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background-color: white;
+    font-size: 13px;
+    color: #111827;
+    box-sizing: border-box;
+    width: 100%;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.settings-field input:focus,
+.settings-field select:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(86, 149, 215, 0.15);
+}
+
+.settings-field select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    cursor: pointer;
+}
+
+.font-size-control {
+    display: flex;
+    align-items: center;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    height: 32px;
+    width: 110px;
+    background: white;
+    overflow: hidden;
+}
+
+.font-size-control:focus-within {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(86, 149, 215, 0.15);
+}
+
+.font-size-control input {
+    border: none !important;
+    height: 100% !important;
+    width: 100% !important;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    -moz-appearance: textfield;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+.font-size-control input::-webkit-outer-spin-button,
+.font-size-control input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.font-size-step {
+    width: 28px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    color: #4b5563;
+    font-size: 16px;
+    line-height: 1;
+    user-select: none;
+}
+
+.font-size-step:hover {
+    background-color: #f3f4f6;
+    color: #111827;
+}
+
+.settings-custom-row.hidden {
+    display: none;
+}
+
+.settings-preview {
+    background-color: #1e1e1e;
+    color: #f0f0f0;
+    border-radius: 6px;
+    padding: 12px 14px;
+    font-family: var(--preview-font, Menlo, monospace);
+    font-size: var(--preview-size, 14px);
+    line-height: 1.5;
+    overflow: hidden;
+}
+
+.settings-preview-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.settings-preview-line.dim {
+    color: #9aa0a6;
+}
+
+.settings-actions {
+    margin-top: 4px;
+}

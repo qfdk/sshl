@@ -13,8 +13,30 @@ use tauri::Manager;
 use config_store::{load_secret, ConfigStore};
 use state::AppState;
 
+#[cfg(target_os = "macos")]
+fn disable_press_and_hold() {
+    use objc2_foundation::{NSString, NSUserDefaults};
+
+    // 1) 持久化到 app domain plist —— WKWebView 的 WebContent 子进程通过 plist 继承。
+    let _ = std::process::Command::new("defaults")
+        .args(["write", "me.qfdk.sshl", "ApplePressAndHoldEnabled", "-bool", "false"])
+        .status();
+
+    // 2) 立即写入当前进程 standardUserDefaults
+    unsafe {
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let key = NSString::from_str("ApplePressAndHoldEnabled");
+        defaults.setBool_forKey(false, &key);
+    }
+    tracing::info!("disabled ApplePressAndHoldEnabled");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_press_and_hold() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    disable_press_and_hold();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

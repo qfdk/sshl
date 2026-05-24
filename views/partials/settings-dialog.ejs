@@ -1,0 +1,42 @@
+<div id="settings-dialog" class="dialog">
+  <div class="dialog-content settings-dialog-content">
+    <div class="settings-header">
+      <h3>终端设置</h3>
+      <button type="button" id="settings-close" class="icon-button" title="关闭">
+        <i data-lucide="x" data-size="16"></i>
+      </button>
+    </div>
+    <form id="settings-form">
+      <div class="settings-row">
+        <div class="settings-field">
+          <label for="settings-font-size">字号</label>
+          <div class="font-size-control">
+            <button type="button" class="font-size-step" data-step="-1" aria-label="减小">−</button>
+            <input type="number" id="settings-font-size" min="8" max="40" step="1" required autocomplete="off">
+            <button type="button" class="font-size-step" data-step="1" aria-label="增大">+</button>
+          </div>
+        </div>
+        <div class="settings-field settings-field-grow">
+          <label for="settings-font-family">字体</label>
+          <select id="settings-font-family"></select>
+        </div>
+      </div>
+
+      <div class="settings-field settings-custom-row hidden" id="settings-custom-wrap">
+        <label for="settings-font-family-custom">自定义 fontFamily</label>
+        <input type="text" id="settings-font-family-custom" placeholder='"Cascadia Code", monospace' autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+
+      <div class="settings-preview" id="settings-preview">
+        <div class="settings-preview-line">user@host:~$ ls -la /etc</div>
+        <div class="settings-preview-line dim">drwxr-xr-x  123 root  4096 May 24 10:42 .</div>
+        <div class="settings-preview-line">The quick brown fox 0123456789 → ✓</div>
+      </div>
+
+      <div class="dialog-buttons settings-actions">
+        <button type="button" id="settings-cancel"><i data-lucide="x" data-size="16"></i>取消</button>
+        <button type="submit" id="settings-save"><i data-lucide="check" data-size="16"></i>保存</button>
+      </div>
+    </form>
+  </div>
+</div>
