@@ -1,7 +1,5 @@
-/* 终端基本样式 */
+/* 终端基本样式 —— font-family/font-size 交给 xterm options 控制 */
 .terminal-container .xterm {
-    font-family: monospace !important;
-    font-size: 14px !important;
     line-height: 1.2 !important;
     padding: 18px 10px 12px !important;
 }
