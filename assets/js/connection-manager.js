@@ -48,10 +48,10 @@ class ConnectionManager {
                         <div class="connection-name">${connection.name}</div>
                         <div class="connection-actions">
                             ${disconnectBtn}
-                            <button class="icon-button edit-connection" data-id="${connection.id}" title="编辑连接">
+                            <button class="icon-button edit-connection" data-id="${connection.id}" title="${isConnected ? '断开后才能编辑' : '编辑连接'}"${isConnected ? ' disabled' : ''}>
                                 ${window.Icons.svg('square-pen', 14, 2.5)}
                             </button>
-                            <button class="icon-button delete-connection" data-id="${connection.id}" title="删除连接">
+                            <button class="icon-button delete-connection" data-id="${connection.id}" title="${isConnected ? '断开后才能删除' : '删除连接'}"${isConnected ? ' disabled' : ''}>
                                 ${window.Icons.svg('trash-2', 14, 2.5)}
                             </button>
                         </div>
@@ -113,13 +113,25 @@ class ConnectionManager {
                 btn.className = 'icon-button disconnect-connection';
                 btn.setAttribute('data-session-id', sessionInfo.sessionId);
                 btn.setAttribute('title', '断开连接');
-                btn.innerHTML = window.Icons.svg('power', 12);
+                btn.innerHTML = window.Icons.svg('power', 14, 2.5);
                 actions.insertBefore(btn, actions.firstChild);
             } else if (!isConnected && existingBtn) {
                 existingBtn.remove();
             } else if (isConnected && existingBtn) {
                 // 更新 sessionId（可能因重连而变化）
                 existingBtn.setAttribute('data-session-id', sessionInfo.sessionId);
+            }
+
+            // 同步编辑/删除按钮的禁用状态（连接中不可操作）
+            const editBtn = item.querySelector('.edit-connection');
+            const deleteBtn = item.querySelector('.delete-connection');
+            if (editBtn) {
+                editBtn.disabled = isConnected;
+                editBtn.setAttribute('title', isConnected ? '断开后才能编辑' : '编辑连接');
+            }
+            if (deleteBtn) {
+                deleteBtn.disabled = isConnected;
+                deleteBtn.setAttribute('title', isConnected ? '断开后才能删除' : '删除连接');
             }
         });
     }

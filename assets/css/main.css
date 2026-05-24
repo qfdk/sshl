@@ -184,6 +184,15 @@ body {
   background-color: rgba(0, 0, 0, 0.1);
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.icon-button:disabled:hover {
+  background-color: transparent;
+}
+
 .disconnect-connection {
   color: #e74c3c;
 }
