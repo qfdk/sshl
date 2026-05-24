@@ -130,9 +130,30 @@ pub(crate) async fn do_handshake(
     passphrase: Option<&str>,
 ) -> AppResult<Arc<Mutex<russh::client::Handle<ClientHandler>>>> {
     let addr = format!("{}:{}", host, port);
-    let tcp = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| AppError::Ssh(format!("tcp connect {addr}: {e}")))?;
+    // macOS 冷启动/网络刚切换时常出现瞬时 EHOSTUNREACH / ENETUNREACH（ARP 缓存未填充），
+    // 给一次短暂重试再失败。
+    let tcp = match TcpStream::connect(&addr).await {
+        Ok(t) => t,
+        Err(e) => {
+            let kind = e.kind();
+            let transient = matches!(
+                kind,
+                std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::ConnectionRefused
+            ) || e.raw_os_error() == Some(65) // EHOSTUNREACH
+                || e.raw_os_error() == Some(51); // ENETUNREACH
+            if transient {
+                tracing::warn!("tcp connect {addr} transient {e}; retrying once");
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                TcpStream::connect(&addr)
+                    .await
+                    .map_err(|e| AppError::Ssh(format!("tcp connect {addr}: {e}")))?
+            } else {
+                return Err(AppError::Ssh(format!("tcp connect {addr}: {e}")));
+            }
+        }
+    };
     tcp.set_nodelay(true).ok();
 
     let mut handle = russh::client::connect_stream(russh_config(), tcp, ClientHandler)
