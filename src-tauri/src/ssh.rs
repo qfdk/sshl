@@ -97,7 +97,11 @@ impl SshSession {
         let was_empty = buf.is_empty();
         buf.push_str(chunk);
         if buf.len() > BUFFER_CAP {
-            let overflow = buf.len() - BUFFER_CAP;
+            let mut overflow = buf.len() - BUFFER_CAP;
+            // 向后推到 UTF-8 字符边界，避免 drain 切断多字节字符触发 panic
+            while overflow < buf.len() && !buf.is_char_boundary(overflow) {
+                overflow += 1;
+            }
             buf.drain(..overflow);
         }
         drop(buf);
@@ -332,8 +336,29 @@ async fn run_channel(
 ) {
     let mut exit_code: Option<u32> = None;
     let exit_reason: String;
+
+    // ssh:data 事件合并：累积 4ms 窗口或 32KB 上限内的数据为单次 emit，
+    // 避免 vim / tmux ctrl+B+F 等大流量爆发拖垮 webview IPC 队列。
+    const COALESCE_WINDOW: Duration = Duration::from_millis(4);
+    const COALESCE_MAX: usize = 32 * 1024;
+    let mut pending = String::with_capacity(COALESCE_MAX);
+    let mut flush_deadline: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
+            biased;
+            _ = async {
+                if let Some(d) = flush_deadline {
+                    tokio::time::sleep_until(d).await
+                } else {
+                    std::future::pending::<()>().await
+                }
+            }, if flush_deadline.is_some() => {
+                if !pending.is_empty() {
+                    emit_data(&app, &session_id, &pending);
+                    pending.clear();
+                }
+                flush_deadline = None;
+            }
             cmd = out_rx.recv() => {
                 match cmd {
                     Some(Outbound::Data(bytes)) => {
@@ -364,14 +389,28 @@ async fn run_channel(
                         let s = String::from_utf8_lossy(&data).to_string();
                         session.append_to_buffer(&s).await;
                         if session.activated.load(Ordering::Relaxed) {
-                            emit_data(&app, &session_id, &s);
+                            pending.push_str(&s);
+                            if pending.len() >= COALESCE_MAX {
+                                emit_data(&app, &session_id, &pending);
+                                pending.clear();
+                                flush_deadline = None;
+                            } else if flush_deadline.is_none() {
+                                flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
+                            }
                         }
                     }
                     Some(russh::ChannelMsg::ExtendedData { data, ext: _ }) => {
                         let s = String::from_utf8_lossy(&data).to_string();
                         session.append_to_buffer(&s).await;
                         if session.activated.load(Ordering::Relaxed) {
-                            emit_data(&app, &session_id, &s);
+                            pending.push_str(&s);
+                            if pending.len() >= COALESCE_MAX {
+                                emit_data(&app, &session_id, &pending);
+                                pending.clear();
+                                flush_deadline = None;
+                            } else if flush_deadline.is_none() {
+                                flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
+                            }
                         }
                     }
                     Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
@@ -394,6 +433,11 @@ async fn run_channel(
                 }
             }
         }
+    }
+
+    // 退出前刷出残余 pending
+    if !pending.is_empty() {
+        emit_data(&app, &session_id, &pending);
     }
 
     tracing::info!("ssh session {session_id} exiting: {exit_reason}");

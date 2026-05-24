@@ -93,6 +93,26 @@
     margin-bottom: 18px;
 }
 
+.form-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 0 16px;
+}
+
+.form-row .form-group {
+    padding: 0;
+    flex: 1;
+}
+
+.form-row .form-group-grow {
+    flex: 1 1 auto;
+}
+
+.form-row .form-group-port {
+    flex: 0 0 120px;
+}
+
 /* Better focus states for inputs */
 .form-group input:focus,
 .form-group select:focus {
@@ -103,8 +123,13 @@
 
 /* Dark mode compatible dialog */
 .dialog-content {
-    max-width: 500px;
+    max-width: 560px;
+    width: 92%;
     border-radius: 8px;
+}
+
+#connection-dialog .dialog-content {
+    max-width: 620px;
 }
 
 .dialog-content h3 {

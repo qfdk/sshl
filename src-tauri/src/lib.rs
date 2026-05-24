@@ -5,6 +5,7 @@ mod local_fs;
 mod sftp;
 mod ssh;
 mod state;
+mod system_fonts;
 
 use std::time::Duration;
 
@@ -77,6 +78,7 @@ pub fn run() {
             // config
             config_store::config_get_connections,
             config_store::config_save_connection,
+            system_fonts::list_system_fonts,
             config_store::config_delete_connection,
         ])
         .setup(|app| {

@@ -6,13 +6,15 @@
         <label for="conn-name">名称</label>
         <input type="text" id="conn-name" placeholder="我的服务器" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
-      <div class="form-group">
-        <label for="conn-host">主机</label>
-        <input type="text" id="conn-host" placeholder="example.com 或 192.168.1.1" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-      </div>
-      <div class="form-group">
-        <label for="conn-port">端口</label>
-        <input type="number" id="conn-port" value="22" min="1" max="65535" autocomplete="off">
+      <div class="form-row">
+        <div class="form-group form-group-grow">
+          <label for="conn-host">主机</label>
+          <input type="text" id="conn-host" placeholder="example.com 或 192.168.1.1" required autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+        </div>
+        <div class="form-group form-group-port">
+          <label for="conn-port">端口</label>
+          <input type="number" id="conn-port" value="22" min="1" max="65535" autocomplete="off">
+        </div>
       </div>
       <div class="form-group">
         <label for="conn-username">用户名</label>

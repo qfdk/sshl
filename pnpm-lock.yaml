@@ -11,6 +11,9 @@ importers:
       xterm:
         specifier: ^5.3.0
         version: 5.3.0
+      xterm-addon-canvas:
+        specifier: ^0.5.0
+        version: 0.5.0(xterm@5.3.0)
       xterm-addon-fit:
         specifier: ^0.7.0
         version: 0.7.0(xterm@5.3.0)
@@ -100,6 +103,12 @@ packages:
     engines: {node: '>=0.12.18'}
     hasBin: true
 
+  xterm-addon-canvas@0.5.0:
+    resolution: {integrity: sha512-QOo/eZCMrCleAgMimfdbaZCgmQRWOml63Ued6RwQ+UTPvQj3Av9QKx3xksmyYrDGRO/AVRXa9oNuzlYvLdmoLQ==}
+    deprecated: This package is now deprecated. Move to @xterm/addon-canvas instead.
+    peerDependencies:
+      xterm: ^5.0.0
+
   xterm-addon-fit@0.7.0:
     resolution: {integrity: sha512-tQgHGoHqRTgeROPnvmtEJywLKoC/V9eNs4bLLz7iyJr1aW/QFzRwfd3MGiJ6odJd9xEfxcW36/xRU47JkD5NKQ==}
     deprecated: This package is now deprecated. Move to @xterm/addon-fit instead.
@@ -160,6 +169,10 @@ snapshots:
       '@tauri-apps/cli-win32-x64-msvc': 2.11.2
 
   ejs@5.0.2: {}
+
+  xterm-addon-canvas@0.5.0(xterm@5.3.0):
+    dependencies:
+      xterm: 5.3.0
 
   xterm-addon-fit@0.7.0(xterm@5.3.0):
     dependencies:

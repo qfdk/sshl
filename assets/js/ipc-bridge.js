@@ -75,6 +75,7 @@
       listLocal: (directory) => call('file_list_local', { directory }, 'files'),
       // getHomeDir is consumed as a raw string by ui-manager and file-manager
       getHomeDir: () => call('file_get_home_dir', undefined, 'raw'),
+      listSystemFonts: () => call('list_system_fonts', undefined, 'raw'),
       upload: (sessionId, localPath, remotePath) =>
         call('file_upload', { sessionId, localPath, remotePath }),
       download: (sessionId, remotePath, localPath) =>
