@@ -21,39 +21,52 @@ function paletteToHex(idx) {
     return '#' + lvl(r) + lvl(g) + lvl(b);
 }
 
-// 采样 xterm 当前渲染区，取众数 bg color → "#rrggbb" 或 null（全部 default）
+// 采样 xterm 当前渲染区，取众数 bg color → "#rrggbb" 或 null
+// 密集采样：viewport 内每 step 个 cell 取一个，找占比最高的显式 bg；
+// 还要求该 bg 占非默认 cell 的 ≥50%（避免被 statusline / 行号列等局部 hl 拐走）
 function sampleDominantBg(term) {
     try {
         const buf = term.buffer.active;
         const rows = term.rows, cols = term.cols;
+        if (!rows || !cols) return null;
         const counts = new Map();
-        // 采样 4 个角 + 中心，每个 sample 取若干 cell
-        const samples = [
-            [0, 0], [0, cols - 1],
-            [rows - 1, 0], [rows - 1, cols - 1],
-            [rows >> 1, cols >> 1],
-            [rows >> 1, 0], [rows >> 1, cols - 1],
-        ];
-        for (const [y, x] of samples) {
+        let total = 0, defaultCnt = 0;
+        // 步长：保证总采样 ~200-400 个 cell，性能可控
+        const stepY = Math.max(1, Math.floor(rows / 16));
+        const stepX = Math.max(1, Math.floor(cols / 24));
+        for (let y = 0; y < rows; y += stepY) {
             const line = buf.getLine(buf.viewportY + y);
             if (!line) continue;
-            const cell = line.getCell(x);
-            if (!cell) continue;
-            const mode = cell.getBgColorMode();
-            const c = cell.getBgColor();
-            let hex;
-            if (mode === 0) continue; // default → 用 theme.background，跳过
-            else if (mode === (1 << 24)) hex = paletteToHex(c); // P16/P256
-            else if (mode === (1 << 25)) {                       // RGB
-                hex = '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
-                          + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
-                          + (c & 0xff).toString(16).padStart(2, '0');
-            } else continue;
-            counts.set(hex, (counts.get(hex) || 0) + 1);
+            for (let x = 0; x < cols; x += stepX) {
+                const cell = line.getCell(x);
+                if (!cell) continue;
+                total++;
+                const mode = cell.getBgColorMode();
+                const c = cell.getBgColor();
+                if (mode === 0) { defaultCnt++; continue; }
+                let hex;
+                // xterm 颜色模式常量：CM_P16=1<<24, CM_P256=2<<24, CM_RGB=3<<24
+                if (mode === (1 << 24) || mode === (2 << 24)) {
+                    hex = paletteToHex(c);
+                } else if (mode === (3 << 24)) {
+                    // RGB: 颜色编码 = (R<<16)|(G<<8)|B
+                    hex = '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
+                              + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
+                              + (c & 0xff).toString(16).padStart(2, '0');
+                } else continue;
+                counts.set(hex, (counts.get(hex) || 0) + 1);
+            }
         }
+        if (!total) return null;
+        // 如果 ≥60% cell 是 default mode，说明当前程序（如 shell / less 等）依赖终端默认色 → 返回 null
+        // 让 xterm theme.background 决定，调用方负责保证 padding/host bg 与 theme.background 一致
+        if (defaultCnt / total >= 0.6) return null;
         if (counts.size === 0) return null;
         let best = null, max = 0;
         for (const [k, v] of counts) if (v > max) { best = k; max = v; }
+        // 主色需占非默认 cell 的 ≥50%，否则不可靠（例如 split window 不同颜色各占一半）
+        const nonDefault = total - defaultCnt;
+        if (nonDefault === 0 || max / nonDefault < 0.5) return null;
         return best;
     } catch (_) {
         return null;
@@ -298,10 +311,10 @@ class TerminalManager {
         const placeholder = document.getElementById('terminal-placeholder');
         if (placeholder) placeholder.classList.add('hidden');
 
-        // 切回该 session 时恢复其上次 OSC 11 报告的背景色（Ghostty extend 风格）
+        // 切回该 session 时恢复其上次报告的背景色（Ghostty extend 风格）
+        // 设在 documentElement 上，所有 DOM 层都能继承
         if (entry.bgColor) {
-            const c = document.getElementById('terminal-container');
-            if (c) c.style.backgroundColor = entry.bgColor;
+            document.documentElement.style.setProperty('--term-bg', entry.bgColor);
         }
 
         requestAnimationFrame(() => {
@@ -377,11 +390,20 @@ class TerminalManager {
             // 让 padding 区域永远跟当前程序的背景色一致（vim/nvim 切主题也无缝）
             const applyBg = (color) => {
                 if (!color) return;
-                host.style.backgroundColor = color;
+                // 1) CSS 变量 --term-bg → padding / 父层 / scrollbar gutter 全部同步
                 if (this.activeSessionId === sessionId) {
-                    const c = document.getElementById('terminal-container');
-                    if (c) c.style.backgroundColor = color;
+                    document.documentElement.style.setProperty('--term-bg', color);
                 }
+                host.style.setProperty('--term-bg', color);
+                host.style.backgroundColor = color;
+                // 2) xterm theme.background → 默认模式 cell（mode=0）也渲染成这个色
+                //    避免 nvim 切主题时 padding 已变但 xterm 默认 cell 还是老色
+                try {
+                    const cur = term.options.theme || {};
+                    if (cur.background !== color) {
+                        term.options.theme = { ...cur, background: color };
+                    }
+                } catch (_) {}
                 const e = this.terminals.get(sessionId);
                 if (e) e.bgColor = color;
             };
@@ -404,13 +426,7 @@ class TerminalManager {
                     try {
                         term.options.theme = { ...(term.options.theme || {}), background: color };
                     } catch (_) {}
-                    host.style.backgroundColor = color;
-                    if (this.activeSessionId === sessionId) {
-                        const c = document.getElementById('terminal-container');
-                        if (c) c.style.backgroundColor = color;
-                    }
-                    const e = this.terminals.get(sessionId);
-                    if (e) e.bgColor = color;
+                    applyBg(color);
                     return true;
                 });
             } catch (err) {

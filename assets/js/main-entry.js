@@ -18,7 +18,7 @@ function addCustomStyles() {
         display: flex;
         flex-direction: column;
         height: 100%;
-        background-color: #1e1e1e;
+        background-color: var(--term-bg, #1e1e2e);
         color: #f0f0f0;
         overflow: hidden;
     }
@@ -34,7 +34,7 @@ function addCustomStyles() {
     .terminal-container {
         width: 100%;
         height: 100%;
-        background-color: #1e1e1e !important;
+        background-color: var(--term-bg, #1e1e2e) !important;
         flex: 1; /* Fill available space */
         display: flex;
         flex-direction: column;
@@ -62,7 +62,7 @@ function addCustomStyles() {
         display: flex;
         align-items: center;
         justify-content: center;
-        background-color: #1e1e1e;
+        background-color: var(--term-bg, #1e1e2e);
         z-index: 10;
     }
 
@@ -87,7 +87,7 @@ function addCustomStyles() {
     }
 
     .terminal-tab.active {
-        background-color: #1e1e1e;
+        background-color: var(--term-bg, #1e1e2e);
         color: #fff;
     }
     `;
@@ -581,7 +581,7 @@ function addCustomStyles() {
     }
 
     .xterm-viewport::-webkit-scrollbar-track {
-        background: #1e1e1e;
+        background: var(--term-bg, #1e1e2e);
     }
 
     .xterm-viewport::-webkit-scrollbar-thumb {
@@ -607,7 +607,7 @@ function addCustomStyles() {
 
     /* Ensure the terminal background color matches */
     .tab-pane#terminal-tab, .terminal-view, .terminal-content, .terminal-container {
-        background-color: #1e1e1e;
+        background-color: var(--term-bg, #1e1e2e);
     }
 
     /* Make text white in file manager */
@@ -668,7 +668,7 @@ function addCustomStyles() {
       }
       /* 确保终端容器和终端背景颜色一致 */
       .terminal-container, .terminal-container .terminal {
-        background-color: #1e1e1e !important;
+        background-color: var(--term-bg, #1e1e2e) !important;
       }
       
       ${terminalCSS}

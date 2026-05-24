@@ -1,12 +1,13 @@
 /* 终端基本样式 —— font-family/font-size/line-height 交给 xterm options 控制 */
-/* 适度内边距：文字与窗口边框之间留呼吸感（背景色与 xterm theme.background 一致，不会出现可见接缝） */
+/* 适度内边距：文字与窗口边框之间留呼吸感 */
 .terminal-container .xterm {
     padding: 8px !important;
+    background-color: transparent !important;
 }
 
-/* 简单颜色修复 */
+/* 唯一的颜色源：.terminal-container 的 --term-bg（由 JS 根据 OSC 11 / cell 采样动态更新） */
 .terminal-container {
-    background-color: #1e1e2e !important;
+    background-color: var(--term-bg, #1e1e2e) !important;
 }
 
 /* 修复终端容器尺寸 */
@@ -18,26 +19,43 @@
     height: 100% !important;
 }
 
+/* 关键：xterm 内部所有层全部透明，让 .terminal-container 的 --term-bg 自然透出
+   —— cells 右侧 sub-cell 间隙、scrollbar gutter、viewport 默认 #000，统统消失 */
+.terminal-container .xterm-viewport,
+.terminal-container .xterm-screen,
+.terminal-container .xterm-rows,
+.terminal-container .xterm-rows > div {
+    background-color: transparent !important;
+}
+
+/* 终端主机层（JS 创建的 .term-host）也透明 */
+.terminal-container .term-host {
+    background-color: transparent !important;
+}
+
 /* 去除其他样式干扰 */
 .terminal-container * {
     font-variant-ligatures: none !important;
     font-feature-settings: normal !important;
 }
 
-/* 优化终端性能 */
+/* xterm 默认 overflow-y:scroll 强保留 scrollbar gutter，alt-screen 也露 → 改 auto */
 .terminal-container .xterm-viewport {
     overflow-y: auto !important;
+    overflow-x: hidden !important;
     scrollbar-width: thin !important;
-    scrollbar-color: #444 #1e1e2e !important;
+    scrollbar-color: #444 transparent !important;
 }
 
-/* 优化终端滚动条 */
+/* scrollbar 自身也透明，让背景透出 */
 .terminal-container .xterm-viewport::-webkit-scrollbar {
     width: 8px !important;
+    background: transparent !important;
 }
 
-.terminal-container .xterm-viewport::-webkit-scrollbar-track {
-    background: #1e1e2e !important;
+.terminal-container .xterm-viewport::-webkit-scrollbar-track,
+.terminal-container .xterm-viewport::-webkit-scrollbar-corner {
+    background: transparent !important;
 }
 
 .terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
