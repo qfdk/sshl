@@ -21,6 +21,10 @@ class TerminalManager {
         this.currentTerminalDataHandler = null;
         this.currentTerminalDataHandlerDisposer = null;
         this.isTabSwitching = false;
+        // 每个 sessionId 维护独立的 xterm 实例：{ term, fitAddon, host, dataDisposer, cleanup }
+        // 切换会话只是 toggle display，不销毁实例 —— 保留 scrollback 与 TUI 状态。
+        this.terminals = new Map();
+        this.activeSessionId = null;
         
         // 防抖的resize函数
         this.resizeTerminal = debounce(() => {
@@ -45,9 +49,11 @@ class TerminalManager {
         }, 100);
     }
     
-    // 创建终端实例
-    async createXterm(containerId, options = {}) {
-        const container = document.getElementById(containerId);
+    // 创建终端实例。container 可传 DOM 元素或元素 id。
+    async createXterm(container, options = {}) {
+        if (typeof container === 'string') {
+            container = document.getElementById(container);
+        }
     
         if (!window.Terminal || !window.FitAddon) {
             console.log('Loading Terminal and FitAddon scripts dynamically');
@@ -181,64 +187,83 @@ class TerminalManager {
         }
     }
     
-    // 初始化终端
-    async initTerminal(sessionId, existingSession = null, showBuffer = true, clearContainerFirst = false) {
+    // 取得指定 session 的 xterm 实例（用于路由后端 ssh:data 事件）
+    getTerminalForSession(sessionId) {
+        const e = this.terminals.get(sessionId);
+        return e ? e.term : null;
+    }
+
+    // 隐藏所有 per-session host 容器
+    _hideAllTerminalHosts() {
+        for (const entry of this.terminals.values()) {
+            if (entry.host) entry.host.style.display = 'none';
+        }
+    }
+
+    // 把已存在的 session 终端展示出来，并设置为活跃实例
+    _showExistingTerminal(sessionId, entry) {
+        this._hideAllTerminalHosts();
+        entry.host.style.display = 'block';
+        this.activeTerminal = entry.term;
+        this.terminalFitAddon = entry.fitAddon;
+        this.activeSessionId = sessionId;
+        window.terminalFitAddon = entry.fitAddon;
+
+        this.createTerminalTab(sessionId);
+        const placeholder = document.getElementById('terminal-placeholder');
+        if (placeholder) placeholder.classList.add('hidden');
+
+        requestAnimationFrame(() => {
+            try { entry.term.focus(); } catch (err) { console.warn('[showTerminal] focus 失败:', err); }
+            try {
+                entry.fitAddon.fit();
+                const d = entry.fitAddon.proposeDimensions();
+                if (d && d.cols && d.rows && window.api?.ssh) {
+                    window.api.ssh.resize(sessionId, d.cols, d.rows).catch(() => {});
+                }
+            } catch (err) {
+                console.warn('[showTerminal] fit 失败:', err);
+            }
+        });
+    }
+
+    // 初始化终端：相同 sessionId 复用现有 xterm 实例（保留 scrollback），
+    // 否则创建新的 host + xterm 并加入 this.terminals。
+    // 返回 { term, fitAddon, isNew }
+    async initTerminal(sessionId, _existingSession = null, _showBuffer = false) {
         try {
-            console.log(`[initTerminal] 开始初始化终端 - 会话ID: ${sessionId}`);
-            console.log(`[initTerminal] 现有会话信息:`, existingSession ? {
-                active: existingSession.active,
-                hasStream: !!existingSession.stream,
-                bufferLength: existingSession.buffer ? existingSession.buffer.length : 0
-            } : '无');
-    
             const container = document.getElementById('terminal-container');
             if (!container) {
                 console.error('找不到终端容器');
                 return null;
             }
 
-            // 如果需要先清理容器，立即清空（解决切换服务器时的显示问题）
-            if (clearContainerFirst) {
-                container.innerHTML = '';
+            // 容器一次性初始化为相对定位，便于子 host 绝对填充
+            if (!container.dataset.multiHostReady) {
+                container.style.position = 'relative';
+                container.dataset.multiHostReady = '1';
             }
-    
-            // 正确销毁现有终端
-            if (this.activeTerminal) {
-                console.log(`[initTerminal] 正在销毁之前的终端实例`);
-                try {
-                    // 先移除数据处理程序
-                    if (this.currentTerminalDataHandlerDisposer && 
-                        typeof this.currentTerminalDataHandlerDisposer === 'function') {
-                        this.currentTerminalDataHandlerDisposer(); // 调用dispose函数移除监听器
-                        this.currentTerminalDataHandlerDisposer = null;
-                        this.currentTerminalDataHandler = null;
-                        console.log(`[initTerminal] 已移除终端数据处理程序`);
-                    } else if (this.currentTerminalDataHandlerDisposer) {
-                        console.warn(`[initTerminal] currentTerminalDataHandlerDisposer 不是函数，无法调用`);
-                        this.currentTerminalDataHandlerDisposer = null;
-                        this.currentTerminalDataHandler = null;
-                    }
-    
-                    // 清理自定义的事件监听器
-                    if (this.activeTerminal._cleanup) {
-                        this.activeTerminal._cleanup();
-                    }
-                    
-                    // 然后销毁终端
-                    this.activeTerminal.dispose();
-                    this.activeTerminal = null;
-                    console.log(`[initTerminal] 已销毁旧终端`);
-                } catch (err) {
-                    console.warn(`[initTerminal] 销毁之前的终端实例出错:`, err);
-                }
+
+            const existing = this.terminals.get(sessionId);
+            if (existing) {
+                console.log(`[initTerminal] 复用 session ${sessionId} 的终端实例`);
+                this._showExistingTerminal(sessionId, existing);
+                return { term: existing.term, fitAddon: existing.fitAddon, isNew: false };
             }
-    
-            // 清理容器（如果前面没有清理过）
-            if (!clearContainerFirst) {
-                container.innerHTML = '';
-            }
-    
-            // 基本终端选项
+
+            console.log(`[initTerminal] 为 session ${sessionId} 创建新终端`);
+
+            // 隐藏其他 session 的 host，但不销毁
+            this._hideAllTerminalHosts();
+
+            // 创建专属 host 容器
+            const host = document.createElement('div');
+            host.className = 'term-host';
+            host.dataset.sessionId = sessionId;
+            host.style.position = 'absolute';
+            host.style.inset = '0';
+            container.appendChild(host);
+
             const termOptions = {
                 cursorBlink: true,
                 cursorStyle: 'bar',
@@ -253,105 +278,85 @@ class TerminalManager {
                 rendererType: 'canvas',
                 blinkInterval: 500
             };
-    
-            // 创建新终端实例
-            const result = await this.createXterm('terminal-container', termOptions);
-            const term = result.term;
-            const fitAddon = result.fitAddon;
-    
-            container.style.display = 'block';
 
-            // showBuffer=false 时由调用方自行拉缓冲区（避免重复 IPC）
-            if (showBuffer) {
-                let sessionBuffer = '';
-                try {
-                    if (window.api?.ssh?.getSessionBuffer) {
-                        const updatedSessionInfo = await window.api.ssh.getSessionBuffer(sessionId);
-                        if (updatedSessionInfo && updatedSessionInfo.success) {
-                            sessionBuffer = updatedSessionInfo.buffer || '';
-                        }
-                    }
-                } catch (err) {
-                    console.warn(`[initTerminal] 获取会话缓冲区失败:`, err);
-                    if (existingSession && existingSession.buffer) {
-                        sessionBuffer = existingSession.buffer;
-                    }
-                }
-                if (sessionBuffer) {
-                    term.write(sessionBuffer);
-                } else if (existingSession && existingSession.buffer) {
-                    term.write(existingSession.buffer);
-                }
-            }
-    
-            // 设置全局变量
-            this.activeTerminal = term;
-            this.terminalFitAddon = fitAddon;
-            window.terminalFitAddon = fitAddon; // 保持兼容，以后应该删除这种全局变量
-    
-            // 设置新的终端数据处理
-            this.currentTerminalDataHandler = (data) => {
-                if (window.api && window.api.ssh && window.currentSessionId) {
-                    console.log(`[terminal data] 发送数据到会话 ${window.currentSessionId}, 数据长度: ${data.length}`);
-                    window.api.ssh.sendData(window.currentSessionId, data)
-                        .catch(err => console.error('发送数据失败:', err));
-                }
-            };
-    
-            // 保存dispose函数以便后续移除监听器
+            const { term, fitAddon } = await this.createXterm(host, termOptions);
+
+            // 数据处理器绑定到该 session（每个 xterm 各自独立）
+            let dataDisposer = null;
             try {
-                const disposer = term.onData(this.currentTerminalDataHandler);
-                // 确保返回的是一个函数
+                const disposer = term.onData((data) => {
+                    if (window.api?.ssh) {
+                        window.api.ssh.sendData(sessionId, data)
+                            .catch(err => console.error('发送数据失败:', err));
+                    }
+                });
                 if (typeof disposer === 'function') {
-                    this.currentTerminalDataHandlerDisposer = disposer;
-                    console.log(`[initTerminal] 成功注册终端数据处理程序`);
-                } else {
-                    console.warn(`[initTerminal] term.onData 返回的不是函数: ${typeof disposer}`);
-                    // 创建一个空函数作为替代
-                    this.currentTerminalDataHandlerDisposer = () => {
-                        console.log('[initTerminal] 使用替代的dispose函数');
-                        // 尝试使用其他方式移除监听器
-                        if (term && term._events && term._events.data) {
-                            // 如果可能，直接清除事件监听器
-                            term._events.data = null;
-                        }
-                    };
+                    dataDisposer = disposer;
+                } else if (disposer && typeof disposer.dispose === 'function') {
+                    dataDisposer = () => disposer.dispose();
                 }
             } catch (err) {
-                console.error(`[initTerminal] 注册终端数据处理程序出错:`, err);
-                // 创建一个空函数作为替代
-                this.currentTerminalDataHandlerDisposer = () => {};
-            }
-    
-            // 创建标签
-            this.createTerminalTab(sessionId);
-    
-            // 隐藏占位符
-            const placeholder = document.getElementById('terminal-placeholder');
-            if (placeholder) {
-                placeholder.classList.add('hidden');
+                console.error('[initTerminal] 注册 onData 失败:', err);
             }
 
-            // 合并 focus + fit + resize 到一次 rAF，比叠加 50ms/100ms setTimeout 更快也更稳
+            const entry = {
+                term,
+                fitAddon,
+                host,
+                dataDisposer,
+                cleanup: term._cleanup || null
+            };
+            this.terminals.set(sessionId, entry);
+
+            this.activeTerminal = term;
+            this.terminalFitAddon = fitAddon;
+            this.activeSessionId = sessionId;
+            window.terminalFitAddon = fitAddon;
+
+            this.createTerminalTab(sessionId);
+
+            const placeholder = document.getElementById('terminal-placeholder');
+            if (placeholder) placeholder.classList.add('hidden');
+
             requestAnimationFrame(() => {
-                try { term.focus(); } catch (err) { console.warn(`[initTerminal] 聚焦失败:`, err); }
-                if (!fitAddon) return;
+                try { term.focus(); } catch (err) { console.warn('[initTerminal] focus 失败:', err); }
                 try {
                     fitAddon.fit();
-                    const dimensions = fitAddon.proposeDimensions();
-                    if (dimensions && window.api?.ssh) {
-                        window.api.ssh.resize(sessionId, dimensions.cols, dimensions.rows)
+                    const d = fitAddon.proposeDimensions();
+                    if (d && d.cols && d.rows && window.api?.ssh) {
+                        window.api.ssh.resize(sessionId, d.cols, d.rows)
                             .catch(err => console.error('初始化调整终端大小失败:', err));
                     }
                 } catch (err) {
-                    console.warn(`[initTerminal] 调整终端大小出错:`, err);
+                    console.warn('[initTerminal] fit 失败:', err);
                 }
             });
-    
-            return {term, fitAddon};
+
+            return { term, fitAddon, isNew: true };
         } catch (error) {
             console.error('初始化终端失败:', error);
             throw error;
+        }
+    }
+
+    // 销毁单个 session 的 xterm 实例（断开连接时调用，切换会话不会调用）
+    disposeTerminalInstance(sessionId) {
+        const entry = this.terminals.get(sessionId);
+        if (!entry) return;
+        try {
+            if (typeof entry.dataDisposer === 'function') entry.dataDisposer();
+        } catch (err) { console.warn('[dispose] dataDisposer 失败:', err); }
+        try {
+            if (typeof entry.cleanup === 'function') entry.cleanup();
+        } catch (err) { console.warn('[dispose] cleanup 失败:', err); }
+        try { entry.term.dispose(); } catch (err) { console.warn('[dispose] term.dispose 失败:', err); }
+        if (entry.host && entry.host.parentNode) entry.host.parentNode.removeChild(entry.host);
+        this.terminals.delete(sessionId);
+        if (this.activeSessionId === sessionId) {
+            this.activeTerminal = null;
+            this.terminalFitAddon = null;
+            this.activeSessionId = null;
+            window.terminalFitAddon = null;
         }
     }
     
@@ -394,28 +399,20 @@ class TerminalManager {
             console.error('断开连接失败:', error);
         }
 
-        // 始终移除会话记录
+        // 移除会话记录
         window.sessionManager.removeSession(sessionId);
 
-        if (isActive) {
-            this.activeTerminal = null;
-            window.currentSessionId = null;
-            window.terminalFitAddon = null;
+        // 只销毁这个 session 对应的 xterm 实例，不影响其他后台 session
+        this.disposeTerminalInstance(sessionId);
 
-            const terminalContainer = document.getElementById('terminal-container');
-            if (terminalContainer) {
-                terminalContainer.innerHTML = '';
-            }
+        if (isActive) {
+            window.currentSessionId = null;
 
             const placeholder = document.getElementById('terminal-placeholder');
-            if (placeholder) {
-                placeholder.classList.remove('hidden');
-            }
+            if (placeholder) placeholder.classList.remove('hidden');
 
             const tabsContainer = document.getElementById('terminal-tabs-left');
-            if (tabsContainer) {
-                tabsContainer.innerHTML = '';
-            }
+            if (tabsContainer) tabsContainer.innerHTML = '';
 
             window.uiManager.updateConnectionStatus(false);
             window.uiManager.updateServerInfo(false);

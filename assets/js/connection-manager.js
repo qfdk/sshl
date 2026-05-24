@@ -143,7 +143,7 @@ class ConnectionManager {
 
         // 获取会话信息
         const sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
-        
+
         // 如果是当前会话，直接返回
         if (sessionInfo && window.currentSessionId === sessionInfo.sessionId) {
             console.log(`[switchToSession] 已经在使用这个会话，无需切换`);
@@ -152,26 +152,6 @@ class ConnectionManager {
 
         // 清除文件管理器缓存
         window.fileManager.clearFileManagerCache();
-
-        // 保存当前终端状态而不是清空
-        const terminalContainer = document.getElementById('terminal-container');
-        if (terminalContainer && window.currentSessionId) {
-            const currentTerminal = terminalContainer.firstChild;
-            if (currentTerminal) {
-                currentTerminal.style.display = 'none';
-                currentTerminal.dataset.sessionId = window.currentSessionId;
-            }
-        }
-        
-        // 创建加载指示器
-        const loadingOverlay = document.createElement('div');
-        loadingOverlay.className = 'loading-overlay';
-        loadingOverlay.innerHTML = '<div class="spinner"></div><div class="loading-text">正在切换会话...</div>';
-
-        const terminalContent = document.querySelector('.terminal-content');
-        if (terminalContent) {
-            terminalContent.appendChild(loadingOverlay);
-        }
 
         try {
             // 获取会话信息
@@ -187,14 +167,16 @@ class ConnectionManager {
                 return true;
             }
 
-            // 检查会话是否有效
+            // 检查会话是否有效。Tauri 后端独立管理 session 生命周期，前端没有 stream 字段；
+            // 只在 sessionManager 完全缺失时视为失效。后端实际是否存活由 activateSession 检测。
             const session = sessionInfo.session;
-            if (!session || !session.stream) {
+            if (!session) {
                 console.log(`[switchToSession] 会话 ${sessionInfo.sessionId} 无效或已断开连接，尝试重新连接`);
 
-                // 清理旧会话
+                // 清理旧会话及其失效的 xterm 实例
                 if (sessionInfo.sessionId) {
                     window.sessionManager.removeSession(sessionInfo.sessionId);
+                    window.terminalManager.disposeTerminalInstance(sessionInfo.sessionId);
                 }
 
                 // 从配置获取连接信息
@@ -212,8 +194,8 @@ class ConnectionManager {
                         // 更新会话ID
                         window.currentSessionId = result.sessionId;
 
-                        // 创建新终端, 先清空容器（不在 initTerminal 内拉 buffer）
-                        const terminalInfo = await window.terminalManager.initTerminal(result.sessionId, null, false, true);
+                        // 创建该 session 的 xterm 实例（其他后台 session 的 host 会被隐藏，但不销毁）
+                        const terminalInfo = await window.terminalManager.initTerminal(result.sessionId, null, false);
                         // 保存到会话管理器
                         window.sessionManager.addSession(result.sessionId, connectionId, {
                             term: terminalInfo.term,
@@ -270,54 +252,38 @@ class ConnectionManager {
                 }
             }
 
-            // 保存当前会话状态 - 使用异步操作处理
-            if (window.currentSessionId && window.terminalManager.activeTerminal) {
-                // 标记当前会话为非活跃
+            // 标记上一个会话为非活跃（数据仍会写入其 xterm，便于切回时即时可见）
+            if (window.currentSessionId && window.currentSessionId !== sessionInfo.sessionId) {
                 window.sessionManager.setSessionActive(window.currentSessionId, false);
-
-                // 清理终端事件监听器
-                try {
-                    if (window.terminalManager.currentTerminalDataHandlerDisposer && 
-                        typeof window.terminalManager.currentTerminalDataHandlerDisposer === 'function') {
-                        window.terminalManager.currentTerminalDataHandlerDisposer();
-                        window.terminalManager.currentTerminalDataHandlerDisposer = null;
-                        window.terminalManager.currentTerminalDataHandler = null;
-                    }
-                } catch (err) {
-                    console.warn(`[switchToSession] 移除终端数据处理监听器出错:`, err);
-                }
             }
 
-            // 先更新全局会话ID和活跃状态，然后再进行其他操作
             window.currentSessionId = sessionInfo.sessionId;
             window.sessionManager.setSessionActive(sessionInfo.sessionId, true);
 
-            // 设置SSH数据和关闭处理
+            // 全局 ssh:data / ssh:closed 监听器只注册一次（按 sessionId 路由）
             this.setupSSHHandlers();
 
-            // 先初始化空终端（不在 initTerminal 内拉 buffer）
+            // 切换到该 session 的 xterm 实例：已存在则复用（保留 scrollback），否则新建
             const terminalResult = await window.terminalManager.initTerminal(
                 sessionInfo.sessionId,
                 sessionInfo.session,
-                false,
-                true
+                false
             );
 
             if (!terminalResult) {
                 throw new Error('终端初始化失败');
             }
-            window.terminalManager.activeTerminal = terminalResult.term;
 
-            // 同步：fetch buffer → write → activate。
-            // 顺序必须是先拿 buffer 再 activate，否则 active:false 协议下 ssh-service
-            // 会把缓冲区里 bufferReadLen 之后的内容补 emit，和这里写入的 buffer 重复。
-            try {
-                const bufferResult = await window.api.ssh.getSessionBuffer(sessionInfo.sessionId);
-                if (bufferResult?.success && bufferResult.buffer && window.terminalManager.activeTerminal) {
-                    window.terminalManager.activeTerminal.write(bufferResult.buffer);
+            // 仅新建终端时拉缓冲区回放；复用则跳过，避免内容重复
+            if (terminalResult.isNew) {
+                try {
+                    const bufferResult = await window.api.ssh.getSessionBuffer(sessionInfo.sessionId);
+                    if (bufferResult?.success && bufferResult.buffer) {
+                        terminalResult.term.write(bufferResult.buffer);
+                    }
+                } catch (err) {
+                    console.warn(`[switchToSession] 加载缓冲区数据失败:`, err);
                 }
-            } catch (err) {
-                console.warn(`[switchToSession] 加载缓冲区数据失败:`, err);
             }
             try {
                 const activateResult = await window.api.ssh.activateSession(sessionInfo.sessionId);
@@ -377,15 +343,6 @@ class ConnectionManager {
         } catch (error) {
             console.error('切换会话失败:', error);
             return false;
-        } finally {
-            // 使用 requestAnimationFrame 延迟移除加载遮罩，避免闪烁
-            window.requestAnimationFrame(() => {
-                setTimeout(() => {
-                    if (terminalContent && terminalContent.contains(loadingOverlay)) {
-                        terminalContent.removeChild(loadingOverlay);
-                    }
-                }, 50);  // 添加小延迟使切换更平滑
-            });
         }
     }
     
@@ -451,12 +408,6 @@ class ConnectionManager {
                 return;
             }
 
-            // 先清空终端容器，避免看到前一个会话的内容（仅在确实要切换时）
-            const terminalContainer = document.getElementById('terminal-container');
-            if (terminalContainer) {
-                terminalContainer.innerHTML = '';
-            }
-
             const connections = await window.api.config.getConnections();
             const connection = connections.find(c => c.id === id);
 
@@ -511,8 +462,7 @@ class ConnectionManager {
                 const terminalInfo = await window.terminalManager.initTerminal(
                     result.sessionId,
                     null,
-                    false,
-                    true
+                    false
                 );
 
                 if (terminalInfo) {
@@ -604,12 +554,6 @@ class ConnectionManager {
             this.isConnecting = true;
             window.uiManager.createLoadingOverlay('正在连接服务器...');
 
-            // 先清空终端容器，避免看到前一个会话的内容
-            const terminalContainer = document.getElementById('terminal-container');
-            if (terminalContainer) {
-                terminalContainer.innerHTML = '';
-            }
-
             const authType = document.getElementById('auth-type').value;
             const savePassword = document.getElementById('conn-save-password').checked;
 
@@ -675,10 +619,9 @@ class ConnectionManager {
 
                 // 初始化终端 - 先创建空白终端，稍后添加内容
                 const terminalInfo = await window.terminalManager.initTerminal(
-                    result.sessionId, 
-                    null, 
-                    false,  // 不显示缓冲区，稍后再加载
-                    true    // 先清空容器
+                    result.sessionId,
+                    null,
+                    false  // 不显示缓冲区，稍后再加载
                 );
 
                 // 保存到会话管理器
@@ -829,24 +772,21 @@ class ConnectionManager {
             console.log('已移除旧的SSH数据处理监听器');
         }
 
-        // 添加新的事件监听器
+        // 添加新的事件监听器：始终按 sessionId 路由到对应的 xterm，
+        // 这样后台 session 也能实时收到数据，切回时无需重放缓冲区。
         this.currentDataHandlerRemover = window.api.ssh.onData((event, data) => {
             const dataStr = data.data;
             const sessionId = data.sessionId;
 
-            // 向缓冲区添加数据
             window.sessionManager.addToBuffer(sessionId, dataStr);
 
-            // 如果是当前会话，更新终端显示
-            if (sessionId === window.currentSessionId && window.terminalManager.activeTerminal) {
+            const term = window.terminalManager.getTerminalForSession(sessionId);
+            if (term) {
                 try {
-                    window.terminalManager.activeTerminal.write(dataStr);
-                    console.log(`[setupSSHDataHandler] 写入数据到终端，会话ID: ${sessionId}, 数据长度: ${dataStr.length}`);
+                    term.write(dataStr);
                 } catch (error) {
-                    console.error(`[setupSSHDataHandler] 写入数据到终端失败:`, error);
+                    console.error(`[setupSSHDataHandler] 写入终端失败:`, error);
                 }
-            } else {
-                console.log(`[setupSSHDataHandler] 数据已添加到缓冲区，会话ID: ${sessionId}, 数据长度: ${dataStr.length}`);
             }
         });
     }
@@ -874,34 +814,24 @@ class ConnectionManager {
             // 标记为非活跃
             window.sessionManager.setSessionActive(sessionId, false);
 
-            // 如果是当前活跃会话，清理终端显示
-            if (sessionId === window.currentSessionId) {
-                window.terminalManager.activeTerminal = null;
-                window.currentSessionId = null;
-                window.terminalFitAddon = null;
+            // 只销毁这个 session 对应的 xterm 实例（不影响其他后台 session）
+            window.terminalManager.disposeTerminalInstance(sessionId);
 
-                const terminalContainer = document.getElementById('terminal-container');
-                if (terminalContainer) {
-                    terminalContainer.innerHTML = '';
-                }
+            // 如果是当前活跃会话，清理 UI
+            if (sessionId === window.currentSessionId) {
+                window.currentSessionId = null;
 
                 const placeholder = document.getElementById('terminal-placeholder');
-                if (placeholder) {
-                    placeholder.classList.remove('hidden');
-                }
+                if (placeholder) placeholder.classList.remove('hidden');
 
                 window.uiManager.updateConnectionStatus(false);
                 window.uiManager.updateServerInfo(false);
-                
-                // 清理文件管理器状态
+
                 window.fileManager.clearFileManagerCache();
                 window.fileManager.fileManagerInitialized = false;
-                
-                // 清空文件管理器视图
+
                 const remoteFilesTbody = document.querySelector('#remote-files tbody');
-                if (remoteFilesTbody) {
-                    remoteFilesTbody.innerHTML = '';
-                }
+                if (remoteFilesTbody) remoteFilesTbody.innerHTML = '';
             }
 
             // 更新连接列表
