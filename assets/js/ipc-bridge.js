@@ -88,7 +88,11 @@
       downloadDirectory: (sessionId, remotePath, localPath) =>
         call('file_download_directory', { sessionId, remotePath, localPath }),
       changePermissions: (sessionId, remotePath, permissions) =>
-        call('file_change_permissions', { sessionId, remotePath, permissions }),
+        call('file_change_permissions', {
+          sessionId,
+          remotePath,
+          permissions: typeof permissions === 'string' ? parseInt(permissions, 8) : permissions
+        }),
       changeOwner: (sessionId, remotePath, owner, group) =>
         call('file_change_owner', { sessionId, remotePath, owner, group }),
       onDownloadProgress: onEvent('file:download-progress'),

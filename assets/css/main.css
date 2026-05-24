@@ -998,30 +998,44 @@ input[type="checkbox"] {
 .permissions-dialog-content {
   max-width: 600px;
   width: 90%;
+  padding: 0;
+  overflow: hidden;
 }
 
-/* 权限对话框标题 - 使用标准连接对话框样式 */
-.permissions-dialog-content h3 {
-  padding: 16px 20px;
-  margin: 0;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 18px;
-  font-weight: 500;
-  display: flex;
+/* 权限对话框标题中的徽章 */
+.permissions-dialog-content .settings-header h3 {
+  display: inline-flex;
   align-items: center;
   gap: 8px;
 }
 
-/* 当前权限徽章 */
 .current-perm-badge {
-  background-color: #5695D7;
+  background-color: var(--primary-color);
   color: white;
-  padding: 4px 8px;
+  padding: 2px 6px;
   border-radius: 4px;
   font-family: 'Fira Code', monospace;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  margin-left: auto;
+}
+
+#close-permissions {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #6b7280;
+  border-radius: 4px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#close-permissions:hover {
+  background-color: #f3f4f6;
+  color: #111827;
 }
 
 /* 文件信息区域 */
@@ -1237,44 +1251,8 @@ input[type="checkbox"] {
   border: 1px solid #d1d5db;
 }
 
-/* 对话框按钮 */
-.permissions-dialog-content .dialog-buttons {
-  padding: 12px 20px;
-  background-color: #f9fafb;
-  border-top: 1px solid #e5e7eb;
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.permissions-dialog-content .dialog-buttons button {
-  min-width: 80px;
-  padding: 8px 14px;
-  border-radius: 4px;
-  font-weight: 500;
-  transition: all 0.2s;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-#cancel-permissions {
-  background-color: white;
-  color: #374151;
-  border: 1px solid #d1d5db;
-}
-
-#cancel-permissions:hover {
-  background-color: #f3f4f6;
-}
-
-#apply-permissions {
-  background-color: #5695D7;
-  color: white;
-  border: none;
-}
-
-#apply-permissions:hover {
-  background-color: #4a7fb8;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(86, 149, 215, 0.4);
+/* 权限对话框底部按钮区 */
+.permissions-actions {
+  padding: 12px 16px;
+  border-top: 1px solid #eef0f3;
 }

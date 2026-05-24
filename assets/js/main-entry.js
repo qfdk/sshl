@@ -820,7 +820,63 @@ function initializeApp() {
         placeholder.classList.remove('hidden');
     }
 
+    setupPaneDivider();
+
     console.log('应用初始化完成');
+}
+
+function setupPaneDivider() {
+    const divider = document.getElementById('pane-divider');
+    if (!divider) return;
+    const split = divider.parentElement;
+    const localPane = split.querySelector('.local-pane');
+    if (!split || !localPane) return;
+
+    const STORAGE_KEY = 'sshl.localPaneFlex';
+    const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
+    if (saved && saved > 0) {
+        localPane.style.flexGrow = String(saved);
+    }
+
+    let startX = 0;
+    let startLocalW = 0;
+    let startRemoteW = 0;
+    let totalFlex = 0;
+
+    const onMove = (e) => {
+        const dx = e.clientX - startX;
+        const newLocalW = Math.max(220, Math.min(startLocalW + dx, startLocalW + startRemoteW - 220));
+        const ratio = newLocalW / (startLocalW + startRemoteW);
+        const localFlex = ratio * totalFlex;
+        const remoteFlex = totalFlex - localFlex;
+        localPane.style.flexGrow = String(localFlex);
+        split.querySelector('.remote-pane').style.flexGrow = String(remoteFlex);
+    };
+
+    const onUp = () => {
+        divider.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        localStorage.setItem(STORAGE_KEY, localPane.style.flexGrow || '1');
+    };
+
+    divider.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const localRect = localPane.getBoundingClientRect();
+        const remotePane = split.querySelector('.remote-pane');
+        const remoteRect = remotePane.getBoundingClientRect();
+        startX = e.clientX;
+        startLocalW = localRect.width;
+        startRemoteW = remoteRect.width;
+        const localFlex = parseFloat(localPane.style.flexGrow) || 1;
+        const remoteFlex = parseFloat(remotePane.style.flexGrow) || 1;
+        totalFlex = localFlex + remoteFlex;
+        divider.classList.add('dragging');
+        document.body.style.cursor = 'col-resize';
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
 }
 
 // 检测es模块兼容性

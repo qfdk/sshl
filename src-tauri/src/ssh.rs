@@ -2,6 +2,7 @@
 // SshSession owns: Handle (shared with SFTP), shell-task outbound sender, output buffer.
 // The shell pump task owns only the Channel.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -75,6 +76,10 @@ pub struct SshSession {
     /// Cached SFTP session — reused across file ops to avoid sshd MaxSessions exhaustion.
     /// Mirrors the Electron-side fix from commits 8cb552c / a819e15.
     pub sftp: Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
+    /// Lazily loaded uid→username map (from /etc/passwd).
+    pub passwd_cache: Mutex<Option<Arc<HashMap<u32, String>>>>,
+    /// Lazily loaded gid→groupname map (from /etc/group).
+    pub group_cache: Mutex<Option<Arc<HashMap<u32, String>>>>,
     /// Renderer must explicitly activate the session to start receiving ssh:data events.
     /// Until then, output is silently buffered; the renderer fetches the prelude via
     /// ssh_get_session_buffer to avoid the welcome-banner duplicate-render bug.
@@ -230,6 +235,8 @@ pub async fn ssh_connect(
         buffer: Mutex::new(String::new()),
         handle: handle_arc.clone(),
         sftp: Mutex::new(None),
+        passwd_cache: Mutex::new(None),
+        group_cache: Mutex::new(None),
         activated: AtomicBool::new(false),
         first_data: first_data.clone(),
         outbound: out_tx,

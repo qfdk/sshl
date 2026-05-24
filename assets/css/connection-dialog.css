@@ -56,14 +56,16 @@
 
 /* Filled (主操作) */
 #connection-form button[type="submit"],
-#settings-form button[type="submit"] {
+#settings-form button[type="submit"],
+#apply-permissions {
     background-color: var(--primary-color);
     color: white;
     border-color: var(--primary-color);
 }
 
 #connection-form button[type="submit"]:hover,
-#settings-form button[type="submit"]:hover {
+#settings-form button[type="submit"]:hover,
+#apply-permissions:hover {
     background-color: var(--primary-hover);
     border-color: var(--primary-hover);
 }
@@ -71,7 +73,8 @@
 /* Outlined (次操作 / 浏览) */
 #cancel-connection,
 #browse-private-key,
-#settings-cancel {
+#settings-cancel,
+#cancel-permissions {
     background-color: white;
     color: #374151;
     border-color: #d1d5db;
@@ -79,7 +82,8 @@
 
 #cancel-connection:hover,
 #browse-private-key:hover,
-#settings-cancel:hover {
+#settings-cancel:hover,
+#cancel-permissions:hover {
     background-color: #f3f4f6;
     border-color: #9ca3af;
 }

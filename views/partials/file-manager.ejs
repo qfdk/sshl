@@ -9,9 +9,14 @@
     <div class="pane local-pane">
       <div class="pane-header">
         <span>本地文件</span>
-        <button id="local-refresh" class="icon-button">
-          <i data-lucide="refresh-cw" data-size="12"></i>
-        </button>
+        <div class="pane-actions">
+          <button id="local-home" class="icon-button" title="主目录">
+            <i data-lucide="house" data-size="12"></i>
+          </button>
+          <button id="local-refresh" class="icon-button" title="刷新">
+            <i data-lucide="refresh-cw" data-size="12"></i>
+          </button>
+        </div>
       </div>
       <div class="path-bar">
         <input type="text" id="local-path" class="path-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -35,12 +40,19 @@
       </div>
     </div>
 
+    <div class="pane-divider" id="pane-divider" title="拖动调整面板宽度"></div>
+
     <div class="pane remote-pane">
       <div class="pane-header">
         <span>远程文件</span>
-        <button id="remote-refresh" class="icon-button">
-          <i data-lucide="refresh-cw" data-size="12"></i>
-        </button>
+        <div class="pane-actions">
+          <button id="remote-home" class="icon-button" title="主目录">
+            <i data-lucide="house" data-size="12"></i>
+          </button>
+          <button id="remote-refresh" class="icon-button" title="刷新">
+            <i data-lucide="refresh-cw" data-size="12"></i>
+          </button>
+        </div>
       </div>
       <div class="path-bar">
         <input type="text" id="remote-path" class="path-input" value="/" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">

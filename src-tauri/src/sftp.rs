@@ -2,6 +2,7 @@
 // Per-session SftpSession is cached on SshSession.sftp to avoid Channel accumulation
 // (mirrors Electron-side fix in commits 8cb552c / a819e15).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -61,6 +62,48 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
     Ok(sftp)
 }
 
+/// Read a small text file via SFTP and parse `colon:separated:fields` lines,
+/// extracting `(name, id)` from `name:_:id:...`. Used for /etc/passwd and /etc/group.
+async fn load_id_map(sftp: &SftpSession, path: &str) -> Option<HashMap<u32, String>> {
+    use tokio::io::AsyncReadExt;
+    let mut file = sftp.open(path).await.ok()?;
+    let mut buf = Vec::with_capacity(8 * 1024);
+    file.read_to_end(&mut buf).await.ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let mut parts = line.splitn(4, ':');
+        let name = parts.next()?.to_string();
+        let _ = parts.next()?;
+        let id: u32 = parts.next()?.parse().ok()?;
+        map.insert(id, name);
+    }
+    Some(map)
+}
+
+async fn passwd_map(session: &Arc<SshSession>, sftp: &SftpSession) -> Arc<HashMap<u32, String>> {
+    {
+        let cache = session.passwd_cache.lock().await;
+        if let Some(m) = cache.as_ref() { return m.clone(); }
+    }
+    let map = Arc::new(load_id_map(sftp, "/etc/passwd").await.unwrap_or_default());
+    let mut cache = session.passwd_cache.lock().await;
+    *cache = Some(map.clone());
+    map
+}
+
+async fn group_map(session: &Arc<SshSession>, sftp: &SftpSession) -> Arc<HashMap<u32, String>> {
+    {
+        let cache = session.group_cache.lock().await;
+        if let Some(m) = cache.as_ref() { return m.clone(); }
+    }
+    let map = Arc::new(load_id_map(sftp, "/etc/group").await.unwrap_or_default());
+    let mut cache = session.group_cache.lock().await;
+    *cache = Some(map.clone());
+    map
+}
+
 fn join_remote(base: &str, name: &str) -> String {
     if base == "/" {
         format!("/{}", name)
@@ -82,6 +125,8 @@ pub async fn file_list(
     let sftp = sftp_for(&session).await?;
     let entries = sftp.read_dir(&path).await
         .map_err(|e| AppError::Sftp(format!("read_dir {path}: {e}")))?;
+    let users = passwd_map(&session, &sftp).await;
+    let groups = group_map(&session, &sftp).await;
     let mut out: Vec<RemoteEntry> = Vec::new();
     for e in entries {
         let name = e.file_name();
@@ -105,8 +150,12 @@ pub async fn file_list(
             // mtime is seconds since epoch; JS Date() wants milliseconds.
             modified: meta.mtime.map(|s| s as u64 * 1000),
             permissions: meta.permissions.unwrap_or(0),
-            owner: meta.uid.map(|u| u.to_string()).unwrap_or_default(),
-            group: meta.gid.map(|g| g.to_string()).unwrap_or_default(),
+            owner: meta.uid
+                .map(|u| users.get(&u).cloned().unwrap_or_else(|| u.to_string()))
+                .unwrap_or_default(),
+            group: meta.gid
+                .map(|g| groups.get(&g).cloned().unwrap_or_else(|| g.to_string()))
+                .unwrap_or_default(),
             name,
         });
     }

@@ -324,6 +324,34 @@ class FileManager {
 
         tbody.innerHTML = '';
 
+        const isRoot = currentPath === '/' || /^[A-Za-z]:[\\/]?$/.test(currentPath);
+        if (!isRoot) {
+            const parentRow = document.createElement('tr');
+            parentRow.className = 'directory';
+            parentRow.dataset.type = 'directory';
+            parentRow.dataset.name = '..';
+
+            const nameCell = document.createElement('td');
+            nameCell.innerHTML = `<span class="file-icon">${window.Icons.svg('folder', 12)}</span> ..`;
+            parentRow.appendChild(nameCell);
+
+            for (let i = 0; i < 2; i++) {
+                const cell = document.createElement('td');
+                cell.textContent = '-';
+                parentRow.appendChild(cell);
+            }
+
+            parentRow.addEventListener('dblclick', async () => {
+                const sep = currentPath.includes('\\') ? '\\' : '/';
+                const trimmed = currentPath.replace(/[\\/]+$/, '');
+                const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+                const newPath = idx > 0 ? trimmed.substring(0, idx) : sep;
+                await this.loadLocalFiles(newPath);
+            });
+
+            tbody.appendChild(parentRow);
+        }
+
         files.forEach(file => {
             const row = document.createElement('tr');
             row.className = file.isDirectory ? 'directory' : 'file';
@@ -1110,8 +1138,13 @@ class FileManager {
         const dialogHtml = `
             <div id="permissions-dialog" class="dialog active">
                 <div class="dialog-content permissions-dialog-content">
-                    <h3>修改文件权限 <code class="current-perm-badge">${currentPermissions}</code></h3>
-                    
+                    <div class="settings-header">
+                        <h3>修改文件权限 <code class="current-perm-badge">${currentPermissions}</code></h3>
+                        <button type="button" id="close-permissions" class="icon-button" title="关闭">
+                            <i data-lucide="x" data-size="16"></i>
+                        </button>
+                    </div>
+
                     <div class="file-info">
                         <div class="file-path">
                             <span class="path-label">文件路径:</span>
@@ -1217,9 +1250,9 @@ class FileManager {
                         </div>
                     </div>
                     
-                    <div class="dialog-buttons">
-                        <button type="button" id="cancel-permissions">取消</button>
-                        <button type="button" id="apply-permissions">应用更改</button>
+                    <div class="dialog-buttons permissions-actions">
+                        <button type="button" id="cancel-permissions"><i data-lucide="x" data-size="16"></i>取消</button>
+                        <button type="button" id="apply-permissions"><i data-lucide="check" data-size="16"></i>应用更改</button>
                     </div>
                 </div>
             </div>
@@ -1264,13 +1297,16 @@ class FileManager {
         });
 
         // 按钮事件
-        document.getElementById('cancel-permissions').addEventListener('click', () => {
-            document.getElementById('permissions-dialog').remove();
-        });
+        const closeDialog = () => document.getElementById('permissions-dialog')?.remove();
+        document.getElementById('cancel-permissions').addEventListener('click', closeDialog);
+        document.getElementById('close-permissions').addEventListener('click', closeDialog);
 
         document.getElementById('apply-permissions').addEventListener('click', () => {
             this.applyPermissions(filePath, permInput.value);
         });
+
+        // 渲染 Lucide 图标
+        window.Icons?.replace?.(document.getElementById('permissions-dialog'));
 
         // 初始化权限预览
         this.updatePermissionPreview(permInput.value);

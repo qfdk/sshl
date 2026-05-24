@@ -9,8 +9,8 @@
 /* Split pane styling */
 .split-pane {
     display: flex;
-    gap: 8px;
     padding: 8px;
+    gap: 0;
     height: calc(100% - 28px); /* Account for status bar */
 }
 
@@ -19,6 +19,42 @@
     border: 1px solid var(--border-color);
     border-radius: 6px;
     overflow: hidden;
+    flex: 1 1 0;
+    min-width: 220px;
+}
+
+.local-pane {
+    flex: var(--local-pane-flex, 1) 1 0;
+}
+
+.remote-pane {
+    flex: 1 1 0;
+}
+
+.pane-divider {
+    flex: 0 0 8px;
+    cursor: col-resize;
+    position: relative;
+    background: transparent;
+    user-select: none;
+}
+
+.pane-divider::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    background-color: var(--border-color);
+    transform: translateX(-50%);
+    transition: background-color 0.15s, width 0.15s;
+}
+
+.pane-divider:hover::before,
+.pane-divider.dragging::before {
+    background-color: var(--primary-color);
+    width: 2px;
 }
 
 /* Header styling */
@@ -30,6 +66,11 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+}
+
+.pane-actions {
+    display: flex;
+    gap: 4px;
 }
 
 /* Path bar styling */
@@ -84,6 +125,15 @@
     padding: 6px 12px;
     border-bottom: 1px solid var(--border-color);
     color: var(--text-dark);
+    cursor: default;
+}
+
+.file-list tr.directory {
+    cursor: pointer;
+}
+
+.file-list tr.file {
+    cursor: default;
 }
 
 .file-list tr.directory td:first-child {

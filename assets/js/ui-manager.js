@@ -444,6 +444,41 @@ class UIManager {
                 }
             });
         }
+
+        // 本地主目录按钮
+        const localHomeBtn = document.getElementById('local-home');
+        if (localHomeBtn) {
+            localHomeBtn.addEventListener('click', async function () {
+                this.disabled = true;
+                try {
+                    const home = await window.api.file.getHomeDir();
+                    if (home) await window.fileManager.loadLocalFiles(home);
+                } catch (e) {
+                    console.error('获取本地主目录失败:', e);
+                } finally {
+                    this.disabled = false;
+                }
+            });
+        }
+
+        // 远程主目录按钮
+        const remoteHomeBtn = document.getElementById('remote-home');
+        if (remoteHomeBtn) {
+            remoteHomeBtn.addEventListener('click', async function () {
+                if (!window.currentSessionId) return;
+                this.disabled = true;
+                try {
+                    const sessionId = String(window.currentSessionId);
+                    const result = await window.api.ssh.execute(sessionId, 'echo "$HOME"');
+                    const home = (result && (result.output ?? result.data ?? result))?.toString().trim();
+                    if (home) await window.fileManager.loadRemoteFiles(home);
+                } catch (e) {
+                    console.error('获取远程主目录失败:', e);
+                } finally {
+                    this.disabled = false;
+                }
+            });
+        }
     }
     
     // 切换认证方式显示/隐藏相关字段
