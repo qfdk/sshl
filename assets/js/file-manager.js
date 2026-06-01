@@ -235,32 +235,30 @@ class FileManager {
                 if (result.error && (result.error.includes('not connected') ||
                     result.error.includes('connection closed') ||
                     result.error.includes('会话未找到'))) {
-                    alert(`连接已断开，请重新连接服务器`);
-
-                    // 可能需要切换到终端模式
+                    window.api.dialog.confirm('连接已断开，请重新连接服务器', '错误');
                     const terminalTab = document.querySelector('.tab[data-tab="terminal"]');
-                    if (terminalTab) {
-                        terminalTab.click();
+                    if (terminalTab) terminalTab.click();
+                } else if (path !== '/') {
+                    const parent = path.replace(/\/[^/]+\/?$/, '') || '/';
+                    if (parent !== path) {
+                        window.uiManager.showFileManagerLoading(false);
+                        await this.loadRemoteFiles(parent);
+                        return;
                     }
-                } else {
-                    alert(`无法访问目录 ${path}: ${result.error}`);
-                }
-
-                // 如果是根目录错误，尝试重置到根目录
-                if (path !== '/') {
-                    console.log('尝试重置到根目录');
-                    await this.loadRemoteFiles('/');
                 }
             }
         } catch (error) {
-            console.error('加载远程文件失败:', error);
-            alert(`加载远程文件失败: ${error.message}`);
-
-            // 如果是致命错误，切换到终端标签
-            const terminalTab = document.querySelector('.tab[data-tab="terminal"]');
-            if (terminalTab) {
-                terminalTab.click();
-            }
+            console.warn('加载远程文件失败:', path, error?.message);
+            try {
+                if (path !== '/') {
+                    const parent = path.replace(/\/[^/]+\/?$/, '') || '/';
+                    if (parent !== path) {
+                        window.uiManager.showFileManagerLoading(false);
+                        await this.loadRemoteFiles(parent);
+                        return;
+                    }
+                }
+            } catch (_) { /* 回退也失败，静默放弃 */ }
         } finally {
             // 隐藏加载状态
             window.uiManager.showFileManagerLoading(false);
@@ -644,6 +642,23 @@ class FileManager {
         }
     }
 
+    _removeRowAndUpdateCache(filePath) {
+        const tbody = document.querySelector('#remote-files tbody');
+        if (tbody) {
+            const row = tbody.querySelector(`tr[data-path="${CSS.escape(filePath)}"]`);
+            if (row) row.remove();
+        }
+        const remotePathInput = document.getElementById('remote-path');
+        if (remotePathInput && window.currentSessionId) {
+            const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
+            const cached = this.remoteFileCache.get(cacheKey);
+            if (cached) {
+                const name = this.path.basename(filePath);
+                this.remoteFileCache.set(cacheKey, cached.filter(f => f.name !== name));
+            }
+        }
+    }
+
     // 删除远程文件
     async deleteRemoteFile(filePath) {
         if (!window.currentSessionId) {
@@ -656,32 +671,16 @@ class FileManager {
         }
 
         try {
-            window.uiManager.showFileManagerLoading(true);
-
-            // 执行删除命令
             const result = await window.api.ssh.execute(window.currentSessionId, `rm -f "${filePath}"`);
 
             if (result.success) {
-                // 清除当前目录的缓存
-                const remotePathInput = document.getElementById('remote-path');
-                if (remotePathInput && window.currentSessionId) {
-                    const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
-                    this.remoteFileCache.delete(cacheKey);
-                    console.log('删除文件完成,清除缓存:', cacheKey);
-                }
-
-                // 刷新远程文件列表
-                if (remotePathInput) {
-                    await this.loadRemoteFiles(remotePathInput.value);
-                }
+                this._removeRowAndUpdateCache(filePath);
             } else {
                 alert(`删除文件失败: ${result.error || '未知错误'}`);
             }
         } catch (error) {
             console.error('删除远程文件失败:', error);
             alert(`删除文件失败: ${error.message}`);
-        } finally {
-            window.uiManager.showFileManagerLoading(false);
         }
     }
     
@@ -697,32 +696,16 @@ class FileManager {
         }
 
         try {
-            window.uiManager.showFileManagerLoading(true);
-
-            // 执行删除命令
             const result = await window.api.ssh.execute(window.currentSessionId, `rm -rf "${dirPath}"`);
 
             if (result.success) {
-                // 清除当前目录的缓存
-                const remotePathInput = document.getElementById('remote-path');
-                if (remotePathInput && window.currentSessionId) {
-                    const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
-                    this.remoteFileCache.delete(cacheKey);
-                    console.log('删除目录完成,清除缓存:', cacheKey);
-                }
-
-                // 刷新远程文件列表
-                if (remotePathInput) {
-                    await this.loadRemoteFiles(remotePathInput.value);
-                }
+                this._removeRowAndUpdateCache(dirPath);
             } else {
                 alert(`删除目录失败: ${result.error || '未知错误'}`);
             }
         } catch (error) {
             console.error('删除远程目录失败:', error);
             alert(`删除目录失败: ${error.message}`);
-        } finally {
-            window.uiManager.showFileManagerLoading(false);
         }
     }
     
@@ -914,6 +897,23 @@ class FileManager {
         }
     }
 
+    _removeLocalRow(filePath) {
+        const fileName = this.path.basename(filePath);
+        const tbody = document.querySelector('#local-files tbody');
+        if (tbody) {
+            const row = [...tbody.querySelectorAll('tr')].find(r => r.dataset.name === fileName);
+            if (row) row.remove();
+        }
+        const localPathInput = document.getElementById('local-path');
+        if (localPathInput) {
+            const dir = localPathInput.value;
+            const cached = this.localFileCache.get(dir);
+            if (cached) {
+                this.localFileCache.set(dir, cached.filter(f => f.name !== fileName));
+            }
+        }
+    }
+
     // 删除本地文件
     async deleteLocalFile(filePath) {
         if (!(await window.api.dialog.confirm(`确定要删除文件 "${this.path.basename(filePath)}" 吗？此操作不可恢复！`, '删除文件'))) {
@@ -924,11 +924,7 @@ class FileManager {
             const result = await window.api.file.deleteLocal(filePath);
 
             if (result.success) {
-                // 刷新本地文件列表
-                const localPathInput = document.getElementById('local-path');
-                if (localPathInput && localPathInput.value) {
-                    await this.loadLocalFiles(localPathInput.value);
-                }
+                this._removeLocalRow(filePath);
             } else {
                 alert(`删除文件失败: ${result.error || '未知错误'}`);
             }
@@ -937,7 +933,7 @@ class FileManager {
             alert(`删除文件失败: ${error.message}`);
         }
     }
-    
+
     // 删除本地目录
     async deleteLocalDirectory(dirPath) {
         if (!(await window.api.dialog.confirm(`确定要删除目录 "${this.path.basename(dirPath)}" 及其所有内容吗？此操作不可恢复！`, '删除目录'))) {
@@ -948,11 +944,7 @@ class FileManager {
             const result = await window.api.file.deleteLocalDirectory(dirPath);
 
             if (result.success) {
-                // 刷新本地文件列表
-                const localPathInput = document.getElementById('local-path');
-                if (localPathInput && localPathInput.value) {
-                    await this.loadLocalFiles(localPathInput.value);
-                }
+                this._removeLocalRow(dirPath);
             } else {
                 alert(`删除目录失败: ${result.error || '未知错误'}`);
             }

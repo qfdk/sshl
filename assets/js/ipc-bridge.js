@@ -36,10 +36,8 @@
       },
       (err) => {
         const msg = typeof err === 'string' ? err : (err && err.message) || JSON.stringify(err);
-        console.error(`[ipc-bridge] ${cmd} failed:`, err);
-        const wrapped = new Error(msg);
-        wrapped.cause = err;
-        throw wrapped;
+        console.error(`[ipc-bridge] ${cmd} failed:`, msg);
+        return { success: false, error: msg };
       }
     );
   };
