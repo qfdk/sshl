@@ -512,9 +512,15 @@ class FileManager {
                 if (e.target.classList.contains('permissions-cell')) {
                     const row = e.target.closest('tr');
                     if (!row || row.dataset.name === '..') return;
-                    
+
                     this.showPermissionsDialog(row.dataset.path, e.target.textContent);
+                    return;
                 }
+
+                const row = e.target.closest('tr');
+                if (!row || row.dataset.name === '..') return;
+
+                this._handleRowSelect(row, tbody, e);
             });
         }
     }
@@ -639,6 +645,47 @@ class FileManager {
             window.uiManager.showTransferStatus(false);
         } finally {
             this.activeTransfers = Math.max(0, this.activeTransfers - 1);
+        }
+    }
+
+    _handleRowSelect(row, tbody, e) {
+        if (e.metaKey || e.ctrlKey) {
+            row.classList.toggle('selected');
+        } else if (e.shiftKey && this._lastSelectedRow && tbody.contains(this._lastSelectedRow)) {
+            const rows = [...tbody.querySelectorAll('tr')];
+            const from = rows.indexOf(this._lastSelectedRow);
+            const to = rows.indexOf(row);
+            const [start, end] = from < to ? [from, to] : [to, from];
+            rows.forEach((r, i) => {
+                if (i >= start && i <= end && r.dataset.name !== '..') r.classList.add('selected');
+            });
+        } else {
+            tbody.querySelectorAll('tr.selected').forEach(r => r.classList.remove('selected'));
+            row.classList.add('selected');
+        }
+        this._lastSelectedRow = row;
+    }
+
+    _getSelectedPaths(tbody) {
+        return [...tbody.querySelectorAll('tr.selected')]
+            .filter(r => r.dataset.path)
+            .map(r => ({ path: r.dataset.path, isDir: r.dataset.type === 'directory' }));
+    }
+
+    async deleteMultipleRemote(items) {
+        if (!window.currentSessionId || !items.length) return;
+
+        const names = items.map(i => this.path.basename(i.path)).join(', ');
+        if (!(await window.api.dialog.confirm(
+            `确定要删除 ${items.length} 个项目吗？\n${names}\n此操作不可恢复！`, '批量删除'
+        ))) return;
+
+        for (const item of items) {
+            const cmd = item.isDir ? `rm -rf "${item.path}"` : `rm -f "${item.path}"`;
+            const result = await window.api.ssh.execute(window.currentSessionId, cmd);
+            if (result.success) {
+                this._removeRowAndUpdateCache(item.path);
+            }
         }
     }
 
@@ -1000,10 +1047,8 @@ class FileManager {
 
         if (remoteFilesTable) {
             remoteFilesTable.addEventListener('contextmenu', (e) => {
-                // 检查是否点击在文件行上
                 const row = e.target.closest('tr');
                 if (!row) {
-                    // 如果点击在行外，显示目录操作
                     const remotePath = document.getElementById('remote-path').value;
                     e.preventDefault();
                     window.uiManager.showContextMenu(e.clientX, e.clientY, [
@@ -1016,43 +1061,55 @@ class FileManager {
                     return;
                 }
 
-                // 获取文件名和路径
-                const fileName = row.querySelector('td:first-child').textContent.trim().replace(/^.+\s/, '');
-                const remotePath = document.getElementById('remote-path').value;
-                const fullPath = remotePath === '/' ? `/${fileName}` : `${remotePath}/${fileName}`;
-
-                // 跳过父目录
-                if (fileName === '..') return;
-
+                if (row.dataset.name === '..') return;
                 e.preventDefault();
 
-                if (row.classList.contains('directory')) {
+                if (!row.classList.contains('selected')) {
+                    const tbody = remoteFilesTable.querySelector('tbody');
+                    tbody.querySelectorAll('tr.selected').forEach(r => r.classList.remove('selected'));
+                    row.classList.add('selected');
+                }
+
+                const tbody = remoteFilesTable.querySelector('tbody');
+                const selected = this._getSelectedPaths(tbody);
+
+                if (selected.length > 1) {
                     window.uiManager.showContextMenu(e.clientX, e.clientY, [
                         {
-                            label: '下载文件夹',
-                            action: () => this.downloadDirectory(fullPath),
-                            className: 'download'
-                        },
-                        {
-                            label: '删除目录',
-                            action: () => this.deleteRemoteDirectory(fullPath),
+                            label: `删除 ${selected.length} 个项目`,
+                            action: () => this.deleteMultipleRemote(selected),
                             className: 'delete'
                         }
                     ]);
                 } else {
-                    // 修改文件上下文菜单以直接下载
-                    window.uiManager.showContextMenu(e.clientX, e.clientY, [
-                        {
-                            label: '下载文件',
-                            action: () => this.downloadFile(fullPath), // 不需要第二个参数，将使用当前本地目录
-                            className: 'download'
-                        },
-                        {
-                            label: '删除文件',
-                            action: () => this.deleteRemoteFile(fullPath),
-                            className: 'delete'
-                        }
-                    ]);
+                    const fullPath = row.dataset.path;
+                    if (row.classList.contains('directory')) {
+                        window.uiManager.showContextMenu(e.clientX, e.clientY, [
+                            {
+                                label: '下载文件夹',
+                                action: () => this.downloadDirectory(fullPath),
+                                className: 'download'
+                            },
+                            {
+                                label: '删除目录',
+                                action: () => this.deleteRemoteDirectory(fullPath),
+                                className: 'delete'
+                            }
+                        ]);
+                    } else {
+                        window.uiManager.showContextMenu(e.clientX, e.clientY, [
+                            {
+                                label: '下载文件',
+                                action: () => this.downloadFile(fullPath),
+                                className: 'download'
+                            },
+                            {
+                                label: '删除文件',
+                                action: () => this.deleteRemoteFile(fullPath),
+                                className: 'delete'
+                            }
+                        ]);
+                    }
                 }
             });
         }

@@ -148,6 +148,14 @@
     background-color: #f3f4f6;
 }
 
+.file-list tr.selected {
+    background-color: #dbeafe;
+}
+
+.file-list tr.selected:hover {
+    background-color: #bfdbfe;
+}
+
 /* Button styling */
 .icon-button {
     background-color: transparent;
