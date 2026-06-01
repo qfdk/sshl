@@ -445,6 +445,13 @@ async fn run_channel(
         let h = session.handle.lock().await;
         let _ = h.disconnect(russh::Disconnect::ByApplication, "client closed", "en").await;
     }
+    // 退出路径（含 server EOF / exit 命令）也要从 AppState 移除，否则死 session
+    // 连同 Arc handle、缓存的 SFTP / passwd / group map 永久泄漏在 sessions map 里。
+    // 主动 ssh_disconnect 已先 remove 过，这里 remove 是幂等的 no-op。
+    {
+        use tauri::Manager;
+        app.state::<AppState>().remove(&session_id).await;
+    }
     emit_closed(&app, &session_id, exit_code, exit_reason);
 }
 

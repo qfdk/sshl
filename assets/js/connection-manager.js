@@ -780,8 +780,9 @@ class ConnectionManager {
             const dataStr = data.data;
             const sessionId = data.sessionId;
 
-            window.sessionManager.addToBuffer(sessionId, dataStr);
-
+            // 不再做前端二次缓冲：数据直接 write 进 xterm（自带 scrollback），
+            // 首屏回放走后端 ssh_get_session_buffer。原 addToBuffer 既是 100KB 冗余拷贝，
+            // 又在每个数据块 console.log，高吞吐输出时拖垮渲染进程。
             const term = window.terminalManager.getTerminalForSession(sessionId);
             if (term) {
                 try {
@@ -813,8 +814,10 @@ class ConnectionManager {
 
             console.log(`SSH连接关闭: ${sessionId}`);
 
-            // 标记为非活跃
+            // server EOF / exit 命令：彻底移除会话记录。否则 loadConnections 仍能
+            // getSessionByConnectionId 命中 → 左侧连接项一直显示 online（绿点 + 断开按钮）。
             window.sessionManager.setSessionActive(sessionId, false);
+            window.sessionManager.removeSession(sessionId);
 
             // 只销毁这个 session 对应的 xterm 实例（不影响其他后台 session）
             window.terminalManager.disposeTerminalInstance(sessionId);

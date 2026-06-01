@@ -173,15 +173,35 @@ pub async fn file_upload(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    let data = tokio::fs::read(&local_path).await?;
     let mut file = sftp.open_with_flags(
         &remote_path,
         OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
     ).await.map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
-    file.write_all(&data).await
-        .map_err(|e| AppError::Sftp(format!("write {remote_path}: {e}")))?;
+    stream_to_remote(&local_path, &mut file, &remote_path).await?;
     file.shutdown().await
         .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))?;
+    Ok(())
+}
+
+/// 分块从本地文件流式写入 SFTP 远端句柄，避免大文件一次性读进内存。
+/// 下载侧本来就是 64KB 流式的，上传侧此前用 `fs::read` 全量加载，几 GB 文件会 OOM。
+async fn stream_to_remote<W>(
+    local_path: &str,
+    file: &mut W,
+    remote_path: &str,
+) -> AppResult<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut local = tokio::fs::File::open(local_path).await?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = local.read(&mut buf).await?;
+        if n == 0 { break; }
+        file.write_all(&buf[..n]).await
+            .map_err(|e| AppError::Sftp(format!("write {remote_path}: {e}")))?;
+    }
     Ok(())
 }
 
@@ -209,20 +229,33 @@ pub async fn file_download(
     let mut local = tokio::fs::File::create(&local_path).await?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut transferred: u64 = 0;
+    // 进度事件按 100ms 节流：64KB 一次 emit 会让 1GB 文件产生上万次 IPC + 字符串 clone，
+    // 淹没 webview 事件队列。只在间隔过去或传输完成时才 emit。
+    let mut last_emit = std::time::Instant::now();
     loop {
         let n = remote.read(&mut buf).await
             .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
         if n == 0 { break; }
         local.write_all(&buf[..n]).await?;
         transferred += n as u64;
-        emit_download_progress(&app, DownloadProgress {
-            session_id: session_id.clone(),
-            remote_path: remote_path.clone(),
-            transferred,
-            total,
-        });
+        if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+            emit_download_progress(&app, DownloadProgress {
+                session_id: session_id.clone(),
+                remote_path: remote_path.clone(),
+                transferred,
+                total,
+            });
+            last_emit = std::time::Instant::now();
+        }
     }
     local.flush().await?;
+    // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
+    emit_download_progress(&app, DownloadProgress {
+        session_id,
+        remote_path,
+        transferred,
+        total,
+    });
     Ok(())
 }
 
@@ -263,13 +296,12 @@ fn upload_dir<'a>(
             if meta.is_dir() {
                 upload_dir(sftp.clone(), child_local, child_remote).await?;
             } else {
-                let data = tokio::fs::read(&child_local).await?;
                 let mut f = sftp.open_with_flags(
                     &child_remote,
                     OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
                 ).await.map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
-                f.write_all(&data).await
-                    .map_err(|e| AppError::Sftp(format!("write {child_remote}: {e}")))?;
+                let child_local_str = child_local.to_string_lossy().to_string();
+                stream_to_remote(&child_local_str, &mut f, &child_remote).await?;
                 f.shutdown().await
                     .map_err(|e| AppError::Sftp(format!("close {child_remote}: {e}")))?;
             }

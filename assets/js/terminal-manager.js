@@ -267,16 +267,25 @@ class TerminalManager {
                     term.open(container);
                     fitAddon.fit();
 
-                    // 添加窗口大小调整事件监听器
-                    window.addEventListener('resize', () => {
-                        fitAddon.fit();
-                    });
-    
+                    // 添加窗口大小调整事件监听器（去抖 + 存 cleanup）
+                    // 之前这里注册的是未去抖、且无法移除的匿名监听器，每开一个新 session
+                    // 就永久叠加一个，窗口缩放时 N 个 fit() 同时触发且永不回收。
+                    const resizeHandler = debounce(() => {
+                        if (fitAddon && term) {
+                            fitAddon.fit();
+                        }
+                    }, 50);
+                    window.addEventListener('resize', resizeHandler);
+                    term._resizeHandler = resizeHandler;
+                    term._cleanup = () => {
+                        window.removeEventListener('resize', resizeHandler);
+                    };
+
                     // 强制延迟以确保适当的大小
                     setTimeout(() => {
                         fitAddon.fit();
                     }, 100);
-    
+
                     resolve({term, fitAddon});
                 } catch (error) {
                     console.error('创建终端错误:', error);
