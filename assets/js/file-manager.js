@@ -315,10 +315,18 @@ class FileManager {
     }
     
     // 显示本地文件
+    _sortFiles(files) {
+        return [...files].sort((a, b) => {
+            if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+            return a.name.localeCompare(b.name);
+        });
+    }
+
     displayLocalFiles(files, currentPath) {
         const tbody = document.querySelector('#local-files tbody');
         if (!tbody) return;
 
+        files = this._sortFiles(files);
         tbody.innerHTML = '';
 
         const isRoot = currentPath === '/' || /^[A-Za-z]:[\\/]?$/.test(currentPath);
@@ -352,8 +360,10 @@ class FileManager {
         files.forEach(file => {
             const row = document.createElement('tr');
             row.className = file.isDirectory ? 'directory' : 'file';
+            row.dataset.type = file.isDirectory ? 'directory' : 'file';
+            row.dataset.name = file.name;
+            row.dataset.path = this.path.join(currentPath, file.name);
 
-            // 文件名列
             const nameCell = document.createElement('td');
             const icon = file.isDirectory
                 ? window.Icons.svg('folder', 12)
@@ -362,26 +372,27 @@ class FileManager {
             nameCell.innerHTML = `<span class="file-icon">${icon}</span> ${file.name}`;
             row.appendChild(nameCell);
 
-            // 大小列
             const sizeCell = document.createElement('td');
             sizeCell.textContent = file.isDirectory ? '-' : this.formatFileSize(file.size);
             row.appendChild(sizeCell);
 
-            // 修改日期列
             const dateCell = document.createElement('td');
             dateCell.textContent = this.formatDate(file.modifyTime);
             row.appendChild(dateCell);
 
-            // 添加行点击事件
             if (file.isDirectory) {
                 row.addEventListener('dblclick', async () => {
                     const newPath = file.name === '..' ?
                         currentPath.substring(0, currentPath.lastIndexOf('/')) || currentPath.substring(0, currentPath.lastIndexOf('\\')) || '/' :
                         `${currentPath}/${file.name}`.replace(/\/\//g, '/');
-
                     await this.loadLocalFiles(newPath);
                 });
             }
+
+            row.addEventListener('click', (e) => {
+                if (e.detail === 2) return;
+                this._handleRowSelect(row, tbody, e);
+            });
 
             tbody.appendChild(row);
         });
@@ -392,7 +403,7 @@ class FileManager {
         const tbody = document.querySelector('#remote-files tbody');
         if (!tbody) return;
 
-        // 使用DocumentFragment批量插入，避免多次重排
+        files = this._sortFiles(files);
         const fragment = document.createDocumentFragment();
 
         // 添加返回上级目录的条目
@@ -592,14 +603,10 @@ class FileManager {
             return;
         }
 
-        // 如果未指定本地路径，请求用户选择保存位置（先于计数器，避免取消时残留）
         if (!localFilePath) {
-            const result = await window.api.dialog.selectDirectory();
-            if (result.canceled) {
-                return;
-            }
-            const fileName = this.path.basename(remotePath);
-            localFilePath = this.path.join(result.directoryPath, fileName);
+            const localDir = document.getElementById('local-path')?.value;
+            if (!localDir) return;
+            localFilePath = this.path.join(localDir, this.path.basename(remotePath));
         }
 
         this.activeTransfers++;
@@ -648,7 +655,21 @@ class FileManager {
         }
     }
 
+    _installSelectionGuard(table) {
+        if (table.dataset.selGuard) return;
+        table.dataset.selGuard = '1';
+        table.addEventListener('mousedown', (e) => {
+            if (!e.target.classList.contains('permissions-cell')) {
+                e.preventDefault();
+            }
+        });
+    }
+
     _handleRowSelect(row, tbody, e) {
+        const isRemote = !!tbody.closest('#remote-files');
+        const otherId = isRemote ? '#local-files' : '#remote-files';
+        document.querySelectorAll(`${otherId} tr.selected`).forEach(r => r.classList.remove('selected'));
+
         if (e.metaKey || e.ctrlKey) {
             row.classList.toggle('selected');
         } else if (e.shiftKey && this._lastSelectedRow && tbody.contains(this._lastSelectedRow)) {
@@ -685,6 +706,54 @@ class FileManager {
             const result = await window.api.ssh.execute(window.currentSessionId, cmd);
             if (result.success) {
                 this._removeRowAndUpdateCache(item.path);
+            }
+        }
+    }
+
+    async downloadMultipleRemote(items) {
+        if (!window.currentSessionId || !items.length) return;
+
+        const localDir = document.getElementById('local-path')?.value;
+        if (!localDir) return;
+
+        for (const item of items) {
+            if (item.isDir) {
+                await this.downloadDirectory(item.path, localDir);
+            } else {
+                const localPath = this.path.join(localDir, this.path.basename(item.path));
+                await this.downloadFile(item.path, localPath);
+            }
+        }
+    }
+
+    async uploadMultipleLocal(items) {
+        if (!window.currentSessionId || !items.length) return;
+
+        const remotePath = document.getElementById('remote-path').value || '/';
+        for (const item of items) {
+            const remoteDest = remotePath === '/' ? `/${this.path.basename(item.path)}` : `${remotePath}/${this.path.basename(item.path)}`;
+            if (item.isDir) {
+                await this.uploadDirectory(item.path, remoteDest);
+            } else {
+                await this.uploadFile(item.path, remoteDest);
+            }
+        }
+    }
+
+    async deleteMultipleLocal(items) {
+        if (!items.length) return;
+
+        const names = items.map(i => this.path.basename(i.path)).join(', ');
+        if (!(await window.api.dialog.confirm(
+            `确定要删除 ${items.length} 个项目吗？\n${names}\n此操作不可恢复！`, '批量删除'
+        ))) return;
+
+        for (const item of items) {
+            const result = item.isDir
+                ? await window.api.file.deleteLocalDirectory(item.path)
+                : await window.api.file.deleteLocal(item.path);
+            if (result.success) {
+                this._removeLocalRow(item.path);
             }
         }
     }
@@ -884,19 +953,18 @@ class FileManager {
     }
     
     // 下载目录
-    async downloadDirectory(remoteDirPath) {
+    async downloadDirectory(remoteDirPath, localBasePath) {
         if (!window.currentSessionId) {
             alert('请先连接到服务器');
             return;
         }
 
-        // 请求用户选择保存位置（先于计数器，避免取消时残留）
-        const result = await window.api.dialog.selectDirectory();
-        if (result.canceled) {
-            return;
+        if (!localBasePath) {
+            localBasePath = document.getElementById('local-path')?.value;
+            if (!localBasePath) return;
         }
         const dirName = this.path.basename(remoteDirPath);
-        const localDirPath = this.path.join(result.directoryPath, dirName);
+        const localDirPath = this.path.join(localBasePath, dirName);
 
         this.activeTransfers++;
         try {
@@ -1046,6 +1114,7 @@ class FileManager {
         const remoteFilesTable = document.getElementById('remote-files');
 
         if (remoteFilesTable) {
+            this._installSelectionGuard(remoteFilesTable);
             remoteFilesTable.addEventListener('contextmenu', (e) => {
                 const row = e.target.closest('tr');
                 if (!row) {
@@ -1075,6 +1144,11 @@ class FileManager {
 
                 if (selected.length > 1) {
                     window.uiManager.showContextMenu(e.clientX, e.clientY, [
+                        {
+                            label: `下载 ${selected.length} 个项目`,
+                            action: () => this.downloadMultipleRemote(selected),
+                            className: 'download'
+                        },
                         {
                             label: `删除 ${selected.length} 个项目`,
                             action: () => this.deleteMultipleRemote(selected),
@@ -1118,11 +1192,10 @@ class FileManager {
         const localFilesTable = document.getElementById('local-files');
 
         if (localFilesTable) {
+            this._installSelectionGuard(localFilesTable);
             localFilesTable.addEventListener('contextmenu', (e) => {
-                // 检查是否点击在文件行上
                 const row = e.target.closest('tr');
                 if (!row) {
-                    // 如果点击在行外，显示目录操作
                     const remotePath = document.getElementById('remote-path').value;
                     e.preventDefault();
                     window.uiManager.showContextMenu(e.clientX, e.clientY, [
@@ -1135,45 +1208,64 @@ class FileManager {
                     return;
                 }
 
-                // 文件名和路径
-                const fileName = row.querySelector('td:first-child').textContent.trim().replace(/^.+\s/, '');
-                if (fileName === '..') return;
-
-                const localPath = document.getElementById('local-path').value;
-                const fullPath = this.path.join(localPath, fileName);
-
-                const remotePath = document.getElementById('remote-path').value;
-                const remoteFilePath = remotePath === '/' ? `/${fileName}` : `${remotePath}/${fileName}`;
-
+                if (row.dataset.name === '..' || !row.dataset.name) return;
                 e.preventDefault();
 
-                if (row.classList.contains('directory')) {
+                if (!row.classList.contains('selected')) {
+                    const tbody = localFilesTable.querySelector('tbody');
+                    tbody.querySelectorAll('tr.selected').forEach(r => r.classList.remove('selected'));
+                    row.classList.add('selected');
+                }
+
+                const tbody = localFilesTable.querySelector('tbody');
+                const selected = this._getSelectedPaths(tbody);
+
+                if (selected.length > 1) {
                     window.uiManager.showContextMenu(e.clientX, e.clientY, [
                         {
-                            label: '上传文件夹',
-                            action: () => this.uploadDirectory(fullPath, remoteFilePath),
+                            label: `上传 ${selected.length} 个项目`,
+                            action: () => this.uploadMultipleLocal(selected),
                             className: 'upload'
                         },
                         {
-                            label: '删除目录',
-                            action: () => this.deleteLocalDirectory(fullPath),
+                            label: `删除 ${selected.length} 个项目`,
+                            action: () => this.deleteMultipleLocal(selected),
                             className: 'delete'
                         }
                     ]);
                 } else {
-                    // 保留现有文件上下文菜单
-                    window.uiManager.showContextMenu(e.clientX, e.clientY, [
-                        {
-                            label: '上传文件',
-                            action: () => this.uploadFile(fullPath, remoteFilePath),
-                            className: 'upload'
-                        },
-                        {
-                            label: '删除文件',
-                            action: () => this.deleteLocalFile(fullPath),
-                            className: 'delete'
-                        }
-                    ]);
+                    const fullPath = row.dataset.path;
+                    const remotePath = document.getElementById('remote-path').value;
+                    const fileName = row.dataset.name;
+                    const remoteFilePath = remotePath === '/' ? `/${fileName}` : `${remotePath}/${fileName}`;
+
+                    if (row.classList.contains('directory')) {
+                        window.uiManager.showContextMenu(e.clientX, e.clientY, [
+                            {
+                                label: '上传文件夹',
+                                action: () => this.uploadDirectory(fullPath, remoteFilePath),
+                                className: 'upload'
+                            },
+                            {
+                                label: '删除目录',
+                                action: () => this.deleteLocalDirectory(fullPath),
+                                className: 'delete'
+                            }
+                        ]);
+                    } else {
+                        window.uiManager.showContextMenu(e.clientX, e.clientY, [
+                            {
+                                label: '上传文件',
+                                action: () => this.uploadFile(fullPath, remoteFilePath),
+                                className: 'upload'
+                            },
+                            {
+                                label: '删除文件',
+                                action: () => this.deleteLocalFile(fullPath),
+                                className: 'delete'
+                            }
+                        ]);
+                    }
                 }
             });
         }

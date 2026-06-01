@@ -107,6 +107,8 @@
 .file-list {
     width: 100%;
     border-collapse: collapse;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .file-list th {
@@ -126,6 +128,7 @@
     border-bottom: 1px solid var(--border-color);
     color: var(--text-dark);
     cursor: default;
+    user-select: none;
 }
 
 .file-list tr.directory {
