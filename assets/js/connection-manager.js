@@ -814,6 +814,9 @@ class ConnectionManager {
 
             console.log(`SSH连接关闭: ${sessionId}`);
 
+            // 移除前记录所属连接，供远程面板"重新连接"按钮使用。
+            const connectionId = window.sessionManager.getSession(sessionId)?.connectionId || null;
+
             // server EOF / exit 命令：彻底移除会话记录。否则 loadConnections 仍能
             // getSessionByConnectionId 命中 → 左侧连接项一直显示 online（绿点 + 断开按钮）。
             window.sessionManager.setSessionActive(sessionId, false);
@@ -836,7 +839,7 @@ class ConnectionManager {
                 window.fileManager.fileManagerInitialized = false;
 
                 // 不跳回终端：远程面板提示重新连接，本地面板仍可浏览。
-                window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器');
+                window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器', connectionId);
             }
 
             // 更新连接列表

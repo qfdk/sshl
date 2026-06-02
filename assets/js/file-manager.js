@@ -389,8 +389,8 @@ class FileManager {
     
     // 显示远程文件
     // 远程面板空状态：未连接或连接断开时，在右侧面板居中提示用户连接服务器，
-    // 不自动跳回终端标签。
-    renderRemoteEmptyState(message = '请先连接到服务器') {
+    // 不自动跳回终端标签。传入 connectionId 时附带"重新连接"按钮，点击直接重连该连接。
+    renderRemoteEmptyState(message = '请先连接到服务器', connectionId = null) {
         const tbody = document.querySelector('#remote-files tbody');
         if (tbody) {
             tbody.innerHTML = '';
@@ -401,7 +401,23 @@ class FileManager {
             cell.style.textAlign = 'center';
             cell.style.padding = '32px 12px';
             cell.style.color = 'var(--text-muted, #888)';
-            cell.textContent = message;
+
+            const msg = document.createElement('div');
+            msg.textContent = message;
+            cell.appendChild(msg);
+
+            if (connectionId) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'primary-button';
+                btn.style.marginTop = '14px';
+                btn.innerHTML = `<span class="file-icon">${window.Icons.svg('refresh-cw', 14)}</span> 重新连接`;
+                btn.addEventListener('click', () => {
+                    window.connectionManager.connectToSaved(connectionId);
+                });
+                cell.appendChild(btn);
+            }
+
             row.appendChild(cell);
             tbody.appendChild(row);
         }

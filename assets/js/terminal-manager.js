@@ -526,6 +526,8 @@ class TerminalManager {
     async disconnectSession(sessionId) {
         if (!sessionId) return;
         const isActive = window.currentSessionId === sessionId;
+        // 断开前记录所属连接，供远程面板"重新连接"按钮使用（removeSession 后就取不到了）。
+        const connectionId = window.sessionManager.getSession(sessionId)?.connectionId || null;
 
         // 当前在文件管理标签或正在传输文件时，断开前需确认（Tauri 原生 confirm 不可靠，走 plugin dialog）
         const fm = window.fileManager;
@@ -569,7 +571,7 @@ class TerminalManager {
             // 不跳回终端：停留在当前标签，远程面板提示重新连接，本地面板仍可浏览。
             window.fileManager.clearFileManagerCache();
             window.fileManager.fileManagerInitialized = false;
-            window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器');
+            window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器', connectionId);
         }
 
         await window.connectionManager.loadConnections();
