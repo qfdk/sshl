@@ -722,37 +722,35 @@ function initializeApp() {
         });
     }
 
-    // 下载进度监听
+    // 传输进度监听（下载 + 上传）
     if (window.api && window.api.file) {
-        window.api.file.onDownloadProgress((event, progressData) => {
-            // 更新进度条
+        // 后端进度事件统一为 { remotePath, transferred, total }，前端据此算百分比。
+        const renderTransfer = (verb, d) => {
             const progressBar = document.getElementById('transfer-progress-bar');
             const transferInfo = document.getElementById('transfer-info');
+            if (!progressBar || !transferInfo) return;
 
-            if (progressBar && transferInfo) {
-                // 显示传输状态
-                uiManager.showTransferStatus(true);
+            uiManager.showTransferStatus(true);
+            const total = d.total || 0;
+            const pct = total > 0 ? Math.min(100, Math.round((d.transferred / total) * 100)) : 0;
+            progressBar.style.width = `${pct}%`;
 
-                // 更新进度条宽度
-                progressBar.style.width = `${progressData.progress}%`;
+            const fileName = fileManager.path.basename(d.remotePath);
+            const done = fileManager.formatFileSize(d.transferred || 0);
+            const all = fileManager.formatFileSize(total);
+            transferInfo.textContent = `正在${verb}: ${fileName} (${pct}% - ${done}/${all})`;
 
-                // 更新信息文本
-                const fileName = fileManager.path.basename(progressData.remotePath);
-                const downloadedSize = fileManager.formatFileSize(progressData.downloadedBytes || progressData.completedSize);
-                const totalSize = fileManager.formatFileSize(progressData.fileSize || progressData.totalSize);
-
-                transferInfo.textContent = `正在下载: ${fileName} (${progressData.progress}% - ${downloadedSize}/${totalSize})`;
-
-                // 完成后隐藏状态（带延迟）
-                if (progressData.progress >= 100) {
-                    transferInfo.textContent = '下载完成';
-                    setTimeout(() => {
-                        progressBar.style.width = '0%';
-                        uiManager.showTransferStatus(false);
-                    }, 3000);
-                }
+            if (pct >= 100) {
+                transferInfo.textContent = `${verb}完成`;
+                setTimeout(() => {
+                    progressBar.style.width = '0%';
+                    uiManager.showTransferStatus(false);
+                }, 3000);
             }
-        });
+        };
+
+        window.api.file.onDownloadProgress((_event, d) => renderTransfer('下载', d));
+        window.api.file.onUploadProgress((_event, d) => renderTransfer('上传', d));
     }
 
     // 添加连接项点击事件委托

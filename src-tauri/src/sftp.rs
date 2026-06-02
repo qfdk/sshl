@@ -40,6 +40,15 @@ pub struct DownloadProgress {
     pub total: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadProgress {
+    pub session_id: String,
+    pub remote_path: String,
+    pub transferred: u64,
+    pub total: u64,
+}
+
 async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
     {
         let cache = session.sftp.lock().await;
@@ -69,17 +78,25 @@ async fn load_id_map(sftp: &SftpSession, path: &str) -> Option<HashMap<u32, Stri
     let mut file = sftp.open(path).await.ok()?;
     let mut buf = Vec::with_capacity(8 * 1024);
     file.read_to_end(&mut buf).await.ok()?;
-    let text = String::from_utf8_lossy(&buf);
+    Some(parse_id_map(&String::from_utf8_lossy(&buf)))
+}
+
+/// 解析 `name:_:id:...` 形式（/etc/passwd、/etc/group）为 id→name 映射。
+/// 坏行（字段缺失、id 非数字）跳过而非整体失败。
+fn parse_id_map(text: &str) -> HashMap<u32, String> {
     let mut map = HashMap::new();
     for line in text.lines() {
         if line.is_empty() || line.starts_with('#') { continue; }
         let mut parts = line.splitn(4, ':');
-        let name = parts.next()?.to_string();
-        let _ = parts.next()?;
-        let id: u32 = parts.next()?.parse().ok()?;
-        map.insert(id, name);
+        let (Some(name), Some(_), Some(id_str)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if let Ok(id) = id_str.parse::<u32>() {
+            map.insert(id, name.to_string());
+        }
     }
-    Some(map)
+    map
 }
 
 async fn passwd_map(session: &Arc<SshSession>, sftp: &SftpSession) -> Arc<HashMap<u32, String>> {
@@ -164,7 +181,7 @@ pub async fn file_list(
 
 #[tauri::command]
 pub async fn file_upload(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     local_path: String,
@@ -173,22 +190,44 @@ pub async fn file_upload(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
+    let total = tokio::fs::metadata(&local_path).await.map(|m| m.len()).unwrap_or(0);
     let mut file = sftp.open_with_flags(
         &remote_path,
         OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
     ).await.map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
-    stream_to_remote(&local_path, &mut file, &remote_path).await?;
+    // 进度事件按 100ms 节流，避免大文件刷爆 webview 事件队列（与下载侧一致）。
+    let mut last_emit = std::time::Instant::now();
+    stream_to_remote(&local_path, &mut file, &remote_path, |transferred| {
+        if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+            emit_upload_progress(&app, UploadProgress {
+                session_id: session_id.clone(),
+                remote_path: remote_path.clone(),
+                transferred,
+                total,
+            });
+            last_emit = std::time::Instant::now();
+        }
+    }).await?;
     file.shutdown().await
         .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))?;
+    // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
+    emit_upload_progress(&app, UploadProgress {
+        session_id,
+        remote_path,
+        transferred: total,
+        total,
+    });
     Ok(())
 }
 
 /// 分块从本地文件流式写入 SFTP 远端句柄，避免大文件一次性读进内存。
 /// 下载侧本来就是 64KB 流式的，上传侧此前用 `fs::read` 全量加载，几 GB 文件会 OOM。
+/// `on_progress` 接收累计已传字节数，调用方负责节流。
 async fn stream_to_remote<W>(
     local_path: &str,
     file: &mut W,
     remote_path: &str,
+    mut on_progress: impl FnMut(u64),
 ) -> AppResult<()>
 where
     W: AsyncWriteExt + Unpin,
@@ -196,11 +235,14 @@ where
     use tokio::io::AsyncReadExt;
     let mut local = tokio::fs::File::open(local_path).await?;
     let mut buf = vec![0u8; 64 * 1024];
+    let mut transferred: u64 = 0;
     loop {
         let n = local.read(&mut buf).await?;
         if n == 0 { break; }
         file.write_all(&buf[..n]).await
             .map_err(|e| AppError::Sftp(format!("write {remote_path}: {e}")))?;
+        transferred += n as u64;
+        on_progress(transferred);
     }
     Ok(())
 }
@@ -301,7 +343,7 @@ fn upload_dir<'a>(
                     OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
                 ).await.map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
                 let child_local_str = child_local.to_string_lossy().to_string();
-                stream_to_remote(&child_local_str, &mut f, &child_remote).await?;
+                stream_to_remote(&child_local_str, &mut f, &child_remote, |_| {}).await?;
                 f.shutdown().await
                     .map_err(|e| AppError::Sftp(format!("close {child_remote}: {e}")))?;
             }
@@ -442,4 +484,46 @@ async fn drain_exec(
 
 pub fn emit_download_progress(app: &AppHandle, payload: DownloadProgress) {
     let _ = app.emit("file:download-progress", payload);
+}
+
+pub fn emit_upload_progress(app: &AppHandle, payload: UploadProgress) {
+    let _ = app.emit("file:upload-progress", payload);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{join_remote, parse_id_map, shell_quote};
+
+    #[test]
+    fn join_remote_handles_root_and_trailing_slash() {
+        assert_eq!(join_remote("/", "etc"), "/etc");
+        assert_eq!(join_remote("/var", "log"), "/var/log");
+        assert_eq!(join_remote("/var/", "log"), "/var/log");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        // 单引号需要闭合-转义-重开，防止 chmod/chown 命令注入。
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(shell_quote("a; rm -rf /"), "'a; rm -rf /'");
+    }
+
+    #[test]
+    fn parse_id_map_extracts_id_to_name() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n";
+        let map = parse_id_map(passwd);
+        assert_eq!(map.get(&0).map(String::as_str), Some("root"));
+        assert_eq!(map.get(&1).map(String::as_str), Some("daemon"));
+    }
+
+    #[test]
+    fn parse_id_map_skips_comments_and_malformed_lines() {
+        let text = "# comment\n\nbad-line-no-colons\nnouid:x:notanumber:5\nok:x:42:42\n";
+        let map = parse_id_map(text);
+        // 坏行被跳过，但合法行仍被收录（旧实现遇坏行会丢掉整张表）。
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&42).map(String::as_str), Some("ok"));
+    }
 }

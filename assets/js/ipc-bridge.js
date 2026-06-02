@@ -95,6 +95,7 @@
       changeOwner: (sessionId, remotePath, owner, group) =>
         call('file_change_owner', { sessionId, remotePath, owner, group }),
       onDownloadProgress: onEvent('file:download-progress'),
+      onUploadProgress: onEvent('file:upload-progress'),
     },
 
     config: {

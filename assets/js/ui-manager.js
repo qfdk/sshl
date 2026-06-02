@@ -258,7 +258,7 @@ class UIManager {
                 e.preventDefault();
                 const result = await window.api.dialog.selectFile();
                 if (!result.canceled) {
-                    document.getElementById('conn-private-key-path').value = result.filePath;
+                    document.getElementById('conn-private-key-path').value = result.filePaths[0];
                 }
             });
         }

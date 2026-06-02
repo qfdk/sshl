@@ -67,8 +67,12 @@ enum Outbound {
 }
 
 pub struct SshSession {
+    // Identity fields retained for diagnostics/logging; not all are read yet.
+    #[allow(dead_code)]
     pub id: String,
+    #[allow(dead_code)]
     pub host: String,
+    #[allow(dead_code)]
     pub username: String,
     pub buffer: Mutex<String>,
     /// Shared SSH handle — locked briefly when opening new channels (SFTP).
@@ -160,7 +164,8 @@ pub(crate) async fn do_handshake(
     };
     tcp.set_nodelay(true).ok();
 
-    let mut handle = russh::client::connect_stream(russh_config(), tcp, ClientHandler)
+    let handler = ClientHandler { host: host.to_string(), port };
+    let mut handle = russh::client::connect_stream(russh_config(), tcp, handler)
         .await
         .map_err(|e| AppError::Ssh(format!("ssh handshake: {e}")))?;
 
@@ -193,7 +198,10 @@ pub(crate) async fn do_handshake(
     Ok(Arc::new(Mutex::new(handle)))
 }
 
-pub struct ClientHandler;
+pub struct ClientHandler {
+    host: String,
+    port: u16,
+}
 
 #[async_trait::async_trait]
 impl russh::client::Handler for ClientHandler {
@@ -201,10 +209,43 @@ impl russh::client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TODO: known_hosts verification — accept-all for now.
-        Ok(true)
+        // TOFU known_hosts 校验：
+        // - 已知且匹配 → 接受
+        // - 已知但密钥变更（KeyChanged）→ 拒绝（可能的中间人攻击）
+        // - 未知 / known_hosts 文件不存在 → 首次信任并写入 ~/.ssh/known_hosts
+        match russh_keys::check_known_hosts(&self.host, self.port, server_public_key) {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                if let Err(e) =
+                    russh_keys::learn_known_hosts(&self.host, self.port, server_public_key)
+                {
+                    tracing::warn!("learn_known_hosts {}:{} failed: {e}", self.host, self.port);
+                } else {
+                    tracing::info!("known_hosts: learned {}:{}", self.host, self.port);
+                }
+                Ok(true)
+            }
+            Err(russh_keys::Error::KeyChanged { line }) => {
+                tracing::error!(
+                    "known_hosts: host key CHANGED for {}:{} (entry line {line}) — rejecting connection",
+                    self.host,
+                    self.port
+                );
+                Ok(false)
+            }
+            Err(e) => {
+                // known_hosts 文件缺失等非密钥变更错误：按未知主机处理，TOFU 学习。
+                tracing::warn!(
+                    "known_hosts read issue for {}:{}: {e}; treating as new host",
+                    self.host,
+                    self.port
+                );
+                let _ = russh_keys::learn_known_hosts(&self.host, self.port, server_public_key);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -343,6 +384,10 @@ async fn run_channel(
     const COALESCE_MAX: usize = 32 * 1024;
     let mut pending = String::with_capacity(COALESCE_MAX);
     let mut flush_deadline: Option<tokio::time::Instant> = None;
+    // 跨 chunk UTF-8 残字节暂存：SSH 数据按任意字节边界到达，一个多字节字符
+    // （中文/emoji）可能被切在两个 chunk 之间。stdout / stderr 是独立字节流，各自一份。
+    let mut utf8_out: Vec<u8> = Vec::new();
+    let mut utf8_err: Vec<u8> = Vec::new();
     loop {
         tokio::select! {
             biased;
@@ -386,30 +431,34 @@ async fn run_channel(
             msg = channel.wait() => {
                 match msg {
                     Some(russh::ChannelMsg::Data { data }) => {
-                        let s = String::from_utf8_lossy(&data).to_string();
-                        session.append_to_buffer(&s).await;
-                        if session.activated.load(Ordering::Relaxed) {
-                            pending.push_str(&s);
-                            if pending.len() >= COALESCE_MAX {
-                                emit_data(&app, &session_id, &pending);
-                                pending.clear();
-                                flush_deadline = None;
-                            } else if flush_deadline.is_none() {
-                                flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
+                        let s = decode_stream_chunk(&mut utf8_out, &data);
+                        if !s.is_empty() {
+                            session.append_to_buffer(&s).await;
+                            if session.activated.load(Ordering::Relaxed) {
+                                pending.push_str(&s);
+                                if pending.len() >= COALESCE_MAX {
+                                    emit_data(&app, &session_id, &pending);
+                                    pending.clear();
+                                    flush_deadline = None;
+                                } else if flush_deadline.is_none() {
+                                    flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
+                                }
                             }
                         }
                     }
                     Some(russh::ChannelMsg::ExtendedData { data, ext: _ }) => {
-                        let s = String::from_utf8_lossy(&data).to_string();
-                        session.append_to_buffer(&s).await;
-                        if session.activated.load(Ordering::Relaxed) {
-                            pending.push_str(&s);
-                            if pending.len() >= COALESCE_MAX {
-                                emit_data(&app, &session_id, &pending);
-                                pending.clear();
-                                flush_deadline = None;
-                            } else if flush_deadline.is_none() {
-                                flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
+                        let s = decode_stream_chunk(&mut utf8_err, &data);
+                        if !s.is_empty() {
+                            session.append_to_buffer(&s).await;
+                            if session.activated.load(Ordering::Relaxed) {
+                                pending.push_str(&s);
+                                if pending.len() >= COALESCE_MAX {
+                                    emit_data(&app, &session_id, &pending);
+                                    pending.clear();
+                                    flush_deadline = None;
+                                } else if flush_deadline.is_none() {
+                                    flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
+                                }
                             }
                         }
                     }
@@ -567,4 +616,68 @@ pub fn emit_closed(app: &AppHandle, session_id: &str, code: Option<u32>, reason:
         code,
         reason,
     });
+}
+
+/// 将 SSH 字节流按 UTF-8 字符边界切分。返回可安全解码的完整前缀，把末尾不完整的
+/// 多字节序列残留在 `carry` 里等待下一个 chunk，从而避免中文/emoji 被 chunk 边界
+/// 截断成 `�`。中间真正非法的字节走 lossy 替换、不滞留。
+pub(crate) fn decode_stream_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
+    carry.extend_from_slice(data);
+    let valid = match std::str::from_utf8(carry) {
+        Ok(_) => carry.len(),
+        Err(e) => match e.error_len() {
+            // None = 末尾序列不完整：只输出到 valid_up_to，剩余留到下个 chunk。
+            None => e.valid_up_to(),
+            // Some = 中间出现真正非法字节：整段 lossy 输出，不滞留（否则 carry 永久卡住）。
+            Some(_) => carry.len(),
+        },
+    };
+    let out = String::from_utf8_lossy(&carry[..valid]).into_owned();
+    carry.drain(..valid);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_stream_chunk;
+
+    #[test]
+    fn passes_through_complete_utf8() {
+        let mut carry = Vec::new();
+        assert_eq!(decode_stream_chunk(&mut carry, "héllo 世界".as_bytes()), "héllo 世界");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn holds_split_multibyte_until_completed() {
+        // "世" = E4 B8 96，跨两个 chunk 切开。
+        let full = "世".as_bytes();
+        let (a, b) = full.split_at(1);
+        let mut carry = Vec::new();
+        // 第一个 chunk 只有半个字符：不应输出任何内容，残字节滞留。
+        assert_eq!(decode_stream_chunk(&mut carry, a), "");
+        assert_eq!(carry.len(), 1);
+        // 第二个 chunk 补全：完整字符输出，carry 清空。
+        assert_eq!(decode_stream_chunk(&mut carry, b), "世");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn emits_valid_prefix_and_holds_trailing_fragment() {
+        let mut carry = Vec::new();
+        let mut bytes = b"ok ".to_vec();
+        bytes.push("界".as_bytes()[0]); // 追加 "界" 的首字节
+        let out = decode_stream_chunk(&mut carry, &bytes);
+        assert_eq!(out, "ok ");
+        assert_eq!(carry.len(), 1); // 残留首字节等待补全
+    }
+
+    #[test]
+    fn truly_invalid_bytes_do_not_stick() {
+        // 0xFF 不是合法 UTF-8 起始字节，必须 lossy 输出而非永久滞留。
+        let mut carry = Vec::new();
+        let out = decode_stream_chunk(&mut carry, &[0xFF, b'a']);
+        assert!(out.contains('a'));
+        assert!(carry.is_empty());
+    }
 }

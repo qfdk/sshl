@@ -280,7 +280,7 @@ class FileManager {
                         return;
                     }
                 } else {
-                    directory = result.directoryPath;
+                    directory = result.filePaths[0];
                 }
             }
 
@@ -941,7 +941,7 @@ class FileManager {
                 return;
             }
 
-            const localDirPath = result.directoryPath;
+            const localDirPath = result.filePaths[0];
             const dirName = this.path.basename(localDirPath);
             const remoteDirPath = remotePath === '/' ? `/${dirName}` : `${remotePath}/${dirName}`;
 
