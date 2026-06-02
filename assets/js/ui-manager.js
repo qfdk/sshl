@@ -50,6 +50,21 @@ class UIManager {
         }
     }
 
+    // 断开连接后强制回到终端标签（文件管理器无会话即失效，终端 placeholder 引导用户重新连接）。
+    switchToTerminalTab() {
+        if (window.activeTabId === 'terminal') return;
+
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+
+        const terminalTabBtn = document.querySelector('.tab[data-tab="terminal"]');
+        if (terminalTabBtn) terminalTabBtn.classList.add('active');
+        const terminalPane = document.getElementById('terminal-tab');
+        if (terminalPane) terminalPane.classList.add('active');
+
+        window.activeTabId = 'terminal';
+    }
+
     // 显示/隐藏传输状态栏
     showTransferStatus(show) {
         const transferStatus = document.querySelector('.transfer-status');
@@ -277,12 +292,7 @@ class UIManager {
                 // 设置标志以防止多次操作
                 window.terminalManager.isTabSwitching = true;
 
-                // 只有在已连接时才允许切换到终端或文件管理器
-                if ((tabId === 'terminal' || tabId === 'file-manager') && !window.currentSessionId) {
-                    alert('请先连接到服务器');
-                    window.terminalManager.isTabSwitching = false;
-                    return;
-                }
+                // 未连接也允许切换：终端显示 placeholder 引导重连，文件管理器仅本地可浏览。
 
                 tabs.forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
@@ -293,14 +303,14 @@ class UIManager {
                 // 更新当前活动标签
                 window.activeTabId = tabId;
 
-                // 如果切换到文件管理器，总是重新初始化文件列表
-                if (tabId === 'file-manager' && window.currentSessionId) {
+                // 如果切换到文件管理器，总是重新初始化文件列表（未连接时仅本地）
+                if (tabId === 'file-manager') {
                     // 显示文件管理器加载状态
                     window.uiManager.showFileManagerLoading(true);
                     // 清除文件管理器缓存
                     window.fileManager.clearFileManagerCache();
-                    
-                    // 延迟初始化以确保UI已更新
+
+                    // 延迟初始化以确保UI已更新（currentSessionId 为 null 时只加载本地面板）
                     setTimeout(() => {
                         // 确保使用最新的会话ID
                         window.fileManager.initFileManager(window.currentSessionId);

@@ -565,6 +565,9 @@ class TerminalManager {
 
             window.uiManager.updateConnectionStatus(false);
             window.uiManager.updateServerInfo(false);
+
+            // 文件管理器已随会话失效，回到终端标签引导用户重新连接其他服务器。
+            window.uiManager.switchToTerminalTab();
         }
 
         await window.connectionManager.loadConnections();

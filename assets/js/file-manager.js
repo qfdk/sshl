@@ -92,13 +92,6 @@ class FileManager {
     
     // 初始化文件管理器
     async initFileManager(sessionId) {
-        if (!sessionId) {
-            console.error('无法初始化文件管理器：未连接到服务器');
-            return;
-        }
-        
-        console.log(`开始初始化文件管理器，会话ID: ${sessionId}`);
-
         try {
             // 显示加载指示器
             window.uiManager.showFileManagerLoading(true);
@@ -108,29 +101,27 @@ class FileManager {
             if (remoteFilesTbody) {
                 remoteFilesTbody.innerHTML = '';
             }
-
-            // 获取会话的远程工作目录或设置为根目录
-            let remotePath = '/';
-
-            // 尝试从会话管理器获取路径
-            const session = window.sessionManager.getSession(sessionId);
-            if (session && session.currentRemotePath) {
-                remotePath = session.currentRemotePath;
-            } else {
-                // 在会话管理器中初始化远程路径
-                window.sessionManager.updateRemotePath(sessionId, remotePath);
-            }
-
-            console.log(`初始化文件管理器，使用会话 ${sessionId} 的远程工作目录: ${remotePath}`);
-
-            // 更新远程路径输入
             const remotePathInput = document.getElementById('remote-path');
-            if (remotePathInput) {
-                remotePathInput.value = remotePath;
-            }
 
-            // 加载远程文件
-            await this.loadRemoteFiles(remotePath);
+            if (sessionId) {
+                // 已连接：加载远程工作目录
+                let remotePath = '/';
+                const session = window.sessionManager.getSession(sessionId);
+                if (session && session.currentRemotePath) {
+                    remotePath = session.currentRemotePath;
+                } else {
+                    window.sessionManager.updateRemotePath(sessionId, remotePath);
+                }
+                if (remotePathInput) {
+                    remotePathInput.value = remotePath;
+                }
+                await this.loadRemoteFiles(remotePath);
+            } else {
+                // 未连接：远程面板不可用，仅本地可浏览。
+                if (remotePathInput) {
+                    remotePathInput.value = '';
+                }
+            }
 
             // 清除现有本地文件列表
             const localFilesTbody = document.querySelector('#local-files tbody');
