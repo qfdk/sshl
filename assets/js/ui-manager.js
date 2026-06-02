@@ -50,21 +50,6 @@ class UIManager {
         }
     }
 
-    // 断开连接后强制回到终端标签（文件管理器无会话即失效，终端 placeholder 引导用户重新连接）。
-    switchToTerminalTab() {
-        if (window.activeTabId === 'terminal') return;
-
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-
-        const terminalTabBtn = document.querySelector('.tab[data-tab="terminal"]');
-        if (terminalTabBtn) terminalTabBtn.classList.add('active');
-        const terminalPane = document.getElementById('terminal-tab');
-        if (terminalPane) terminalPane.classList.add('active');
-
-        window.activeTabId = 'terminal';
-    }
-
     // 显示/隐藏传输状态栏
     showTransferStatus(show) {
         const transferStatus = document.querySelector('.transfer-status');

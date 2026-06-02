@@ -117,10 +117,8 @@ class FileManager {
                 }
                 await this.loadRemoteFiles(remotePath);
             } else {
-                // 未连接：远程面板不可用，仅本地可浏览。
-                if (remotePathInput) {
-                    remotePathInput.value = '';
-                }
+                // 未连接：远程面板不可用，仅本地可浏览，右侧提示用户连接服务器。
+                this.renderRemoteEmptyState('请先连接到服务器');
             }
 
             // 清除现有本地文件列表
@@ -390,6 +388,27 @@ class FileManager {
     }
     
     // 显示远程文件
+    // 远程面板空状态：未连接或连接断开时，在右侧面板居中提示用户连接服务器，
+    // 不自动跳回终端标签。
+    renderRemoteEmptyState(message = '请先连接到服务器') {
+        const tbody = document.querySelector('#remote-files tbody');
+        if (tbody) {
+            tbody.innerHTML = '';
+            const row = document.createElement('tr');
+            row.className = 'remote-empty-state';
+            const cell = document.createElement('td');
+            cell.colSpan = 5;
+            cell.style.textAlign = 'center';
+            cell.style.padding = '32px 12px';
+            cell.style.color = 'var(--text-muted, #888)';
+            cell.textContent = message;
+            row.appendChild(cell);
+            tbody.appendChild(row);
+        }
+        const pathInput = document.getElementById('remote-path');
+        if (pathInput) pathInput.value = '';
+    }
+
     displayRemoteFiles(files, currentPath) {
         const tbody = document.querySelector('#remote-files tbody');
         if (!tbody) return;

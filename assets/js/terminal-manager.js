@@ -566,8 +566,10 @@ class TerminalManager {
             window.uiManager.updateConnectionStatus(false);
             window.uiManager.updateServerInfo(false);
 
-            // 文件管理器已随会话失效，回到终端标签引导用户重新连接其他服务器。
-            window.uiManager.switchToTerminalTab();
+            // 不跳回终端：停留在当前标签，远程面板提示重新连接，本地面板仍可浏览。
+            window.fileManager.clearFileManagerCache();
+            window.fileManager.fileManagerInitialized = false;
+            window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器');
         }
 
         await window.connectionManager.loadConnections();

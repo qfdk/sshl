@@ -835,11 +835,8 @@ class ConnectionManager {
                 window.fileManager.clearFileManagerCache();
                 window.fileManager.fileManagerInitialized = false;
 
-                const remoteFilesTbody = document.querySelector('#remote-files tbody');
-                if (remoteFilesTbody) remoteFilesTbody.innerHTML = '';
-
-                // 文件管理器已随会话失效，回到终端标签引导用户重新连接其他服务器。
-                window.uiManager.switchToTerminalTab();
+                // 不跳回终端：远程面板提示重新连接，本地面板仍可浏览。
+                window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器');
             }
 
             // 更新连接列表
