@@ -398,26 +398,33 @@ class FileManager {
             row.className = 'remote-empty-state';
             const cell = document.createElement('td');
             cell.colSpan = 5;
-            cell.style.textAlign = 'center';
-            cell.style.padding = '32px 12px';
-            cell.style.color = 'var(--text-muted, #888)';
+            cell.style.padding = '20px 12px';
+
+            // flex 列容器：文字与按钮统一水平居中（text-align 无法居中 flex/block 按钮）。
+            const wrap = document.createElement('div');
+            wrap.style.display = 'flex';
+            wrap.style.flexDirection = 'column';
+            wrap.style.alignItems = 'center';
+            wrap.style.gap = '12px';
 
             const msg = document.createElement('div');
             msg.textContent = message;
-            cell.appendChild(msg);
+            msg.style.color = 'var(--text-muted, #888)';
+            wrap.appendChild(msg);
 
             if (connectionId) {
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'primary-button';
-                btn.style.marginTop = '14px';
-                btn.innerHTML = `<span class="file-icon">${window.Icons.svg('refresh-cw', 14)}</span> 重新连接`;
+                btn.style.margin = '0'; // 覆盖 .primary-button 默认 margin:12px，由 wrap 的 gap 统一控制间距
+                btn.innerHTML = `${window.Icons.svg('refresh-cw', 14)}<span>重新连接</span>`;
                 btn.addEventListener('click', () => {
                     window.connectionManager.connectToSaved(connectionId);
                 });
-                cell.appendChild(btn);
+                wrap.appendChild(btn);
             }
 
+            cell.appendChild(wrap);
             row.appendChild(cell);
             tbody.appendChild(row);
         }
