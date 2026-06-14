@@ -9,7 +9,6 @@ class SessionManager {
 
     // 添加会话
     addSession(sessionId, connectionId, data) {
-        console.log(`添加会话: ${sessionId}, 连接ID: ${connectionId}`);
         this.sessions.set(sessionId, {
             ...data,
             connectionId: connectionId,
@@ -45,14 +44,12 @@ class SessionManager {
 
     // 移除会话
     removeSession(sessionId) {
-        console.log(`移除会话: ${sessionId}`);
         this.sessions.delete(sessionId);
     }
 
     // 更新会话ID（用于重新连接后的会话ID更新）
     updateSessionId(oldSessionId, newSessionId) {
         if (this.sessions.has(oldSessionId)) {
-            console.log(`更新会话ID: ${oldSessionId} -> ${newSessionId}`);
             const sessionData = this.sessions.get(oldSessionId);
             this.sessions.set(newSessionId, sessionData);
             this.sessions.delete(oldSessionId);
@@ -76,13 +73,11 @@ class SessionManager {
     setSessionActive(sessionId, active) {
         if (this.sessions.has(sessionId)) {
             const session = this.sessions.get(sessionId);
-            const oldState = session.active;
             session.active = active;
             if (active) {
                 session.lastActive = Date.now();
             }
             this.sessions.set(sessionId, session);
-            console.log(`[sessionManager] 会话 ${sessionId} 状态已更新: ${oldState} -> ${active}`);
         } else {
             console.warn(`[sessionManager] 尝试设置不存在的会话 ${sessionId} 的活跃状态`);
         }
@@ -104,9 +99,6 @@ class SessionManager {
                 }
 
                 this.sessions.set(sessionId, session);
-                console.log(`[sessionManager] 添加数据到会话 ${sessionId} 的缓冲区, 长度: ${data.length}, 总长度: ${session.buffer.length}`);
-            } else {
-                console.log(`[sessionManager] 会话 ${sessionId} 不活跃，不添加数据到缓冲区`);
             }
         } else {
             console.warn(`[sessionManager] 尝试向不存在的会话 ${sessionId} 添加数据`);
@@ -118,7 +110,6 @@ class SessionManager {
     clearBuffer(sessionId) {
         if (this.sessions.has(sessionId)) {
             const session = this.sessions.get(sessionId);
-            console.log(`[sessionManager] 清除会话 ${sessionId} 的缓冲区`);
             session.buffer = '';
             this.sessions.set(sessionId, session);
         } else {

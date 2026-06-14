@@ -179,9 +179,6 @@ class FileManager {
             // 更新会话的远程工作目录
             window.sessionManager.updateRemotePath(sessionId, path);
 
-            // 记录请求
-            console.log(`请求远程文件列表: 会话ID ${sessionId}, 路径 ${path}`);
-
             // 在读取文件前先验证会话是否有效
             const session = window.sessionManager.getSession(sessionId);
             if (!session || !session.active) {
@@ -192,7 +189,6 @@ class FileManager {
             const cacheKey = `${sessionId}:${path}`;
             const cachedFiles = this.remoteFileCache.get(cacheKey);
             if (cachedFiles) {
-                console.log('使用缓存的远程文件列表:', cacheKey);
                 this.displayRemoteFiles(cachedFiles, path);
                 // 继续后台刷新,但不再显示加载状态
                 window.uiManager.showFileManagerLoading(false);
@@ -206,14 +202,12 @@ class FileManager {
                 // 检查路径是否仍然匹配(防止陈旧响应覆盖最新UI)
                 const currentRemotePath = window.sessionManager.getRemotePath(sessionId);
                 if (currentRemotePath !== currentPath) {
-                    console.log('路径已变更,跳过过期响应:', currentPath, '→', currentRemotePath);
                     return;
                 }
 
                 // 更新缓存
                 const cacheKey = `${sessionId}:${path}`;
                 this.remoteFileCache.set(cacheKey, result.files);
-                console.log('更新远程文件缓存:', cacheKey);
 
                 // 总是刷新UI(包括上传/删除等操作后的新数据)
                 this.displayRemoteFiles(result.files, path);
@@ -287,7 +281,6 @@ class FileManager {
             if (result && result.success) {
                 // 更新缓存
                 this.localFileCache.set(directory, result.files);
-                console.log('更新本地文件缓存:', directory);
 
                 this.displayLocalFiles(result.files, directory);
             } else {
@@ -521,11 +514,9 @@ class FileManager {
                 if (name === '..') {
                     // 从DOM获取当前路径，而不是使用可能过期的currentPath变量
                     const currentPath = document.getElementById('remote-path').value || '/';
-                    console.log('当前路径:', currentPath);
-                    
+
                     // 处理根目录情况
                     if (currentPath === '/' || currentPath === '') {
-                        console.log('已在根目录，无法返回上级');
                         return;
                     }
                     
@@ -543,8 +534,6 @@ class FileManager {
                         // 没有找到斜杠，这种情况不应该发生，但作为保护
                         newPath = '/';
                     }
-                    
-                    console.log('计算出的父路径:', newPath);
                 } else {
                     newPath = row.dataset.path.replace(/\/+/g, '/');
                 }
@@ -600,7 +589,6 @@ class FileManager {
                 if (remotePathInput && window.currentSessionId) {
                     const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
                     this.remoteFileCache.delete(cacheKey);
-                    console.log('上传完成,清除缓存:', cacheKey);
                 }
 
                 // 刷新远程文件列表
@@ -888,7 +876,6 @@ class FileManager {
                 if (remotePathInput && window.currentSessionId) {
                     const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
                     this.remoteFileCache.delete(cacheKey);
-                    console.log('创建目录完成,清除缓存:', cacheKey);
 
                     await this.loadRemoteFiles(remotePathInput.value);
                 }
@@ -935,7 +922,6 @@ class FileManager {
                 if (remotePathInput && window.currentSessionId) {
                     const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
                     this.remoteFileCache.delete(cacheKey);
-                    console.log('上传目录完成,清除缓存:', cacheKey);
 
                     await this.loadRemoteFiles(remotePathInput.value);
                 }
@@ -1137,8 +1123,6 @@ class FileManager {
         if (remoteFilesTbody) {
             remoteFilesTbody.innerHTML = '';
         }
-
-        console.log('已清除文件管理器缓存');
     }
     
     // 设置文件传输监听
@@ -1518,11 +1502,8 @@ class FileManager {
                 if (window.currentSessionId) {
                     const cacheKey = `${window.currentSessionId}:${currentPath}`;
                     this.remoteFileCache.delete(cacheKey);
-                    console.log('权限修改完成,清除缓存:', cacheKey);
                 }
                 await this.loadRemoteFiles(currentPath);
-
-                console.log('权限修改成功');
             } else {
                 alert(`权限修改失败: ${result.error || '未知错误'}`);
             }

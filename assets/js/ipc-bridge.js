@@ -132,6 +132,4 @@
       },
     },
   };
-
-  console.log('[ipc-bridge] Tauri bridge installed on window.api');
 })();

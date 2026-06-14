@@ -248,7 +248,6 @@ class TerminalManager {
 
         // canvas renderer 也要就绪，否则首次走动态加载、二次走 else 分支时 CanvasAddon 缺失。
         if (!window.Terminal || !window.FitAddon || !window.CanvasAddon) {
-            console.log('Loading Terminal / FitAddon / CanvasAddon scripts dynamically');
             // 动态加载脚本：xterm → fit → canvas，全部就绪后再创建终端
             return new Promise((resolve, reject) => {
                 const loadScript = (src, label) => new Promise((res, rej) => {
@@ -344,12 +343,9 @@ class TerminalManager {
 
             const existing = this.terminals.get(sessionId);
             if (existing) {
-                console.log(`[initTerminal] 复用 session ${sessionId} 的终端实例`);
                 this._showExistingTerminal(sessionId, existing);
                 return { term: existing.term, fitAddon: existing.fitAddon, isNew: false };
             }
-
-            console.log(`[initTerminal] 为 session ${sessionId} 创建新终端`);
 
             // 隐藏其他 session 的 host，但不销毁
             this._hideAllTerminalHosts();

@@ -682,8 +682,6 @@ function addCustomStyles() {
 
 // 初始化应用程序
 function initializeApp() {
-    console.log('应用初始化开始');
-
     // 添加自定义样式
     addCustomStyles();
 
@@ -819,8 +817,6 @@ function initializeApp() {
     }
 
     setupPaneDivider();
-
-    console.log('应用初始化完成');
 }
 
 function setupPaneDivider() {

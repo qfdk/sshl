@@ -244,7 +244,6 @@ export function initSettingsUI() {
     async function refreshFontListFromSystem() {
         try {
             const raw = await window.api.file.listSystemFonts();
-            console.log('[settings] system fonts:', raw?.length, raw);
             if (!Array.isArray(raw) || !raw.length) return;
             // canvas 验证：只保留真正能被 canvas/浏览器渲染的 family 名。
             // Rust 文件名启发式会吐出系统不存在的拆分名（如 "Jet Brains Mono Nerd Font Mono"），

@@ -59,7 +59,6 @@ class ConnectionManager {
 
                     // 添加双击事件
                     item.addEventListener('dblclick', async () => {
-                        console.log(`双击连接: ${connection.id}, 名称: ${connection.name}`);
                         await this.connectToSaved(connection.id);
                     });
 
@@ -72,9 +71,6 @@ class ConnectionManager {
             } else {
                 connectionList.innerHTML = '<div class="no-connections">没有保存的连接</div>';
             }
-
-            // 调试输出
-            console.log('加载了', connections.length, '个连接');
         } catch (error) {
             console.error('加载连接失败:', error);
         }
@@ -139,14 +135,11 @@ class ConnectionManager {
     
     // 切换到现有会话
     async switchToSession(connectionId) {
-        console.log(`[switchToSession] 开始切换到连接ID: ${connectionId} 的会话`);
-
         // 获取会话信息
         const sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
 
         // 如果是当前会话，直接返回
         if (sessionInfo && window.currentSessionId === sessionInfo.sessionId) {
-            console.log(`[switchToSession] 已经在使用这个会话，无需切换`);
             return true;
         }
 
@@ -163,7 +156,6 @@ class ConnectionManager {
 
             // 如果是当前会话，直接返回
             if (window.currentSessionId === sessionInfo.sessionId) {
-                console.log(`[switchToSession] 已经在使用这个会话，无需切换`);
                 return true;
             }
 
@@ -171,8 +163,6 @@ class ConnectionManager {
             // 只在 sessionManager 完全缺失时视为失效。后端实际是否存活由 activateSession 检测。
             const session = sessionInfo.session;
             if (!session) {
-                console.log(`[switchToSession] 会话 ${sessionInfo.sessionId} 无效或已断开连接，尝试重新连接`);
-
                 // 清理旧会话及其失效的 xterm 实例
                 if (sessionInfo.sessionId) {
                     window.sessionManager.removeSession(sessionInfo.sessionId);
@@ -288,7 +278,6 @@ class ConnectionManager {
             try {
                 const activateResult = await window.api.ssh.activateSession(sessionInfo.sessionId);
                 if (activateResult?.sessionId && activateResult.sessionId !== sessionInfo.sessionId) {
-                    console.log(`[switchToSession] 会话已重新连接，更新会话ID: ${activateResult.sessionId}`);
                     window.currentSessionId = activateResult.sessionId;
                     window.sessionManager.updateSessionId(sessionInfo.sessionId, activateResult.sessionId);
                     sessionInfo.sessionId = activateResult.sessionId;
@@ -422,8 +411,6 @@ class ConnectionManager {
             const sessionInfo = window.sessionManager.getSessionByConnectionId(connection.id);
 
             if (sessionInfo) {
-                console.log(`尝试切换到现有会话, 连接ID: ${connection.id}`);
-
                 // 确保会话被标记为活跃状态
                 if (sessionInfo.session && !sessionInfo.session.active) {
                     sessionInfo.session.active = true;
@@ -434,7 +421,6 @@ class ConnectionManager {
                 const switchResult = await this.switchToSession(connection.id);
 
                 if (switchResult) {
-                    console.log('会话切换成功');
                     // 更新服务器信息显示
                     window.uiManager.updateServerInfo(true, {
                         name: connection.name,
@@ -447,7 +433,6 @@ class ConnectionManager {
             }
 
             // 如果没有现有会话或切换失败，建立新连接
-            console.log(`建立新连接: ${connection.name}`);
             this.isConnecting = true;
             window.uiManager.createLoadingOverlay('正在连接服务器...');
 
@@ -578,8 +563,6 @@ class ConnectionManager {
                 }
             }
 
-            console.log('尝试连接...');
-
             if (!window.api || !window.api.ssh) {
                 alert('API未正确初始化，请重启应用');
                 return;
@@ -601,7 +584,7 @@ class ConnectionManager {
                     }
                 }
 
-                const savedConnection = await window.api.config.saveConnection({
+                await window.api.config.saveConnection({
                     ...savedConnectionDetails,
                     id: generatedId,
                     sessionId: result.sessionId
@@ -738,8 +721,6 @@ class ConnectionManager {
                     
                     // 重新加载连接列表
                     await this.loadConnections();
-                    
-                    console.log('连接更新成功');
                 } else {
                     alert('保存连接失败');
                 }
@@ -771,12 +752,11 @@ class ConnectionManager {
         if (this.currentDataHandlerRemover) {
             this.currentDataHandlerRemover();
             this.currentDataHandlerRemover = null;
-            console.log('已移除旧的SSH数据处理监听器');
         }
 
         // 添加新的事件监听器：始终按 sessionId 路由到对应的 xterm，
         // 这样后台 session 也能实时收到数据，切回时无需重放缓冲区。
-        this.currentDataHandlerRemover = window.api.ssh.onData((event, data) => {
+        this.currentDataHandlerRemover = window.api.ssh.onData((_event, data) => {
             const dataStr = data.data;
             const sessionId = data.sessionId;
 
@@ -805,14 +785,11 @@ class ConnectionManager {
         if (this.currentClosedHandlerRemover) {
             this.currentClosedHandlerRemover();
             this.currentClosedHandlerRemover = null;
-            console.log('已移除旧的SSH关闭处理监听器');
         }
 
         // 添加新的事件监听器
-        this.currentClosedHandlerRemover = window.api.ssh.onClosed(async (event, data) => {
+        this.currentClosedHandlerRemover = window.api.ssh.onClosed(async (_event, data) => {
             const sessionId = data.sessionId;
-
-            console.log(`SSH连接关闭: ${sessionId}`);
 
             // 移除前记录所属连接，供远程面板"重新连接"按钮使用。
             const connectionId = window.sessionManager.getSession(sessionId)?.connectionId || null;

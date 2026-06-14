@@ -29,7 +29,6 @@ fn disable_press_and_hold() {
         let key = NSString::from_str("ApplePressAndHoldEnabled");
         defaults.setBool_forKey(false, &key);
     }
-    tracing::info!("disabled ApplePressAndHoldEnabled");
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -125,7 +124,6 @@ async fn prewarm_saved_connections(app: &tauri::AppHandle) {
         if state.warm_contains(&key).await {
             continue;
         }
-        let started = std::time::Instant::now();
         match ssh::do_handshake(
             &c.host,
             c.port,
@@ -146,10 +144,6 @@ async fn prewarm_saved_connections(app: &tauri::AppHandle) {
                         },
                     )
                     .await;
-                tracing::info!(
-                    "prewarm: {key} ready in {}ms",
-                    started.elapsed().as_millis()
-                );
             }
             Err(e) => {
                 tracing::warn!("prewarm: {key} failed: {e}");

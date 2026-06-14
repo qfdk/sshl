@@ -222,8 +222,6 @@ impl russh::client::Handler for ClientHandler {
                     russh_keys::learn_known_hosts(&self.host, self.port, server_public_key)
                 {
                     tracing::warn!("learn_known_hosts {}:{} failed: {e}", self.host, self.port);
-                } else {
-                    tracing::info!("known_hosts: learned {}:{}", self.host, self.port);
                 }
                 Ok(true)
             }
@@ -266,10 +264,8 @@ pub async fn ssh_connect(
 
     let key = warm_key(&details.host, details.port, &details.username);
     let handle_arc = if let Some(warm) = state.warm_take(&key).await {
-        tracing::info!("ssh_connect: warm pool hit for {key}");
         warm.handle
     } else {
-        tracing::info!("ssh_connect: cold connect for {key}");
         do_handshake(
             &details.host,
             details.port,
@@ -323,9 +319,7 @@ pub async fn ssh_connect(
     tokio::pin!(notified);
     tokio::select! {
         _ = &mut notified => {}
-        _ = tokio::time::sleep(Duration::from_millis(400)) => {
-            tracing::debug!("ssh_connect: first-data wait timed out for {session_id}");
-        }
+        _ = tokio::time::sleep(Duration::from_millis(400)) => {}
     }
 
     Ok(ConnectResult { session_id })
@@ -351,7 +345,6 @@ pub async fn ssh_prewarm(
     if password.is_none() && details.private_key.is_none() {
         return Ok(false);
     }
-    let t0 = Instant::now();
     let handle = do_handshake(
         &details.host,
         details.port,
@@ -364,7 +357,6 @@ pub async fn ssh_prewarm(
     state
         .warm_insert(key.clone(), WarmConn { handle, created_at: Instant::now() })
         .await;
-    tracing::info!("ssh_prewarm: {key} ready in {}ms", t0.elapsed().as_millis());
     Ok(true)
 }
 
@@ -489,7 +481,6 @@ async fn run_channel(
         emit_data(&app, &session_id, &pending);
     }
 
-    tracing::info!("ssh session {session_id} exiting: {exit_reason}");
     {
         let h = session.handle.lock().await;
         let _ = h.disconnect(russh::Disconnect::ByApplication, "client closed", "en").await;
