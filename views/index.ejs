@@ -16,6 +16,9 @@
          但不解析；terminal-manager.js 首次创建终端时才 import 解析。
          这样 app 启动跳过 xterm parse (~300ms)，第一次连接的代价已被 SSH 握手掩盖。 -->
     <link rel="stylesheet" href="app://node_modules/xterm/css/xterm.css">
+    <!-- 运行时样式（原由 main-entry.js JS 注入，已静态化）。必须在 xterm.css 之后，
+         以复刻原 JS 注入的最高层叠优先级（.xterm padding / scrollbar 等覆盖规则）。 -->
+    <link rel="stylesheet" href="app://assets/css/app-runtime.css">
     <link rel="preload" as="script" href="app://node_modules/xterm/lib/xterm.js">
     <link rel="preload" as="script" href="app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js">
 </head>

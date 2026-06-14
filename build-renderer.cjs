@@ -44,10 +44,22 @@ const tmPath = path.join(OUT_DIR, 'assets/js/terminal-manager.js');
 const tmSrc = fs.readFileSync(tmPath, 'utf8').replace(/app:\/\/node_modules\//g, 'vendor/');
 fs.writeFileSync(tmPath, tmSrc);
 
+// 2.5 合并 CSS bundle —— 减少 app:// 资源往返（7 个 CSS → 1 个）。
+//     顺序须与 index.ejs 原 CSS 数组一致以保留层叠优先级。
+//     app-runtime.css 不入 bundle：它必须在 xterm.css 之后单独加载（见 index.ejs）。
+const CSS_ORDER = [
+  'fonts.css', 'main.css', 'connection-dialog.css',
+  'settings-dialog.css', 'file-manager.css', 'terminal.css', 'buttons.css',
+];
+const bundleCss = CSS_ORDER
+  .map((name) => `/* === ${name} === */\n${fs.readFileSync(path.join(OUT_DIR, 'assets/css', name), 'utf8')}`)
+  .join('\n');
+fs.writeFileSync(path.join(OUT_DIR, 'assets/css/bundle.css'), bundleCss);
+
 // 3. Render EJS → index.html with Tauri-friendly paths and ipc-bridge.js injection
 let html = ejs.render(
   fs.readFileSync(path.join(OUT_DIR, 'views/index.ejs'), 'utf8'),
-  { title: 'SSHL', cssBundle: null, rendererScript: null, connections: [] },
+  { title: 'SSHL', cssBundle: 'assets/css/bundle.css', rendererScript: null, connections: [] },
   { views: [path.join(OUT_DIR, 'views')], filename: path.join(OUT_DIR, 'views/index.ejs') }
 );
 html = html.replace(/app:\/\//g, '');

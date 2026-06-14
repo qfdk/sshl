@@ -1,6 +1,6 @@
 {
   "name": "sshl",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Fast SSH client with file transfer capabilities (Tauri)",
   "author": "qfdk",
   "private": true,
@@ -9,6 +9,7 @@
     "tauri": "tauri",
     "build:renderer": "node build-renderer.cjs",
     "build": "pnpm run build:renderer && pnpm tauri build --bundles app",
+    "deploy": "bash scripts/deploy.sh",
     "dev": "pnpm run build:renderer && pnpm tauri dev"
   },
   "dependencies": {
