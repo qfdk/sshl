@@ -1,0 +1,9 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- macOS 标准网格：squircle 824×824 居中，四周 100px 透明边距 -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="#23262d"/>
+  <!-- 第一行：$ + 块光标（同行、留间距、底齐基线） -->
+  <text x="192" y="442" font-family="Menlo, monospace" font-size="170" font-weight="bold" fill="#f5f7fa">$</text>
+  <rect x="360" y="318" width="54" height="124" rx="6" fill="#f5f7fa"/>
+  <!-- 第二行：SSHL 水平居中 -->
+  <text x="512" y="728" font-family="Menlo, monospace" font-size="196" font-weight="bold" fill="#2fda45" text-anchor="middle">SSHL</text>
+</svg>
