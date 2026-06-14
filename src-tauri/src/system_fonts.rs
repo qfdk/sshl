@@ -37,21 +37,6 @@ fn font_dirs() -> Vec<PathBuf> {
     v
 }
 
-/// Insert spaces before capital letters following lowercase ones.
-/// "JetBrainsMonoNerdFont" -> "Jet Brains Mono Nerd Font". Not perfect, good enough.
-fn camel_to_spaced(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    let mut prev_lower = false;
-    for c in s.chars() {
-        if c.is_uppercase() && prev_lower {
-            out.push(' ');
-        }
-        out.push(c);
-        prev_lower = c.is_lowercase() || c.is_numeric();
-    }
-    out
-}
-
 fn family_from_filename(stem: &str) -> Vec<String> {
     // 文件名常见: "JetBrainsMonoNerdFont-Regular.ttf"
     let base = stem.split('-').next().unwrap_or(stem).trim();
@@ -74,14 +59,11 @@ fn family_from_filename(stem: &str) -> Vec<String> {
     let cleaned = parts.join(" ").trim().to_string();
     if cleaned.is_empty() { return Vec::new(); }
 
-    // 两种候选：原始字符串 + CamelCase 拆分后的版本
-    let spaced = camel_to_spaced(&cleaned);
+    // 候选：原始字符串 + Nerd Font 规范命名（"JetBrainsMonoNerdFont" → "JetBrainsMono Nerd Font"）。
+    // 不做 camel_to_spaced 全拆分——它会把 "JetBrainsMono" 拆成 "Jet Brains Mono"，产生系统不存在的
+    // 无效 family 名，污染字体选择器（前端虽有 canvas 验证兜底，但不该在源头制造垃圾）。
     let mut out = vec![cleaned.clone()];
-    if spaced != cleaned {
-        out.push(spaced);
-    }
-    // 把 "JetBrainsMonoNerdFont" 拆为 "JetBrainsMono Nerd Font"（合并相邻小驼峰段）
-    if let Some(coalesced) = coalesce_nerd_naming(&out[0]) {
+    if let Some(coalesced) = coalesce_nerd_naming(&cleaned) {
         if !out.contains(&coalesced) { out.push(coalesced); }
     }
     out

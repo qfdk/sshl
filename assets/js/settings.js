@@ -3,6 +3,18 @@
 
 const STORAGE_KEY = 'sshl.terminalSettings';
 
+// 分组标签 —— 下拉框 optgroup 用，顺序即展示顺序。
+const GROUP_NERD = '图标字体（Nerd Font）';
+const GROUP_MONO = '等宽字体';
+
+// 内置（打包进 app）的 Nerd Font。@font-face 见 assets/css/fonts.css。
+// 永远可用，不依赖系统安装，是「图标字体」分组的稳定锚点，也是 canvas 能可靠渲染图标的字体。
+const BUNDLED_NERD = {
+    label: 'JetBrainsMono Nerd Font (内置·含图标)',
+    value: '"JetBrainsMono Nerd Font Mono", monospace',
+    group: GROUP_NERD
+};
+
 // Nerd Font 兜底栈：vim / starship / powerline 等需要的图标字形从这里补齐。
 // 实际只追加已安装的 Nerd Font，由 initSettingsUI 在运行时探测后构建。
 const NERD_CANDIDATES = [
@@ -72,16 +84,9 @@ function buildNerdStack(installedNerd) {
 
 const DEFAULTS = {
     fontSize: 14,
-    fontFamily: 'Menlo, Monaco, "Courier New", monospace'
+    // 默认即内置 Nerd Font —— 新装用户开箱即有图标，无需手动选字体。
+    fontFamily: '"JetBrainsMono Nerd Font Mono", Menlo, Monaco, monospace'
 };
-
-// 静态兜底列表 —— 当系统字体探测未启用时使用。
-export const FONT_PRESETS = [
-    { label: 'Menlo (默认)', value: 'Menlo, Monaco, "Courier New", monospace' },
-    { label: 'Monaco', value: 'Monaco, Menlo, monospace' },
-    { label: 'SF Mono', value: '"SF Mono", Menlo, monospace' },
-    { label: 'monospace', value: 'monospace' }
-];
 
 /** 根据系统实际安装的字体动态生成 picker 选项。 */
 export function buildSystemFontPresets() {
@@ -89,26 +94,24 @@ export function buildSystemFontPresets() {
     const installedNerd = detectInstalledFonts(NERD_CANDIDATES);
     const nerdFallback = buildNerdStack(installedNerd);
 
-    const presets = [];
+    const presets = [BUNDLED_NERD];
+    // 系统已安装的 Nerd Fonts（图标字体分组，内置项之后）
+    for (const name of installedNerd) {
+        presets.push({
+            label: `${name} (含图标)`,
+            value: `"${name}", monospace`,
+            group: GROUP_NERD
+        });
+    }
     // 基础 monospace 字体（实际装的）
     for (const name of installedMono) {
         presets.push({
             label: name,
-            value: `"${name}", ${nerdFallback}`
+            value: `"${name}", ${nerdFallback}`,
+            group: GROUP_MONO
         });
     }
-    // 已安装的 Nerd Fonts 单独列出（带图标）
-    for (const name of installedNerd) {
-        presets.push({
-            label: `${name} (含图标)`,
-            value: `"${name}", monospace`
-        });
-    }
-    if (!presets.length) {
-        // 系统什么都没探测到，回退静态列表
-        return FONT_PRESETS.slice();
-    }
-    presets.push({ label: 'monospace', value: 'monospace' });
+    presets.push({ label: 'monospace', value: 'monospace', group: GROUP_MONO });
     return presets;
 }
 
@@ -209,48 +212,90 @@ export function initSettingsUI() {
     let presets = buildSystemFontPresets();
     function renderOptions() {
         fontFamilySelect.innerHTML = '';
+        // 按 group 字段聚成 optgroup，分组顺序按首次出现保留（图标字体在前，等宽在后）。
+        const groups = new Map();
         for (const p of presets) {
-            const opt = document.createElement('option');
-            opt.value = p.value;
-            opt.textContent = p.label;
-            fontFamilySelect.appendChild(opt);
+            const key = p.group || GROUP_MONO;
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(p);
         }
+        for (const [label, items] of groups) {
+            const og = document.createElement('optgroup');
+            og.label = label;
+            for (const p of items) {
+                const opt = document.createElement('option');
+                opt.value = p.value;
+                opt.textContent = p.label;
+                og.appendChild(opt);
+            }
+            fontFamilySelect.appendChild(og);
+        }
+        const customGroup = document.createElement('optgroup');
+        customGroup.label = '其他';
         const customOpt = document.createElement('option');
         customOpt.value = CUSTOM_SENTINEL;
         customOpt.textContent = '自定义…';
-        fontFamilySelect.appendChild(customOpt);
+        customGroup.appendChild(customOpt);
+        fontFamilySelect.appendChild(customGroup);
     }
     renderOptions();
 
-    /** 调用 Rust 端枚举系统字体目录。Core Text 返回的就是 CSS 可识别的 family name，直接信任。 */
+    /** 调用 Rust 端枚举系统字体目录，再用 canvas 验证可渲染性后填充（Rust 文件名启发式可能含无效名）。 */
     async function refreshFontListFromSystem() {
         try {
-            const families = await window.api.file.listSystemFonts();
-            console.log('[settings] system fonts:', families?.length, families);
-            if (!Array.isArray(families) || !families.length) return;
+            const raw = await window.api.file.listSystemFonts();
+            console.log('[settings] system fonts:', raw?.length, raw);
+            if (!Array.isArray(raw) || !raw.length) return;
+            // canvas 验证：只保留真正能被 canvas/浏览器渲染的 family 名。
+            // Rust 文件名启发式会吐出系统不存在的拆分名（如 "Jet Brains Mono Nerd Font Mono"），
+            // 直接信任会让用户选中后 fallback、图标显示为 □。canvas 渲染不出的名字一律剔除。
+            const families = detectInstalledFonts(raw.filter(n => typeof n === 'string' && n.trim()));
             const nerd = families.filter(n => /nerd/i.test(n));
-            const nerdFallback = nerd.length
-                ? `${nerd.slice(0, 3).map(n => `"${n}"`).join(', ')}, monospace`
-                : 'monospace';
-            const fresh = [];
-            // Nerd Font 置顶（含 VIM/Powerline 图标）
+            // 内置字体永远在前；系统 Nerd Font 用内置 Mono 作兜底（系统名渲染不出时仍有图标）。
+            const nerdFallback = '"JetBrainsMono Nerd Font Mono", monospace';
+            const fresh = [BUNDLED_NERD];
+            // 系统 Nerd Font（图标字体分组）
             for (const name of nerd) {
-                fresh.push({ label: `${name} (含图标)`, value: `"${name}", monospace` });
+                if (name === 'JetBrainsMono Nerd Font Mono') continue; // 与内置同名，避免重复
+                fresh.push({ label: `${name} (含图标)`, value: `"${name}", monospace`, group: GROUP_NERD });
             }
-            // 其他字体（带 Nerd Font 兜底）
+            // 其他等宽字体（带内置 Nerd Font 兜底，保证图标不丢）
             for (const name of families) {
                 if (nerd.includes(name)) continue;
-                fresh.push({ label: name, value: `"${name}", ${nerdFallback}` });
+                fresh.push({ label: name, value: `"${name}", ${nerdFallback}`, group: GROUP_MONO });
             }
-            fresh.push({ label: 'monospace', value: 'monospace' });
+            fresh.push({ label: 'monospace', value: 'monospace', group: GROUP_MONO });
+            // 重建下拉框后保留当前选中项（异步补全期间用户可能已在操作）
+            const keep = dialog.classList.contains('active') ? readForm().fontFamily : null;
             presets = fresh;
             renderOptions();
+            if (keep) selectFamily(keep);
         } catch (e) {
             console.warn('系统字体枚举失败，回退静态列表:', e);
         }
     }
 
+    // 系统字体枚举较慢（Rust 枚举字体目录 + 逐个 canvas 验证），只跑一次并缓存。
+    let fontListPromise = null;
+    function ensureFontList() {
+        if (!fontListPromise) fontListPromise = refreshFontListFromSystem();
+        return fontListPromise;
+    }
+
     let snapshot = null;
+
+    /** 把下拉框选中到给定 fontFamily；命中预设则选中，否则切到自定义。 */
+    function selectFamily(family) {
+        const matched = presets.find(p => p.value === family);
+        if (matched) {
+            fontFamilySelect.value = matched.value;
+            customWrap.classList.add('hidden');
+        } else {
+            fontFamilySelect.value = CUSTOM_SENTINEL;
+            customInput.value = family;
+            customWrap.classList.remove('hidden');
+        }
+    }
 
     function readForm() {
         const size = clampSize(fontSizeInput.value);
@@ -272,23 +317,15 @@ export function initSettingsUI() {
         setTerminalSettings(s, { persist: false });
     }
 
-    async function openDialog() {
-        await refreshFontListFromSystem();
+    function openDialog() {
+        // 立即弹窗，不等字体枚举（否则首次点击要卡几百 ms）。列表后台异步补全。
         snapshot = getTerminalSettings();
         fontSizeInput.value = snapshot.fontSize;
-        const matched = presets.find(p => p.value === snapshot.fontFamily);
-        if (matched) {
-            fontFamilySelect.value = matched.value;
-            customWrap.classList.add('hidden');
-            customInput.value = '';
-        } else {
-            fontFamilySelect.value = CUSTOM_SENTINEL;
-            customInput.value = snapshot.fontFamily;
-            customWrap.classList.remove('hidden');
-        }
+        selectFamily(snapshot.fontFamily);
         syncPreview(snapshot);
         dialog.classList.add('active');
         fontSizeInput.focus();
+        ensureFontList();
     }
 
     function closeDialog() {

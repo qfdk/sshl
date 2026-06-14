@@ -1,0 +1,22 @@
+/* 内置 Nerd Font —— 打包进 app，用 @font-face 加载。
+ * 为什么内置而不依赖系统安装：
+ *   WKWebView 的 xterm canvas renderer 无法 fallback 到系统安装字体的 PUA 图标字形
+ *   （DOM 渲染走 CoreText 可以，canvas 不行），导致 vim/lualine 图标显示为 □。
+ *   canvas 对通过 @font-face url() 加载的 web font 渲染是可靠的。
+ *   同时系统字体探测时有时无，内置后下拉框「图标字体」分组可永远稳定显示。
+ * src 仅用 url()（不带 local()），强制使用打包文件，避免引擎挑选同名系统字体。 */
+@font-face {
+    font-family: 'JetBrainsMono Nerd Font Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: block;
+    src: url('../fonts/JetBrainsMonoNerdFontMono-Regular.ttf') format('truetype');
+}
+
+@font-face {
+    font-family: 'JetBrainsMono Nerd Font Mono';
+    font-style: normal;
+    font-weight: 700;
+    font-display: block;
+    src: url('../fonts/JetBrainsMonoNerdFontMono-Bold.ttf') format('truetype');
+}
