@@ -111,6 +111,74 @@ function debounce(func, wait) {
     };
 }
 
+// 统一构造 xterm 实例。调用方的 options 在最后展开，可覆盖默认 theme/透明度等。
+// 注意：xterm 5.x 已移除 `rendererType` 构造选项（静默忽略），默认是 DOM renderer，
+// 要 canvas renderer 必须显式 loadAddon(CanvasAddon)，见 loadCanvasRenderer。
+function createXtermInstance(options) {
+    const userSettings = getTerminalSettings();
+    return new Terminal({
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        // canvas/webgl renderer 失焦时用 cursorInactiveStyle，默认 'outline'（空心框，看着像块状）。
+        // Tauri WebView 里 document.hasFocus() 常判为 false → 一直走 inactive 样式，
+        // 故显式设 'bar'，保证激活/失焦都是竖线。
+        cursorInactiveStyle: 'bar',
+        fontSize: userSettings.fontSize,
+        fontFamily: userSettings.fontFamily,
+        theme: {
+            background: '#1e1e2e',
+            foreground: '#f0f0f0',
+            cursor: '#ffffff'
+        },
+        allowTransparency: false,
+        ...options
+    });
+}
+
+// 切换到 canvas renderer：DOM renderer 在 vim/tmux 整屏翻页（Ctrl+B/F）等高频重绘下
+// 会撕裂/残影/卡顿，canvas renderer 修复之。CanvasAddon 必须在 term.open() 之后加载
+// （它需要已挂载的 DOM）。加载失败时静默回退 DOM renderer，不影响基本可用性。
+function loadCanvasRenderer(term) {
+    try {
+        term.loadAddon(new CanvasAddon.CanvasAddon());
+    } catch (err) {
+        console.warn('[terminal] canvas renderer 加载失败，回退 DOM renderer:', err);
+    }
+}
+
+// canvas renderer 把行高量化成整数 px → 渲染区(canvas)比可用高度矮几~十几 px，
+// 默认贴顶，底部多出一道空隙（与终端同色但位置突兀，用户感知为"底部多一行"）。
+// 这里把渲染区精确贴底：强制 .xterm-screen 高度 = canvas 高度（覆盖 CSS 的 height:100%，
+// 否则 screen 会被撑满到可用高度），再用 relative 把整段余量推到顶部，底部只剩正常 padding。
+// 左右 padding 不受影响；xterm 用 screen 的真实 getBoundingClientRect 算鼠标坐标，
+// relative 偏移已包含在 rect 内，贴底不影响选择/点击。
+function alignScreenToBottom(host) {
+    if (!host) return;
+    const xt = host.querySelector('.xterm');
+    const sc = host.querySelector('.xterm-screen');
+    const cv = host.querySelector('.xterm-screen canvas');
+    if (!xt || !sc || !cv) return;
+    const padTop = parseFloat(getComputedStyle(xt).paddingTop) || 0;
+    const padBot = parseFloat(getComputedStyle(xt).paddingBottom) || 0;
+    const avail = xt.clientHeight - padTop - padBot;
+    const cvH = cv.getBoundingClientRect().height;
+    if (!cvH) return;
+    const leftover = Math.max(0, Math.round(avail - cvH));
+    sc.style.setProperty('height', cvH + 'px', 'important');
+    sc.style.setProperty('position', 'relative', 'important');
+    sc.style.setProperty('top', leftover + 'px', 'important');
+}
+
+// 窗口缩放时去抖 fit；存 cleanup 以便 dispose 时移除监听器，避免多 session 叠加泄漏。
+function attachResizeHandler(term, fitAddon) {
+    const resizeHandler = debounce(() => {
+        if (fitAddon && term) fitAddon.fit();
+    }, 50);
+    window.addEventListener('resize', resizeHandler);
+    term._resizeHandler = resizeHandler;
+    term._cleanup = () => window.removeEventListener('resize', resizeHandler);
+}
+
 class TerminalManager {
     constructor() {
         this.activeTerminal = null;
@@ -151,147 +219,57 @@ class TerminalManager {
         if (typeof container === 'string') {
             container = document.getElementById(container);
         }
-    
-        if (!window.Terminal || !window.FitAddon) {
-            console.log('Loading Terminal and FitAddon scripts dynamically');
-            // 动态加载脚本
+
+        // term.open() 之后挂 fit + canvas renderer，再 fit 一次并注册缩放监听。
+        const buildTerminal = (resolve, reject) => {
+            try {
+                const term = createXtermInstance(options);
+                const fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+                term.open(container);
+                loadCanvasRenderer(term);
+                fitAddon.fit();
+                attachResizeHandler(term, fitAddon);
+                // 强制延迟以确保适当的大小
+                setTimeout(() => fitAddon.fit(), 100);
+                resolve({ term, fitAddon });
+            } catch (error) {
+                console.error('创建终端错误:', error);
+                reject(error);
+            }
+        };
+
+        // canvas renderer 也要就绪，否则首次走动态加载、二次走 else 分支时 CanvasAddon 缺失。
+        if (!window.Terminal || !window.FitAddon || !window.CanvasAddon) {
+            console.log('Loading Terminal / FitAddon / CanvasAddon scripts dynamically');
+            // 动态加载脚本：xterm → fit → canvas，全部就绪后再创建终端
             return new Promise((resolve, reject) => {
-                // 先加载xterm.js
-                const xtermScript = document.createElement('script');
-                xtermScript.src = 'app://node_modules/xterm/lib/xterm.js';
-    
+                const loadScript = (src, label) => new Promise((res, rej) => {
+                    const el = document.createElement('script');
+                    el.src = src;
+                    el.onload = res;
+                    el.onerror = () => {
+                        console.error(`加载 ${label} 失败`);
+                        rej(new Error(`Failed to load ${label}`));
+                    };
+                    document.head.appendChild(el);
+                });
+
                 // 加载样式
                 const xtermStylesheet = document.createElement('link');
                 xtermStylesheet.rel = 'stylesheet';
                 xtermStylesheet.href = 'app://node_modules/xterm/css/xterm.css';
                 document.head.appendChild(xtermStylesheet);
-    
-                xtermScript.onload = () => {
-                    // 加载xterm.js后，加载fit addon
-                    const fitScript = document.createElement('script');
-                    fitScript.src = 'app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js';
-    
-                    fitScript.onload = () => {
-                        try {
-                            // 创建终端实例
-                            const userSettings = getTerminalSettings();
-                            const term = new Terminal({
-                                cursorBlink: true,
-                                cursorStyle: 'bar',
-                                fontSize: userSettings.fontSize,
-                                fontFamily: userSettings.fontFamily,
-                                theme: {
-                                    background: '#1e1e2e',
-                                    foreground: '#f0f0f0',
-                                    cursor: '#ffffff'
-                                },
-                                allowTransparency: false,
-                                rendererType: 'dom',
-                                ...options
-                            });
-    
-                            // 创建fit addon
-                            const fitAddon = new FitAddon.FitAddon();
-                            term.loadAddon(fitAddon);
-    
-                            term.open(container);
-                            fitAddon.fit();
-    
-                            // 添加窗口大小调整事件监听器（使用防抖）
-                            const resizeHandler = debounce(() => {
-                                if (fitAddon && term) {
-                                    fitAddon.fit();
-                                }
-                            }, 50);
-                            
-                            window.addEventListener('resize', resizeHandler);
-                            
-                            // 存储清理函数
-                            term._resizeHandler = resizeHandler;
-                            term._cleanup = () => {
-                                window.removeEventListener('resize', resizeHandler);
-                            };
-    
-                            // 强制延迟以确保适当的大小
-                            setTimeout(() => {
-                                fitAddon.fit();
-                            }, 100);
-    
-                            resolve({term, fitAddon});
-                        } catch (error) {
-                            console.error('创建终端错误:', error);
-                            reject(error);
-                        }
-                    };
-    
-                    fitScript.onerror = (error) => {
-                        console.error('加载 FitAddon 失败:', error);
-                        reject(new Error('Failed to load xterm-addon-fit.js'));
-                    };
-    
-                    document.head.appendChild(fitScript);
-                };
-    
-                xtermScript.onerror = (error) => {
-                    console.error('加载 xterm.js 失败:', error);
-                    reject(new Error('Failed to load xterm.js'));
-                };
-    
-                document.head.appendChild(xtermScript);
+
+                loadScript('app://node_modules/xterm/lib/xterm.js', 'xterm.js')
+                    .then(() => loadScript('app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js', 'xterm-addon-fit.js'))
+                    .then(() => loadScript('app://node_modules/xterm-addon-canvas/lib/xterm-addon-canvas.js', 'xterm-addon-canvas.js'))
+                    .then(() => buildTerminal(resolve, reject))
+                    .catch(reject);
             });
         } else {
             // 脚本已加载，直接创建终端
-            return new Promise((resolve, reject) => {
-                try {
-                    // 创建终端实例
-                    const userSettings = getTerminalSettings();
-                    const term = new Terminal({
-                        cursorBlink: true,
-                        cursorStyle: 'bar',
-                        fontSize: userSettings.fontSize,
-                        fontFamily: userSettings.fontFamily,
-                        theme: {
-                            background: '#1e1e2e',
-                            foreground: '#f0f0f0',
-                            cursor: '#ffffff'
-                        },
-                        allowTransparency: false,
-                        rendererType: 'dom',
-                        ...options
-                    });
-    
-                    // 创建fit addon
-                    const fitAddon = new FitAddon.FitAddon();
-                    term.loadAddon(fitAddon);
-    
-                    term.open(container);
-                    fitAddon.fit();
-
-                    // 添加窗口大小调整事件监听器（去抖 + 存 cleanup）
-                    // 之前这里注册的是未去抖、且无法移除的匿名监听器，每开一个新 session
-                    // 就永久叠加一个，窗口缩放时 N 个 fit() 同时触发且永不回收。
-                    const resizeHandler = debounce(() => {
-                        if (fitAddon && term) {
-                            fitAddon.fit();
-                        }
-                    }, 50);
-                    window.addEventListener('resize', resizeHandler);
-                    term._resizeHandler = resizeHandler;
-                    term._cleanup = () => {
-                        window.removeEventListener('resize', resizeHandler);
-                    };
-
-                    // 强制延迟以确保适当的大小
-                    setTimeout(() => {
-                        fitAddon.fit();
-                    }, 100);
-
-                    resolve({term, fitAddon});
-                } catch (error) {
-                    console.error('创建终端错误:', error);
-                    reject(error);
-                }
-            });
+            return new Promise((resolve, reject) => buildTerminal(resolve, reject));
         }
     }
     
@@ -389,7 +367,6 @@ class TerminalManager {
                     cursor: '#FBF74B'
                 },
                 allowTransparency: true,
-                rendererType: 'canvas',
                 blinkInterval: 500
             };
 
@@ -419,6 +396,7 @@ class TerminalManager {
             const renderTick = debounce(() => {
                 const c = sampleDominantBg(term);
                 if (c) applyBg(c);
+                alignScreenToBottom(host);
             }, 60);
             try {
                 term.onRender(renderTick);

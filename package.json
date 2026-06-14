@@ -1,6 +1,6 @@
 {
   "name": "sshl",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Fast SSH client with file transfer capabilities (Tauri)",
   "author": "qfdk",
   "private": true,
