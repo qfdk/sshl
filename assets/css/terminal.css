@@ -39,26 +39,18 @@
     font-feature-settings: normal !important;
 }
 
-/* xterm 默认 overflow-y:scroll 强保留 scrollbar gutter，alt-screen 也露 → 改 auto */
+/* 彻底隐藏滚动条占位：xterm/FitAddon 会为滚动条预留宽度（macOS 上 8~15px），
+   导致 canvas 没用满、右侧空出一条未渲染的缝（含最右 1px 亮线）。
+   配合 JS 端强制 term._core.viewport.scrollBarWidth=0，列数按全宽计算，canvas 铺满。
+   滚轮回滚由 xterm 自身处理，无需可见滚动条。 */
 .terminal-container .xterm-viewport {
     overflow-y: auto !important;
     overflow-x: hidden !important;
-    scrollbar-width: thin !important;
-    scrollbar-color: #444 transparent !important;
+    scrollbar-width: none !important;
 }
 
-/* scrollbar 自身也透明，让背景透出 */
 .terminal-container .xterm-viewport::-webkit-scrollbar {
-    width: 8px !important;
-    background: transparent !important;
-}
-
-.terminal-container .xterm-viewport::-webkit-scrollbar-track,
-.terminal-container .xterm-viewport::-webkit-scrollbar-corner {
-    background: transparent !important;
-}
-
-.terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
-    background-color: #444 !important;
-    border-radius: 4px !important;
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
 }

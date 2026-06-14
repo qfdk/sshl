@@ -29,8 +29,12 @@ function sampleDominantBg(term) {
         const buf = term.buffer.active;
         const rows = term.rows, cols = term.cols;
         if (!rows || !cols) return null;
+        // 默认背景 cell（mode=0）用终端 theme.background 代表，一同参与统计。
+        // 否则像 htop 这类「大面积默认背景 + 少量彩色装饰」的程序，会把少数装饰色
+        // 误当成主背景，导致 padding / 右侧缝色与内容（默认背景）不一致，露出边缘竖缝。
+        const themeBg = (term.options?.theme?.background || '#1e1e2e').toLowerCase();
         const counts = new Map();
-        let total = 0, defaultCnt = 0;
+        let total = 0;
         // 步长：保证总采样 ~200-400 个 cell，性能可控
         const stepY = Math.max(1, Math.floor(rows / 16));
         const stepX = Math.max(1, Math.floor(cols / 24));
@@ -42,31 +46,30 @@ function sampleDominantBg(term) {
                 if (!cell) continue;
                 total++;
                 const mode = cell.getBgColorMode();
-                const c = cell.getBgColor();
-                if (mode === 0) { defaultCnt++; continue; }
                 let hex;
-                // xterm 颜色模式常量：CM_P16=1<<24, CM_P256=2<<24, CM_RGB=3<<24
-                if (mode === (1 << 24) || mode === (2 << 24)) {
-                    hex = paletteToHex(c);
-                } else if (mode === (3 << 24)) {
-                    // RGB: 颜色编码 = (R<<16)|(G<<8)|B
-                    hex = '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
-                              + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
-                              + (c & 0xff).toString(16).padStart(2, '0');
-                } else continue;
+                if (mode === 0) {
+                    hex = themeBg;
+                } else {
+                    const c = cell.getBgColor();
+                    // xterm 颜色模式常量：CM_P16=1<<24, CM_P256=2<<24, CM_RGB=3<<24
+                    if (mode === (1 << 24) || mode === (2 << 24)) {
+                        hex = paletteToHex(c);
+                    } else if (mode === (3 << 24)) {
+                        // RGB: 颜色编码 = (R<<16)|(G<<8)|B
+                        hex = '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
+                                  + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
+                                  + (c & 0xff).toString(16).padStart(2, '0');
+                    } else continue;
+                }
+                if (!hex) continue;
                 counts.set(hex, (counts.get(hex) || 0) + 1);
             }
         }
-        if (!total) return null;
-        // 如果 ≥60% cell 是 default mode，说明当前程序（如 shell / less 等）依赖终端默认色 → 返回 null
-        // 让 xterm theme.background 决定，调用方负责保证 padding/host bg 与 theme.background 一致
-        if (defaultCnt / total >= 0.6) return null;
-        if (counts.size === 0) return null;
+        if (!total || counts.size === 0) return null;
         let best = null, max = 0;
         for (const [k, v] of counts) if (v > max) { best = k; max = v; }
-        // 主色需占非默认 cell 的 ≥50%，否则不可靠（例如 split window 不同颜色各占一半）
-        const nonDefault = total - defaultCnt;
-        if (nonDefault === 0 || max / nonDefault < 0.5) return null;
+        // 主色需占总采样的 ≥50%，否则画面无明确主背景（如 split window）→ 不强行染色
+        if (!best || max / total < 0.5) return null;
         return best;
     } catch (_) {
         return null;
@@ -228,6 +231,10 @@ class TerminalManager {
                 term.loadAddon(fitAddon);
                 term.open(container);
                 loadCanvasRenderer(term);
+                // 强制 scrollBarWidth=0：滚动条已用 CSS 隐藏（不占位），FitAddon 默认仍会
+                // 减去滚动条宽度（macOS 回退 8~15px）算列数，导致 canvas 没用满、右侧留缝。
+                // 置 0 后列数按容器全宽计算，canvas 铺满，消除右侧 8px 缝与 1px 亮线。
+                try { if (term._core?.viewport) term._core.viewport.scrollBarWidth = 0; } catch (_) {}
                 fitAddon.fit();
                 attachResizeHandler(term, fitAddon);
                 // 强制延迟以确保适当的大小
@@ -395,7 +402,15 @@ class TerminalManager {
             };
             const renderTick = debounce(() => {
                 const c = sampleDominantBg(term);
-                if (c) applyBg(c);
+                if (c) {
+                    applyBg(c);
+                } else {
+                    // 没采到主色（如 htop 大量 default cell）：把 padding / 右侧缝色对齐到
+                    // xterm 当前 theme.background（canvas 实际渲染的 default cell 色），
+                    // 否则 --term-bg 会残留上一个程序的旧值，与内容背景色差，露出边缘竖缝。
+                    const bg = term.options?.theme?.background;
+                    if (bg) applyBg(bg);
+                }
                 alignScreenToBottom(host);
             }, 60);
             try {
