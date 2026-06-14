@@ -9,7 +9,7 @@
     "tauri": "tauri",
     "build:renderer": "node build-renderer.cjs",
     "build": "pnpm run build:renderer && pnpm tauri build --bundles app",
-    "deploy": "bash scripts/deploy.sh",
+    "deploy:app": "bash scripts/deploy.sh",
     "dev": "pnpm run build:renderer && pnpm tauri dev"
   },
   "dependencies": {

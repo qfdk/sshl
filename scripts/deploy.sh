@@ -5,7 +5,7 @@
 # 在铺满边角的深色 squircle 上会泛出一圈高亮/光环，且缓存顽固。把 icon.png 设为 Finder
 # 自定义图标可绕开该渲染路径，直接用原图，效果与手动「显示简介→粘贴图标」一致。
 #
-# 用法: pnpm deploy   (需先 pnpm build 产出 bundle)
+# 用法: pnpm deploy:app   (需先 pnpm build 产出 bundle)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
