@@ -1,5 +1,6 @@
 mod config_store;
 mod crypto_store;
+mod db;
 mod error;
 mod local_fs;
 mod sftp;

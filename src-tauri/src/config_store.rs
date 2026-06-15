@@ -1,12 +1,11 @@
-// Persistent connection storage — replaces electron-store + safeStorage.
-// Metadata in ~/.sshl/connections.json (plaintext); credentials encrypted via crypto_store.
+// 连接存储 —— 元数据存在 ~/.sshl/sshl.db 的 connections 表；密码/账号密码经 crypto_store
+// 加密后存进同库的 secrets 表（密钥仍在独立的 master.key）。旧的 JSON 文件由 db.rs 自动迁移。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::Mutex;
 
 use crate::crypto_store;
+use crate::db;
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +19,7 @@ pub struct StoredConnection {
     pub username: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub private_key: Option<String>,
-    /// Password is never written to disk — only flagged here, value lives in Keychain.
+    /// 密码本身从不入元数据，只记一个标记；明文密文在 secrets 表里。
     #[serde(default)]
     pub has_password: bool,
     #[serde(default)]
@@ -31,50 +30,35 @@ fn default_port() -> u16 {
     22
 }
 
-fn config_dir() -> AppResult<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Config("no home dir".into()))?;
-    Ok(home.join(".sshl"))
-}
-
-fn config_path() -> AppResult<PathBuf> {
-    Ok(config_dir()?.join("connections.json"))
-}
-
-pub struct ConfigStore {
-    lock: Mutex<()>,
-}
+/// 保留为 Tauri State 句柄（命令签名沿用），实际存储走 db。
+#[derive(Default)]
+pub struct ConfigStore;
 
 impl ConfigStore {
     pub fn new() -> Self {
-        Self {
-            lock: Mutex::new(()),
-        }
+        Self
     }
 
     pub(crate) async fn read_all(&self) -> AppResult<Vec<StoredConnection>> {
-        let _g = self.lock.lock().await;
-        let path = config_path()?;
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let data = tokio::fs::read(&path).await?;
-        Ok(serde_json::from_slice(&data).unwrap_or_default())
-    }
-
-    async fn write_all(&self, items: &[StoredConnection]) -> AppResult<()> {
-        let _g = self.lock.lock().await;
-        let dir = config_dir()?;
-        tokio::fs::create_dir_all(&dir).await?;
-        let path = config_path()?;
-        let data = serde_json::to_vec_pretty(items)?;
-        tokio::fs::write(&path, data).await?;
-        Ok(())
-    }
-}
-
-impl Default for ConfigStore {
-    fn default() -> Self {
-        Self::new()
+        db::with_db(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id,name,host,port,username,private_key,has_password,has_passphrase
+                 FROM connections ORDER BY sort_order, rowid",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(StoredConnection {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    host: r.get(2)?,
+                    port: r.get::<_, i64>(3)? as u16,
+                    username: r.get(4)?,
+                    private_key: r.get(5)?,
+                    has_password: r.get::<_, i64>(6)? != 0,
+                    has_passphrase: r.get::<_, i64>(7)? != 0,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
     }
 }
 
@@ -102,7 +86,7 @@ pub async fn config_get_connections(
 #[tauri::command]
 pub async fn config_save_connection(
     app: AppHandle,
-    store: tauri::State<'_, ConfigStore>,
+    _store: tauri::State<'_, ConfigStore>,
     connection: SaveConnectionInput,
 ) -> AppResult<StoredConnection> {
     let id = connection
@@ -130,13 +114,43 @@ pub async fn config_save_connection(
         has_passphrase,
     };
 
-    let mut all = store.read_all().await?;
-    if let Some(pos) = all.iter().position(|c| c.id == id) {
-        all[pos] = stored.clone();
-    } else {
-        all.push(stored.clone());
-    }
-    store.write_all(&all).await?;
+    // upsert：已存在则保留原排序，否则追加到末尾（sort_order = max+1）
+    db::with_db(|conn| {
+        let order: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM connections WHERE id=?1",
+                rusqlite::params![stored.id],
+                |r| r.get(0),
+            )
+            .or_else(|_| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(sort_order)+1,0) FROM connections",
+                    [],
+                    |r| r.get(0),
+                )
+            })?;
+        conn.execute(
+            "INSERT INTO connections
+                (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, host=excluded.host, port=excluded.port,
+                username=excluded.username, private_key=excluded.private_key,
+                has_password=excluded.has_password, has_passphrase=excluded.has_passphrase",
+            rusqlite::params![
+                stored.id,
+                stored.name,
+                stored.host,
+                stored.port as i64,
+                stored.username,
+                stored.private_key,
+                stored.has_password as i64,
+                stored.has_passphrase as i64,
+                order,
+            ],
+        )?;
+        Ok(())
+    })?;
 
     let _ = app.emit("connections:updated", ());
     Ok(stored)
@@ -145,15 +159,18 @@ pub async fn config_save_connection(
 #[tauri::command]
 pub async fn config_delete_connection(
     app: AppHandle,
-    store: tauri::State<'_, ConfigStore>,
+    _store: tauri::State<'_, ConfigStore>,
     id: String,
 ) -> AppResult<()> {
-    crypto_store::delete(&id, "password");
-    crypto_store::delete(&id, "passphrase");
-
-    let mut all = store.read_all().await?;
-    all.retain(|c| c.id != id);
-    store.write_all(&all).await?;
+    // 连同该连接名下所有密文（password / passphrase / acct:*）一并删除
+    db::with_db(|conn| {
+        conn.execute("DELETE FROM connections WHERE id=?1", rusqlite::params![id])?;
+        conn.execute(
+            "DELETE FROM secrets WHERE key LIKE ?1",
+            rusqlite::params![format!("{id}:%")],
+        )?;
+        Ok(())
+    })?;
 
     let _ = app.emit("connections:updated", ());
     Ok(())

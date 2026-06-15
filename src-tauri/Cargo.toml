@@ -31,10 +31,13 @@ russh-sftp = "2"
 # Filesystem & paths
 dirs = "5"
 
-# Credential storage (AES-GCM file-based; no Keychain prompts on rebuild)
+# Credential storage (AES-GCM; ciphertext stored in SQLite, master.key separate)
 aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
+
+# Local store: single SQLite db (connections + encrypted secrets). bundled = 自带 SQLite C 源，无需系统库
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Utilities
 anyhow = "1"
