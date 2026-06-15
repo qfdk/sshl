@@ -939,6 +939,60 @@ input[type="checkbox"] {
   display: flex;
 }
 
+.tabs-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+/* 顶栏右侧「填充密码」按钮 —— 仅密码模式连接时显示 */
+.fill-password-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background-color: #f5f7fa;
+  color: var(--secondary-color);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.fill-password-btn[hidden] {
+  display: none;
+}
+
+.fill-password-btn:hover {
+  background-color: var(--primary-color, #4a7dff);
+  border-color: var(--primary-color, #4a7dff);
+  color: #ffffff;
+}
+
+.fill-password-btn:active {
+  transform: translateY(1px);
+}
+
+.fill-password-btn.filled {
+  background-color: var(--success-color);
+  border-color: var(--success-color);
+  color: #ffffff;
+}
+
+.fill-password-icon {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+}
+
+.fill-password-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
 .server-info {
   padding: 12px 16px;
   display: flex;

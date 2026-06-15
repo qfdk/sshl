@@ -4,6 +4,8 @@
 class UIManager {
     constructor() {
         this.loadingOverlay = null; // 加载遮罩元素
+        // 「填充密码」按钮状态：密码模式连接 + 终端正显示密码提示时才显示
+        this._fillPwd = { passwordMode: false, promptVisible: false, showingFeedback: false };
     }
     
     // 创建加载遮罩
@@ -114,8 +116,53 @@ class UIManager {
                 nameElement.textContent = '未连接';
             }
         }
+
+        // 同步「填充密码」按钮状态（连接是否密码模式 + 当前是否密码提示）
+        this.syncFillPasswordState();
     }
-    
+
+    // 重新判定当前连接是否为密码模式，并据当前终端内容刷新按钮。
+    // 在连接/切换会话（updateServerInfo）时调用。密码模式 = 未配置私钥
+    // （hasPassword 标志曾被重连 re-save 误置为 false，不可靠）。
+    async syncFillPasswordState() {
+        const sessionId = window.currentSessionId;
+        const connectionId = sessionId
+            ? window.sessionManager?.getSession(sessionId)?.connectionId
+            : null;
+        let passwordMode = false;
+        if (connectionId) {
+            try {
+                const connections = await window.api.config.getConnections();
+                const conn = connections.find(c => c.id === connectionId);
+                passwordMode = !!(conn && !conn.privateKey);
+            } catch (e) {
+                console.error('查询连接信息失败:', e);
+            }
+        }
+        this._fillPwd.passwordMode = passwordMode;
+        // 切换会话后立即按当前终端内容判定一次（避免等到下次渲染才出现）
+        const term = window.terminalManager?.activeTerminal;
+        this._fillPwd.promptVisible = passwordMode
+            && !!window.terminalManager?.isPasswordPromptVisible?.(term);
+        this._applyFillPasswordBtn();
+    }
+
+    // 终端渲染时调用：更新「当前是否显示密码提示」
+    setFillPasswordPromptVisible(visible) {
+        if (this._fillPwd.promptVisible === visible) return;
+        this._fillPwd.promptVisible = visible;
+        this._applyFillPasswordBtn();
+    }
+
+    // 应用按钮显隐：密码模式 + 密码提示可见时显示；反馈期间强制可见
+    _applyFillPasswordBtn() {
+        const btn = document.getElementById('fill-password-btn');
+        if (!btn) return;
+        const visible = this._fillPwd.showingFeedback
+            || (this._fillPwd.passwordMode && this._fillPwd.promptVisible);
+        btn.hidden = !visible;
+    }
+
     // 处理连接项鼠标悬停
     handleItemHover(event) {
         // 只有在侧边栏折叠时显示工具提示
@@ -452,6 +499,47 @@ class UIManager {
                     console.error('获取本地主目录失败:', e);
                 } finally {
                     this.disabled = false;
+                }
+            });
+        }
+
+        // 填充密码按钮（仅密码模式连接显示）：把已保存密码写入终端，自动回车，常用于 sudo 提示
+        const fillPasswordBtn = document.getElementById('fill-password-btn');
+        if (fillPasswordBtn) {
+            const iconSlot = fillPasswordBtn.querySelector('.fill-password-icon');
+            if (iconSlot && window.Icons) {
+                iconSlot.innerHTML = window.Icons.svg('key-round', 15, 2);
+            }
+            fillPasswordBtn.addEventListener('click', async () => {
+                const sessionId = window.currentSessionId;
+                if (!sessionId) return;
+                fillPasswordBtn.disabled = true;
+                try {
+                    const result = await window.api.ssh.fillPassword(sessionId);
+                    if (result && result.success) {
+                        // 已自动回车提交，密码提示随即消失 → 反馈期间强制按钮可见再短暂展示
+                        const label = fillPasswordBtn.querySelector('.fill-password-label');
+                        fillPasswordBtn.classList.add('filled');
+                        if (label) label.textContent = '填充发送完毕';
+                        window.uiManager._fillPwd.showingFeedback = true;
+                        window.uiManager._applyFillPasswordBtn();
+                        setTimeout(() => {
+                            fillPasswordBtn.classList.remove('filled');
+                            if (label) label.textContent = '填充密码';
+                            window.uiManager._fillPwd.showingFeedback = false;
+                            window.uiManager._applyFillPasswordBtn();
+                        }, 1500);
+                        // 填充后把焦点交还终端，方便继续操作
+                        const term = window.terminalManager?.activeTerminal;
+                        if (term) { try { term.focus(); } catch (_) {} }
+                    } else {
+                        alert(`填充密码失败: ${result ? result.error : '未知错误'}`);
+                    }
+                } catch (e) {
+                    console.error('填充密码失败:', e);
+                    alert(`填充密码失败: ${e.message || e}`);
+                } finally {
+                    fillPasswordBtn.disabled = false;
                 }
             });
         }

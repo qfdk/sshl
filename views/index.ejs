@@ -32,9 +32,15 @@
                 <div class="tab active" data-tab="terminal">终端</div>
                 <div class="tab" data-tab="file-manager">文件管理</div>
             </div>
-            <div class="server-info" id="main-server-info">
-                <span class="server-indicator"></span>
-                <span class="server-name">未连接</span>
+            <div class="tabs-right">
+                <button id="fill-password-btn" class="fill-password-btn" type="button" title="填充密码（用于 sudo 等密码提示）" hidden>
+                    <span class="fill-password-icon"></span>
+                    <span class="fill-password-label">填充密码</span>
+                </button>
+                <div class="server-info" id="main-server-info">
+                    <span class="server-indicator"></span>
+                    <span class="server-name">未连接</span>
+                </div>
             </div>
         </div>
 

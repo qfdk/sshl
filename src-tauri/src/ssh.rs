@@ -74,6 +74,9 @@ pub struct SshSession {
     pub host: String,
     #[allow(dead_code)]
     pub username: String,
+    /// 所属保存连接的 id（来自 ~/.sshl/connections.json）。ssh_fill_password 用它
+    /// 从加密库解密密码并直接写入通道 —— 密码全程不经过渲染层（JS）。
+    pub connection_id: Option<String>,
     pub buffer: Mutex<String>,
     /// Shared SSH handle — locked briefly when opening new channels (SFTP).
     pub handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
@@ -294,6 +297,7 @@ pub async fn ssh_connect(
         id: session_id.clone(),
         host: details.host.clone(),
         username: details.username.clone(),
+        connection_id: details.id.clone(),
         buffer: Mutex::new(String::new()),
         handle: handle_arc.clone(),
         sftp: Mutex::new(None),
@@ -515,6 +519,28 @@ pub async fn ssh_send_data(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     session.outbound.send(Outbound::Data(data.into_bytes()))
+        .map_err(|_| AppError::Ssh("session channel closed".into()))?;
+    Ok(())
+}
+
+/// 把该会话所属连接保存的密码（用于 sudo 等密码提示）解密后写入 SSH 通道并自动回车提交。
+/// 前端仅在终端出现密码提示时才显示按钮，不会误填。密码全程留在后端，不经过渲染层。
+/// 无保存密码时返回错误。
+#[tauri::command]
+pub async fn ssh_fill_password(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<()> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let cid = session.connection_id.clone()
+        .ok_or_else(|| AppError::Ssh("当前连接未保存，无密码可填充".into()))?;
+    let password = load_secret(&cid, "password")
+        .ok_or_else(|| AppError::Ssh("未找到已保存的密码".into()))?;
+    // 填充并自动回车提交（按钮仅在密码提示出现时可见，sudo 提示不回显，安全）。
+    let mut bytes = password.into_bytes();
+    bytes.push(b'\r');
+    session.outbound.send(Outbound::Data(bytes))
         .map_err(|_| AppError::Ssh("session channel closed".into()))?;
     Ok(())
 }

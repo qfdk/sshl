@@ -101,6 +101,10 @@ function parseOscColor(data) {
     return ('#' + toHex2(m[1]) + toHex2(m[2]) + toHex2(m[3])).toLowerCase();
 }
 
+// 密码提示行匹配：行尾以冒号（半角/全角）结束，且包含 password 或其本地化等价词。
+// 命中示例：`[sudo] password for hubspot:`、`Password:`、`Mot de passe de hubspot :`。
+const PASSWORD_PROMPT_RE = /(password|mot de passe|passwort|contraseña|пароль)[^\n]*[:：]\s*$/i;
+
 // 防抖函数
 function debounce(func, wait) {
     let timeout;
@@ -279,6 +283,19 @@ class TerminalManager {
         }
     }
     
+    // 判断终端光标所在行是否为密码提示（sudo / ssh 等）。供「填充密码」按钮按需显隐。
+    isPasswordPromptVisible(term) {
+        if (!term) return false;
+        try {
+            const buf = term.buffer.active;
+            const line = buf.getLine(buf.baseY + buf.cursorY);
+            if (!line) return false;
+            return PASSWORD_PROMPT_RE.test(line.translateToString(true));
+        } catch (_) {
+            return false;
+        }
+    }
+
     // 取得指定 session 的 xterm 实例（用于路由后端 ssh:data 事件）
     getTerminalForSession(sessionId) {
         const e = this.terminals.get(sessionId);
@@ -408,6 +425,12 @@ class TerminalManager {
                     if (bg) applyBg(bg);
                 }
                 alignScreenToBottom(host);
+                // 仅活跃会话：根据光标行是否为密码提示，驱动「填充密码」按钮显隐
+                if (this.activeSessionId === sessionId) {
+                    try {
+                        window.uiManager?.setFillPasswordPromptVisible(this.isPasswordPromptVisible(term));
+                    } catch (_) {}
+                }
             }, 60);
             try {
                 term.onRender(renderTick);

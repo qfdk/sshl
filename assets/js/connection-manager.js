@@ -441,11 +441,8 @@ class ConnectionManager {
             if (result && result.success) {
                 window.currentSessionId = result.sessionId;
 
-                await window.api.config.saveConnection({
-                    ...connection,
-                    sessionId: result.sessionId
-                });
-
+                // 不再 re-save 连接：后端 StoredConnection 不持久化 sessionId，这次回存毫无用处，
+                // 反而会因传入对象缺少 password 字段把 has_password 标志冲成 false（密码仍在 secrets 库）。
                 const terminalInfo = await window.terminalManager.initTerminal(
                     result.sessionId,
                     null,

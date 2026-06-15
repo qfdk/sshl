@@ -54,6 +54,7 @@ pub fn run() {
             ssh::ssh_connect,
             ssh::ssh_disconnect,
             ssh::ssh_send_data,
+            ssh::ssh_fill_password,
             ssh::ssh_resize,
             ssh::ssh_execute,
             ssh::ssh_refresh_prompt,
@@ -115,8 +116,10 @@ async fn prewarm_saved_connections(app: &tauri::AppHandle) {
     };
     let state = app.state::<AppState>();
     for c in conns {
-        let password = if c.has_password { load_secret(&c.id, "password") } else { None };
-        let passphrase = if c.has_passphrase { load_secret(&c.id, "passphrase") } else { None };
+        // 不依赖 has_password / has_passphrase 标志（重连 re-save 曾把它误置为 false）；
+        // secrets 库才是凭据真相来源，无条件按 id 读取。
+        let password = load_secret(&c.id, "password");
+        let passphrase = load_secret(&c.id, "passphrase");
         if password.is_none() && c.private_key.is_none() {
             continue;
         }

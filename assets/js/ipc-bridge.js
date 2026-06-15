@@ -57,6 +57,7 @@
       disconnect: (sessionId) => call('ssh_disconnect', { sessionId }),           // {success}
       execute: (sessionId, command) => call('ssh_execute', { sessionId, command }, 'output'),
       sendData: (sessionId, data) => call('ssh_send_data', { sessionId, data }),
+      fillPassword: (sessionId) => call('ssh_fill_password', { sessionId }),    // {success} 或 {success:false,error}
       resize: (sessionId, cols, rows) => call('ssh_resize', { sessionId, cols, rows }),
       refreshPrompt: (sessionId) => call('ssh_refresh_prompt', { sessionId }),
       activateSession: (sessionId) => call('ssh_activate_session', { sessionId }),
