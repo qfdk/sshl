@@ -8,8 +8,25 @@ const ANSI_BASE_16 = [
     '#000000','#cd3131','#0dbc79','#e5e510','#2472c8','#bc3fbc','#11a8cd','#e5e5e5',
     '#666666','#f14c4c','#23d18b','#f5f543','#3b8eea','#d670d6','#29b8db','#e5e5e5'
 ];
-function paletteToHex(idx) {
-    if (idx < 16) return ANSI_BASE_16[idx];
+// 读取 xterm 运行时真实使用的 0-15 调色板（CanvasAddon 实际渲染用的就是它）。
+// 设 theme.ansi 在本 xterm+CanvasAddon 下不生效（仍用其自带默认，如 magenta=#75507b），
+// 故采样必须按「xterm 真画出来的色」解码，否则 paletteToHex 用 ANSI_BASE_16(#bc3fbc) →
+// padding 与正文色不符露缝。私有 API：5.x 在 _themeService，4.x 在 _colorManager。
+function getAnsiPalette(term) {
+    try {
+        const core = term?._core;
+        const colors = (core?._themeService || core?._colorManager)?.colors;
+        const ansi = colors?.ansi;
+        if (Array.isArray(ansi) && ansi.length >= 16) {
+            return ansi.slice(0, 16).map(c => String(c?.css || c).toLowerCase());
+        }
+    } catch (_) {}
+    return null;
+}
+
+// pal：0-15 的实时调色板（缺省回退 ANSI_BASE_16）。16-255 双方算法一致，无需 pal。
+function paletteToHex(idx, pal) {
+    if (idx < 16) return (pal || ANSI_BASE_16)[idx];
     if (idx >= 232) {
         const v = 8 + (idx - 232) * 10;
         const h = Math.min(255, v).toString(16).padStart(2, '0');
@@ -21,54 +38,60 @@ function paletteToHex(idx) {
     return '#' + lvl(r) + lvl(g) + lvl(b);
 }
 
-// 采样 xterm 当前渲染区，取众数 bg color → "#rrggbb" 或 null
-// 密集采样：viewport 内每 step 个 cell 取一个，找占比最高的显式 bg；
-// 还要求该 bg 占非默认 cell 的 ≥50%（避免被 statusline / 行号列等局部 hl 拐走）
-function sampleDominantBg(term) {
+// 终端原始默认背景色（createXtermInstance / initTerminal 的 theme.background）。
+// 作为采样里 mode=0（默认背景）cell 的「权威基准色」，绝不被自适应采样自身改写——
+// 否则一旦把 theme.background 染成某 TUI 的色（如 whiptail 紫），下一帧默认 cell 又被
+// 当成那个色统计，自我强化锁死、永不回退（dpkg-reconfigure 后整屏变紫即此 bug）。
+const DEFAULT_TERM_BG = '#1e1e2e';
+
+// 单个 cell 的背景 → "#rrggbb"。mode=0（默认背景）返回 base（权威基准色），
+// 其余按 xterm 颜色模式常量解码：CM_P16=1<<24, CM_P256=2<<24, CM_RGB=3<<24。
+function cellBgHex(cell, base, pal) {
+    const mode = cell.getBgColorMode();
+    if (mode === 0) return base;
+    const c = cell.getBgColor();
+    if (mode === (1 << 24) || mode === (2 << 24)) return paletteToHex(c, pal);
+    if (mode === (3 << 24)) {
+        // RGB: 颜色编码 = (R<<16)|(G<<8)|B
+        return '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
+                   + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
+                   + (c & 0xff).toString(16).padStart(2, '0');
+    }
+    return null;
+}
+
+// 采样 xterm 渲染区「四条边缘」cell 的众数 bg → "#rrggbb" 或 null。
+// padding 紧贴屏幕边缘，取边缘 cell 的背景最能消除色缝：
+//   - 全屏 TUI（vim/nvim/htop）边缘即其根背景 → padding 完美贴合，切主题也无缝；
+//   - 居中对话框（whiptail）不触边，四边纯净 → 不被中间对话框/装饰色带偏。
+//     旧「全屏众数法」会被「正文一种紫 + 少量品红装饰 + 灰对话框」这类画面拐到错的主色，
+//     导致 padding（品红）与正文（淡紫）色缝 —— 边缘取色根治之。
+// mode=0（默认背景）cell 用 defaultBg（权威基准）代表，使 TUI 退出后能回退、不锁死。
+function sampleEdgeBg(term, defaultBg) {
     try {
         const buf = term.buffer.active;
         const rows = term.rows, cols = term.cols;
         if (!rows || !cols) return null;
-        // 默认背景 cell（mode=0）用终端 theme.background 代表，一同参与统计。
-        // 否则像 htop 这类「大面积默认背景 + 少量彩色装饰」的程序，会把少数装饰色
-        // 误当成主背景，导致 padding / 右侧缝色与内容（默认背景）不一致，露出边缘竖缝。
-        const themeBg = (term.options?.theme?.background || '#1e1e2e').toLowerCase();
+        const base = (defaultBg || DEFAULT_TERM_BG).toLowerCase();
+        const pal = getAnsiPalette(term);  // xterm 实时调色板，解码 0-15 与渲染一致
         const counts = new Map();
         let total = 0;
-        // 步长：保证总采样 ~200-400 个 cell，性能可控
-        const stepY = Math.max(1, Math.floor(rows / 16));
-        const stepX = Math.max(1, Math.floor(cols / 24));
-        for (let y = 0; y < rows; y += stepY) {
+        const sample = (x, y) => {
             const line = buf.getLine(buf.viewportY + y);
-            if (!line) continue;
-            for (let x = 0; x < cols; x += stepX) {
-                const cell = line.getCell(x);
-                if (!cell) continue;
-                total++;
-                const mode = cell.getBgColorMode();
-                let hex;
-                if (mode === 0) {
-                    hex = themeBg;
-                } else {
-                    const c = cell.getBgColor();
-                    // xterm 颜色模式常量：CM_P16=1<<24, CM_P256=2<<24, CM_RGB=3<<24
-                    if (mode === (1 << 24) || mode === (2 << 24)) {
-                        hex = paletteToHex(c);
-                    } else if (mode === (3 << 24)) {
-                        // RGB: 颜色编码 = (R<<16)|(G<<8)|B
-                        hex = '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
-                                  + ((c >>> 8) & 0xff).toString(16).padStart(2, '0')
-                                  + (c & 0xff).toString(16).padStart(2, '0');
-                    } else continue;
-                }
-                if (!hex) continue;
-                counts.set(hex, (counts.get(hex) || 0) + 1);
-            }
-        }
+            if (!line) return;
+            const cell = line.getCell(x);
+            if (!cell) return;
+            total++;
+            const hex = cellBgHex(cell, base, pal);
+            if (hex) counts.set(hex, (counts.get(hex) || 0) + 1);
+        };
+        // 上/下整行 + 左/右整列（四角各被计两次，权重微偏，可忽略）
+        for (let x = 0; x < cols; x++) { sample(x, 0); sample(x, rows - 1); }
+        for (let y = 0; y < rows; y++) { sample(0, y); sample(cols - 1, y); }
         if (!total || counts.size === 0) return null;
         let best = null, max = 0;
         for (const [k, v] of counts) if (v > max) { best = k; max = v; }
-        // 主色需占总采样的 ≥50%，否则画面无明确主背景（如 split window）→ 不强行染色
+        // 边缘主色需占边缘采样 ≥50%，否则边缘色杂（如分屏不同底色）→ 交回调用方用基准色兜底
         if (!best || max / total < 0.5) return null;
         return best;
     } catch (_) {
@@ -425,16 +448,11 @@ class TerminalManager {
                 if (e) e.bgColor = color;
             };
             const renderTick = debounce(() => {
-                const c = sampleDominantBg(term);
-                if (c) {
-                    applyBg(c);
-                } else {
-                    // 没采到主色（如 htop 大量 default cell）：把 padding / 右侧缝色对齐到
-                    // xterm 当前 theme.background（canvas 实际渲染的 default cell 色），
-                    // 否则 --term-bg 会残留上一个程序的旧值，与内容背景色差，露出边缘竖缝。
-                    const bg = term.options?.theme?.background;
-                    if (bg) applyBg(bg);
-                }
+                // 取屏幕边缘众数色作 padding；mode=0 cell 用权威基准色（默认 DEFAULT_TERM_BG，
+                // 程序经 OSC 11 显式改过则用其值）统计，使染色可回退、不锁死。
+                // 边缘色杂（无 ≥50% 主色）时回退到基准色 —— 永不残留上一个程序的旧值。
+                const baseBg = this.terminals.get(sessionId)?.defaultBg || DEFAULT_TERM_BG;
+                applyBg(sampleEdgeBg(term, baseBg) || baseBg);
                 alignScreenToBottom(host);
                 // 仅活跃会话：根据光标行是否为密码提示，驱动「填充密码」按钮显隐
                 if (this.activeSessionId === sessionId) {
@@ -458,6 +476,10 @@ class TerminalManager {
                     try {
                         term.options.theme = { ...(term.options.theme || {}), background: color };
                     } catch (_) {}
+                    // 程序显式声明的默认背景是权威值 → 同步基准色，使其作为 mode=0 代表，
+                    // 不会被自适应采样回退（vim/nvim 靠 OSC 11 设主题时 padding 不被抢回默认色）。
+                    const e = this.terminals.get(sessionId);
+                    if (e) e.defaultBg = color;
                     applyBg(color);
                     return true;
                 });
@@ -488,6 +510,8 @@ class TerminalManager {
                 fitAddon,
                 host,
                 dataDisposer,
+                // 自适应背景采样的权威基准色：mode=0 cell 用它代表，仅 OSC 11 可改写
+                defaultBg: DEFAULT_TERM_BG,
                 cleanup: term._cleanup || null
             };
             this.terminals.set(sessionId, entry);
