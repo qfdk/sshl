@@ -163,3 +163,35 @@ pub async fn config_delete_connection(
 pub fn load_secret(connection_id: &str, kind: &str) -> Option<String> {
     crypto_store::get(connection_id, kind)
 }
+
+/// 某连接下可填充的凭据清单：连接主密码是否存在 + 已保存的账号标签。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredList {
+    pub has_password: bool,
+    pub accounts: Vec<String>,
+}
+
+#[tauri::command]
+pub fn cred_list(connection_id: String) -> CredList {
+    CredList {
+        has_password: crypto_store::has(&connection_id, "password"),
+        accounts: crypto_store::list_accounts(&connection_id),
+    }
+}
+
+/// 保存（或更新）某连接下一个账号的密码。account 不可为空。
+#[tauri::command]
+pub fn cred_set(connection_id: String, account: String, password: String) -> AppResult<()> {
+    let account = account.trim();
+    if account.is_empty() {
+        return Err(AppError::Config("账号名不能为空".into()));
+    }
+    crypto_store::set(&connection_id, &format!("acct:{account}"), &password)
+}
+
+#[tauri::command]
+pub fn cred_delete(connection_id: String, account: String) -> AppResult<()> {
+    crypto_store::delete(&connection_id, &format!("acct:{}", account.trim()));
+    Ok(())
+}

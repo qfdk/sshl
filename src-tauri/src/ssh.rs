@@ -523,20 +523,23 @@ pub async fn ssh_send_data(
     Ok(())
 }
 
-/// 把该会话所属连接保存的密码（用于 sudo 等密码提示）解密后写入 SSH 通道并自动回车提交。
-/// 前端仅在终端出现密码提示时才显示按钮，不会误填。密码全程留在后端，不经过渲染层。
-/// 无保存密码时返回错误。
+/// 把该会话所属连接保存的密码解密后写入 SSH 通道并自动回车提交（用于 sudo / su 等提示）。
+/// `kind` 选择填哪一份：None/"password" = 连接主密码；"acct:<账号>" = 该连接下保存的账号密码
+/// （同一台服务器常有多个账号）。前端仅在终端出现密码提示时才显示按钮，不会误填。
+/// 密码全程留在后端，不经过渲染层。无对应密码时返回错误。
 #[tauri::command]
 pub async fn ssh_fill_password(
     state: State<'_, AppState>,
     session_id: String,
+    kind: Option<String>,
 ) -> AppResult<()> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let cid = session.connection_id.clone()
         .ok_or_else(|| AppError::Ssh("当前连接未保存，无密码可填充".into()))?;
-    let password = load_secret(&cid, "password")
-        .ok_or_else(|| AppError::Ssh("未找到已保存的密码".into()))?;
+    let kind = kind.unwrap_or_else(|| "password".into());
+    let password = load_secret(&cid, &kind)
+        .ok_or_else(|| AppError::Ssh("未找到对应的已保存密码".into()))?;
     // 填充并自动回车提交（按钮仅在密码提示出现时可见，sudo 提示不回显，安全）。
     let mut bytes = password.into_bytes();
     bytes.push(b'\r');

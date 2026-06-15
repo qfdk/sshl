@@ -57,7 +57,8 @@
       disconnect: (sessionId) => call('ssh_disconnect', { sessionId }),           // {success}
       execute: (sessionId, command) => call('ssh_execute', { sessionId, command }, 'output'),
       sendData: (sessionId, data) => call('ssh_send_data', { sessionId, data }),
-      fillPassword: (sessionId) => call('ssh_fill_password', { sessionId }),    // {success} 或 {success:false,error}
+      // kind: 省略/"password" = 连接主密码；"acct:<账号>" = 该连接保存的账号密码
+      fillPassword: (sessionId, kind) => call('ssh_fill_password', { sessionId, kind }),
       resize: (sessionId, cols, rows) => call('ssh_resize', { sessionId, cols, rows }),
       refreshPrompt: (sessionId) => call('ssh_refresh_prompt', { sessionId }),
       activateSession: (sessionId) => call('ssh_activate_session', { sessionId }),
@@ -112,6 +113,13 @@
           .catch((err) => console.error('[ipc-bridge] listen connections:updated:', err));
         return stop;
       },
+    },
+
+    cred: {
+      // 某连接下可填充的凭据：{ hasPassword, accounts:[label] }
+      list: (connectionId) => call('cred_list', { connectionId }, 'raw'),
+      set: (connectionId, account, password) => call('cred_set', { connectionId, account, password }),
+      delete: (connectionId, account) => call('cred_delete', { connectionId, account }),
     },
 
     dialog: {

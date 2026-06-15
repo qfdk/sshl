@@ -4,8 +4,8 @@
 class UIManager {
     constructor() {
         this.loadingOverlay = null; // 加载遮罩元素
-        // 「填充密码」按钮状态：密码模式连接 + 终端正显示密码提示时才显示
-        this._fillPwd = { passwordMode: false, promptVisible: false, showingFeedback: false };
+        // 「填充密码」按钮状态：有保存连接(available) + 终端正显示密码提示时才显示
+        this._fillPwd = { available: false, promptVisible: false, showingFeedback: false };
     }
     
     // 创建加载遮罩
@@ -121,29 +121,17 @@ class UIManager {
         this.syncFillPasswordState();
     }
 
-    // 重新判定当前连接是否为密码模式，并据当前终端内容刷新按钮。
-    // 在连接/切换会话（updateServerInfo）时调用。密码模式 = 未配置私钥
-    // （hasPassword 标志曾被重连 re-save 误置为 false，不可靠）。
-    async syncFillPasswordState() {
+    // 判定按钮可用性并据当前终端内容刷新一次。在连接/切换会话（updateServerInfo）时调用。
+    // 只要有保存连接即可用 —— su/sudo 在私钥登录的服务器上同样需要密码，账号密码存在该连接名下。
+    syncFillPasswordState() {
         const sessionId = window.currentSessionId;
         const connectionId = sessionId
             ? window.sessionManager?.getSession(sessionId)?.connectionId
             : null;
-        let passwordMode = false;
-        if (connectionId) {
-            try {
-                const connections = await window.api.config.getConnections();
-                const conn = connections.find(c => c.id === connectionId);
-                passwordMode = !!(conn && !conn.privateKey);
-            } catch (e) {
-                console.error('查询连接信息失败:', e);
-            }
-        }
-        this._fillPwd.passwordMode = passwordMode;
+        this._fillPwd.available = !!connectionId;
         // 切换会话后立即按当前终端内容判定一次（避免等到下次渲染才出现）
         const term = window.terminalManager?.activeTerminal;
-        this._fillPwd.promptVisible = passwordMode
-            && !!window.terminalManager?.isPasswordPromptVisible?.(term);
+        this._fillPwd.promptVisible = !!window.terminalManager?.isPasswordPromptVisible?.(term);
         this._applyFillPasswordBtn();
     }
 
@@ -154,13 +142,164 @@ class UIManager {
         this._applyFillPasswordBtn();
     }
 
-    // 应用按钮显隐：密码模式 + 密码提示可见时显示；反馈期间强制可见
+    // 应用按钮组显隐：可用 + 密码提示可见时显示；反馈期间强制可见。隐藏时一并收起菜单。
     _applyFillPasswordBtn() {
-        const btn = document.getElementById('fill-password-btn');
-        if (!btn) return;
+        const group = document.getElementById('fill-password-group');
+        if (!group) return;
         const visible = this._fillPwd.showingFeedback
-            || (this._fillPwd.passwordMode && this._fillPwd.promptVisible);
-        btn.hidden = !visible;
+            || (this._fillPwd.available && this._fillPwd.promptVisible);
+        group.hidden = !visible;
+        if (!visible) {
+            const menu = document.getElementById('fill-password-menu');
+            if (menu) menu.hidden = true;
+        }
+    }
+
+    // 填充指定密码（kind: 省略/'password' = 连接主密码；'acct:<账号>' = 账号密码），自动回车
+    async doFillPassword(kind) {
+        const sessionId = window.currentSessionId;
+        if (!sessionId) return;
+        try {
+            const r = await window.api.ssh.fillPassword(sessionId, kind);
+            if (r && r.success) {
+                this.flashFillPasswordDone();
+                const term = window.terminalManager?.activeTerminal;
+                if (term) { try { term.focus(); } catch (_) {} }
+            } else {
+                alert(`填充密码失败: ${r ? r.error : '未知错误'}`);
+            }
+        } catch (e) {
+            console.error('填充密码失败:', e);
+            alert(`填充密码失败: ${e.message || e}`);
+        }
+    }
+
+    // 主键点击：只有一个候选直接填（sudo 常见），多个候选则打开菜单让用户选
+    async fillPasswordPrimary() {
+        const connectionId = window.sessionManager?.getSession(window.currentSessionId)?.connectionId;
+        if (!connectionId) return;
+        let info = null;
+        try { info = await window.api.cred.list(connectionId); } catch (_) {}
+        const accounts = (info && info.accounts) || [];
+        const hasPwd = !!(info && info.hasPassword);
+        if ((hasPwd ? 1 : 0) + accounts.length <= 1) {
+            if (hasPwd) return this.doFillPassword('password');
+            if (accounts.length === 1) return this.doFillPassword('acct:' + accounts[0]);
+            return this.openFillPasswordMenu(); // 无任何已存密码 → 打开菜单（含新增表单）
+        }
+        return this.openFillPasswordMenu();
+    }
+
+    // 反馈「填充发送完毕」1.5s（提示行此时已消失，反馈期间强制按钮可见）
+    flashFillPasswordDone() {
+        const btn = document.getElementById('fill-password-btn');
+        const label = btn && btn.querySelector('.fill-password-label');
+        if (btn) btn.classList.add('filled');
+        if (label) label.textContent = '填充发送完毕';
+        this._fillPwd.showingFeedback = true;
+        this._applyFillPasswordBtn();
+        clearTimeout(this._fillPwd._t);
+        this._fillPwd._t = setTimeout(() => {
+            if (btn) btn.classList.remove('filled');
+            if (label) label.textContent = '填充密码';
+            this._fillPwd.showingFeedback = false;
+            this._applyFillPasswordBtn();
+        }, 1500);
+    }
+
+    async openFillPasswordMenu() {
+        const menu = document.getElementById('fill-password-menu');
+        const connectionId = window.sessionManager?.getSession(window.currentSessionId)?.connectionId;
+        if (!menu || !connectionId) return;
+        await this.buildFillPasswordMenu(menu, connectionId);
+        menu.hidden = false;
+    }
+
+    // 构建下拉：当前连接密码 + 各账号（可删）+ 新增账号密码表单
+    async buildFillPasswordMenu(menu, connectionId) {
+        menu.innerHTML = '';
+        let info = null;
+        try { info = await window.api.cred.list(connectionId); } catch (e) { console.error('获取凭据失败:', e); }
+        const accounts = (info && info.accounts) || [];
+        const hasPwd = !!(info && info.hasPassword);
+
+        const addRow = (name, tag, onClick, onDelete) => {
+            const item = document.createElement('div');
+            item.className = 'fill-password-menu-item';
+            const left = document.createElement('span');
+            left.className = 'pw-name';
+            left.textContent = name;
+            item.appendChild(left);
+            if (tag) {
+                const t = document.createElement('span');
+                t.className = 'pw-tag';
+                t.textContent = tag;
+                item.appendChild(t);
+            }
+            if (onDelete) {
+                const del = document.createElement('button');
+                del.className = 'pw-del';
+                del.type = 'button';
+                del.textContent = '×';
+                del.title = '删除';
+                del.addEventListener('click', (e) => { e.stopPropagation(); onDelete(); });
+                item.appendChild(del);
+            }
+            item.addEventListener('click', onClick);
+            menu.appendChild(item);
+        };
+
+        if (hasPwd) {
+            addRow('当前连接密码', '主', () => { menu.hidden = true; this.doFillPassword('password'); });
+        }
+        accounts.forEach((acct) => {
+            addRow(acct, '', () => { menu.hidden = true; this.doFillPassword('acct:' + acct); }, async () => {
+                try {
+                    await window.api.cred.delete(connectionId, acct);
+                    await this.buildFillPasswordMenu(menu, connectionId);
+                } catch (e) { alert(`删除失败: ${e.message || e}`); }
+            });
+        });
+
+        if (!hasPwd && accounts.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'fill-password-menu-empty';
+            empty.textContent = '暂无保存的密码，下面新增';
+            menu.appendChild(empty);
+        }
+
+        const sep = document.createElement('div');
+        sep.className = 'fill-password-menu-sep';
+        menu.appendChild(sep);
+
+        const form = document.createElement('div');
+        form.className = 'fill-password-add';
+        form.addEventListener('click', (e) => e.stopPropagation());
+        const acctInput = document.createElement('input');
+        acctInput.className = 'pw-acct';
+        acctInput.type = 'text';
+        acctInput.placeholder = '账号';
+        const pwInput = document.createElement('input');
+        pwInput.type = 'password';
+        pwInput.placeholder = '密码';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.textContent = '+';
+        save.title = '保存账号密码';
+        const doSave = async () => {
+            const account = acctInput.value.trim();
+            if (!account) { acctInput.focus(); return; }
+            try {
+                await window.api.cred.set(connectionId, account, pwInput.value);
+                await this.buildFillPasswordMenu(menu, connectionId);
+            } catch (e) { alert(`保存失败: ${e.message || e}`); }
+        };
+        save.addEventListener('click', (e) => { e.stopPropagation(); doSave(); });
+        pwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doSave(); } });
+        form.appendChild(acctInput);
+        form.appendChild(pwInput);
+        form.appendChild(save);
+        menu.appendChild(form);
     }
 
     // 处理连接项鼠标悬停
@@ -503,44 +642,25 @@ class UIManager {
             });
         }
 
-        // 填充密码按钮（仅密码模式连接显示）：把已保存密码写入终端，自动回车，常用于 sudo 提示
-        const fillPasswordBtn = document.getElementById('fill-password-btn');
-        if (fillPasswordBtn) {
-            const iconSlot = fillPasswordBtn.querySelector('.fill-password-icon');
-            if (iconSlot && window.Icons) {
-                iconSlot.innerHTML = window.Icons.svg('key-round', 15, 2);
-            }
-            fillPasswordBtn.addEventListener('click', async () => {
-                const sessionId = window.currentSessionId;
-                if (!sessionId) return;
-                fillPasswordBtn.disabled = true;
-                try {
-                    const result = await window.api.ssh.fillPassword(sessionId);
-                    if (result && result.success) {
-                        // 已自动回车提交，密码提示随即消失 → 反馈期间强制按钮可见再短暂展示
-                        const label = fillPasswordBtn.querySelector('.fill-password-label');
-                        fillPasswordBtn.classList.add('filled');
-                        if (label) label.textContent = '填充发送完毕';
-                        window.uiManager._fillPwd.showingFeedback = true;
-                        window.uiManager._applyFillPasswordBtn();
-                        setTimeout(() => {
-                            fillPasswordBtn.classList.remove('filled');
-                            if (label) label.textContent = '填充密码';
-                            window.uiManager._fillPwd.showingFeedback = false;
-                            window.uiManager._applyFillPasswordBtn();
-                        }, 1500);
-                        // 填充后把焦点交还终端，方便继续操作
-                        const term = window.terminalManager?.activeTerminal;
-                        if (term) { try { term.focus(); } catch (_) {} }
-                    } else {
-                        alert(`填充密码失败: ${result ? result.error : '未知错误'}`);
-                    }
-                } catch (e) {
-                    console.error('填充密码失败:', e);
-                    alert(`填充密码失败: ${e.message || e}`);
-                } finally {
-                    fillPasswordBtn.disabled = false;
-                }
+        // 填充密码：分体按钮（主键智能填充 + 下拉选择账号/管理），自动回车，常用于 sudo / su
+        const fillPwGroup = document.getElementById('fill-password-group');
+        const fillPwBtn = document.getElementById('fill-password-btn');
+        const fillPwCaret = document.getElementById('fill-password-menu-btn');
+        const fillPwMenu = document.getElementById('fill-password-menu');
+        if (fillPwBtn) {
+            const iconSlot = fillPwBtn.querySelector('.fill-password-icon');
+            if (iconSlot && window.Icons) iconSlot.innerHTML = window.Icons.svg('key-round', 15, 2);
+            fillPwBtn.addEventListener('click', () => window.uiManager.fillPasswordPrimary());
+        }
+        if (fillPwCaret && fillPwMenu) {
+            fillPwCaret.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!fillPwMenu.hidden) { fillPwMenu.hidden = true; return; }
+                await window.uiManager.openFillPasswordMenu();
+            });
+            // 点击按钮组以外区域关闭菜单
+            document.addEventListener('click', (e) => {
+                if (fillPwGroup && !fillPwGroup.contains(e.target)) fillPwMenu.hidden = true;
             });
         }
 

@@ -78,8 +78,11 @@ pub fn run() {
             // config
             config_store::config_get_connections,
             config_store::config_save_connection,
-            system_fonts::list_system_fonts,
             config_store::config_delete_connection,
+            config_store::cred_list,
+            config_store::cred_set,
+            config_store::cred_delete,
+            system_fonts::list_system_fonts,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

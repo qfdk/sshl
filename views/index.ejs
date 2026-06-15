@@ -33,10 +33,14 @@
                 <div class="tab" data-tab="file-manager">文件管理</div>
             </div>
             <div class="tabs-right">
-                <button id="fill-password-btn" class="fill-password-btn" type="button" title="填充密码（用于 sudo 等密码提示）" hidden>
-                    <span class="fill-password-icon"></span>
-                    <span class="fill-password-label">填充密码</span>
-                </button>
+                <div class="fill-password-group" id="fill-password-group" hidden>
+                    <button id="fill-password-btn" class="fill-password-btn" type="button" title="填充密码（用于 sudo / su 等密码提示）">
+                        <span class="fill-password-icon"></span>
+                        <span class="fill-password-label">填充密码</span>
+                    </button>
+                    <button id="fill-password-menu-btn" class="fill-password-caret" type="button" title="选择账号密码 / 管理" aria-label="选择账号密码">▾</button>
+                    <div id="fill-password-menu" class="fill-password-menu" hidden></div>
+                </div>
                 <div class="server-info" id="main-server-info">
                     <span class="server-indicator"></span>
                     <span class="server-name">未连接</span>

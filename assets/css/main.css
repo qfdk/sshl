@@ -946,14 +946,24 @@ input[type="checkbox"] {
   padding-right: 4px;
 }
 
-/* 顶栏右侧「填充密码」按钮 —— 仅密码模式连接时显示 */
+/* 顶栏右侧「填充密码」分体按钮 —— 仅终端出现密码提示时显示 */
+.fill-password-group {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.fill-password-group[hidden] {
+  display: none;
+}
+
 .fill-password-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 5px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
+  border-radius: 6px 0 0 6px;
   background-color: #f5f7fa;
   color: var(--secondary-color);
   font-size: 13px;
@@ -962,11 +972,24 @@ input[type="checkbox"] {
   transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
 
-.fill-password-btn[hidden] {
-  display: none;
+.fill-password-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  background-color: #f5f7fa;
+  color: var(--secondary-color);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
 }
 
-.fill-password-btn:hover {
+.fill-password-btn:hover,
+.fill-password-caret:hover {
   background-color: var(--primary-color, #4a7dff);
   border-color: var(--primary-color, #4a7dff);
   color: #ffffff;
@@ -991,6 +1014,117 @@ input[type="checkbox"] {
 .fill-password-icon svg {
   width: 15px;
   height: 15px;
+}
+
+/* 下拉菜单：当前连接密码 + 各账号 + 新增表单 */
+.fill-password-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 200px;
+  padding: 4px;
+  background-color: #ffffff;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  z-index: 1200;
+}
+
+.fill-password-menu[hidden] {
+  display: none;
+}
+
+.fill-password-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+}
+
+.fill-password-menu-item:hover {
+  background-color: #eef2fb;
+}
+
+.fill-password-menu-item .pw-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fill-password-menu-item .pw-tag {
+  color: var(--secondary-color);
+  font-size: 11px;
+}
+
+.fill-password-menu-item .pw-del {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: #b3b9c5;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.fill-password-menu-item .pw-del:hover {
+  color: #fff;
+  background-color: var(--danger-color, #e5484d);
+}
+
+.fill-password-menu-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--secondary-color);
+}
+
+.fill-password-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background-color: var(--border-color);
+}
+
+.fill-password-add {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 6px;
+}
+
+.fill-password-add input {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 5px 7px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.fill-password-add input.pw-acct {
+  flex: 0 0 64px;
+}
+
+.fill-password-add button {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 5px;
+  background-color: var(--primary-color, #4a7dff);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fill-password-add button:hover {
+  filter: brightness(1.05);
 }
 
 .server-info {

@@ -105,6 +105,24 @@ pub fn get(id: &str, kind: &str) -> Option<String> {
     String::from_utf8(pt).ok()
 }
 
+/// 是否存在某条凭据（不解密，仅查 key），用于列出"有密码的连接"。
+pub fn has(id: &str, kind: &str) -> bool {
+    let _g = LOCK.lock().unwrap();
+    load_map().contains_key(&format!("{id}:{kind}"))
+}
+
+/// 列出某连接下保存的所有账号标签（key 形如 "{id}:acct:{label}"）。仅查 key，不解密。
+pub fn list_accounts(id: &str) -> Vec<String> {
+    let _g = LOCK.lock().unwrap();
+    let prefix = format!("{id}:acct:");
+    let mut v: Vec<String> = load_map()
+        .keys()
+        .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    v.sort();
+    v
+}
+
 pub fn delete(id: &str, kind: &str) {
     let _g = LOCK.lock().unwrap();
     let mut map = load_map();
