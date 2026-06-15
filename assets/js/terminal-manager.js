@@ -177,9 +177,20 @@ function alignScreenToBottom(host) {
 }
 
 // 窗口缩放时去抖 fit；存 cleanup 以便 dispose 时移除监听器，避免多 session 叠加泄漏。
-function attachResizeHandler(term, fitAddon) {
+function attachResizeHandler(term, fitAddon, sessionId) {
     const resizeHandler = debounce(() => {
-        if (fitAddon && term) fitAddon.fit();
+        if (!fitAddon || !term) return;
+        fitAddon.fit();
+        // 关键：fit 重排 xterm 网格后，必须把新列/行数同步给后端 PTY（window_change），
+        // 否则 vim 等全屏程序仍按旧 TIOCGWINSZ 尺寸重绘，滚动时 erase-line 清除范围
+        // 与实际列数错位 → 旧帧残留、内容堆左侧（截图里的 gutter 重影/截断）。
+        // 隐藏的后台终端容器无尺寸，proposeDimensions 返回空 → 自动跳过，不误改其 PTY。
+        try {
+            const d = fitAddon.proposeDimensions();
+            if (d && d.cols && d.rows && sessionId && window.api?.ssh) {
+                window.api.ssh.resize(sessionId, d.cols, d.rows).catch(() => {});
+            }
+        } catch (_) {}
     }, 50);
     window.addEventListener('resize', resizeHandler);
     term._resizeHandler = resizeHandler;
@@ -222,7 +233,7 @@ class TerminalManager {
     }
     
     // 创建终端实例。container 可传 DOM 元素或元素 id。
-    async createXterm(container, options = {}) {
+    async createXterm(container, options = {}, sessionId = null) {
         if (typeof container === 'string') {
             container = document.getElementById(container);
         }
@@ -240,7 +251,7 @@ class TerminalManager {
                 // 置 0 后列数按容器全宽计算，canvas 铺满，消除右侧 8px 缝与 1px 亮线。
                 try { if (term._core?.viewport) term._core.viewport.scrollBarWidth = 0; } catch (_) {}
                 fitAddon.fit();
-                attachResizeHandler(term, fitAddon);
+                attachResizeHandler(term, fitAddon, sessionId);
                 // 强制延迟以确保适当的大小
                 setTimeout(() => fitAddon.fit(), 100);
                 resolve({ term, fitAddon });
@@ -390,7 +401,7 @@ class TerminalManager {
                 blinkInterval: 500
             };
 
-            const { term, fitAddon } = await this.createXterm(host, termOptions);
+            const { term, fitAddon } = await this.createXterm(host, termOptions, sessionId);
 
             // 自适应 padding 颜色：每次渲染采样实际 cell bg → 同步到 host/container
             // 让 padding 区域永远跟当前程序的背景色一致（vim/nvim 切主题也无缝）
