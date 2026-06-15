@@ -193,17 +193,13 @@ class ConnectionManager {
                             name: connection.name
                         });
 
-                        // 同步：fetch buffer → write → activate，保证 active:false 协议下数据不丢
+                        // 原子激活：activate 返回激活瞬间的缓冲快照并开始 emit，避免
+                        // fetch→activate 间隙丢掉慢 MOTD 后到达的首个 PS1 提示符
                         try {
-                            const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
-                            if (bufferResult?.success && bufferResult.buffer && terminalInfo?.term) {
-                                terminalInfo.term.write(bufferResult.buffer);
+                            const activateResult = await window.api.ssh.activateSession(result.sessionId);
+                            if (activateResult?.success && activateResult.buffer && terminalInfo?.term) {
+                                terminalInfo.term.write(activateResult.buffer);
                             }
-                        } catch (err) {
-                            console.warn(`[switchToSession reconnect] buffer 加载失败:`, err);
-                        }
-                        try {
-                            await window.api.ssh.activateSession(result.sessionId);
                         } catch (err) {
                             console.warn(`[switchToSession reconnect] activate 失败:`, err);
                         }
@@ -457,17 +453,13 @@ class ConnectionManager {
                     });
                 }
 
+                // 原子激活：activate 返回激活瞬间的缓冲快照并开始 emit，避免
+                // fetch→activate 间隙丢掉慢 MOTD 后到达的首个 PS1 提示符
                 try {
-                    const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
-                    if (bufferResult && bufferResult.success && bufferResult.buffer && terminalInfo?.term) {
-                        terminalInfo.term.write(bufferResult.buffer);
+                    const activateResult = await window.api.ssh.activateSession(result.sessionId);
+                    if (activateResult?.success && activateResult.buffer && terminalInfo?.term) {
+                        terminalInfo.term.write(activateResult.buffer);
                     }
-                } catch (err) {
-                    console.warn(`[连接] 加载缓冲区数据失败:`, err);
-                }
-
-                try {
-                    await window.api.ssh.activateSession(result.sessionId);
                 } catch (err) {
                     console.warn(`[连接] 激活会话失败:`, err);
                 }
@@ -615,17 +607,13 @@ class ConnectionManager {
                     });
                 }
                 
-                // 同步：fetch buffer → write → activate，与 connectToSaved 保持一致
+                // 原子激活：activate 返回激活瞬间的缓冲快照并开始 emit，避免
+                // fetch→activate 间隙丢掉慢 MOTD 后到达的首个 PS1 提示符
                 try {
-                    const bufferResult = await window.api.ssh.getSessionBuffer(result.sessionId);
-                    if (bufferResult?.success && bufferResult.buffer && terminalInfo?.term) {
-                        terminalInfo.term.write(bufferResult.buffer);
+                    const activateResult = await window.api.ssh.activateSession(result.sessionId);
+                    if (activateResult?.success && activateResult.buffer && terminalInfo?.term) {
+                        terminalInfo.term.write(activateResult.buffer);
                     }
-                } catch (err) {
-                    console.warn(`[表单连接] 加载缓冲区数据失败:`, err);
-                }
-                try {
-                    await window.api.ssh.activateSession(result.sessionId);
                 } catch (err) {
                     console.warn(`[表单连接] 激活会话失败:`, err);
                 }

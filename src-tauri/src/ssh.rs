@@ -99,7 +99,15 @@ pub struct SshSession {
 }
 
 impl SshSession {
-    pub async fn append_to_buffer(&self, chunk: &str) {
+    /// Append a chunk to the buffer. Returns whether the session was already
+    /// activated at the instant the chunk landed — i.e. whether the caller
+    /// should also emit it to the renderer. The `activated` flag is read while
+    /// holding the buffer lock so it is atomic w.r.t. `ssh_activate_session`'s
+    /// snapshot: a chunk is delivered exactly once — either via the activation
+    /// snapshot or via `ssh:data`, never both, never neither. This closes the
+    /// first-prompt gap where a late PS1 (slow MOTD) landed between the
+    /// renderer's buffer fetch and activation and was lost.
+    pub async fn append_to_buffer(&self, chunk: &str) -> bool {
         let mut buf = self.buffer.lock().await;
         let was_empty = buf.is_empty();
         buf.push_str(chunk);
@@ -111,10 +119,12 @@ impl SshSession {
             }
             buf.drain(..overflow);
         }
+        let activated = self.activated.load(Ordering::Relaxed);
         drop(buf);
         if was_empty {
             self.first_data.notify_waiters();
         }
+        activated
     }
 }
 
@@ -429,8 +439,8 @@ async fn run_channel(
                     Some(russh::ChannelMsg::Data { data }) => {
                         let s = decode_stream_chunk(&mut utf8_out, &data);
                         if !s.is_empty() {
-                            session.append_to_buffer(&s).await;
-                            if session.activated.load(Ordering::Relaxed) {
+                            let emit = session.append_to_buffer(&s).await;
+                            if emit {
                                 pending.push_str(&s);
                                 if pending.len() >= COALESCE_MAX {
                                     emit_data(&app, &session_id, &pending);
@@ -445,8 +455,8 @@ async fn run_channel(
                     Some(russh::ChannelMsg::ExtendedData { data, ext: _ }) => {
                         let s = decode_stream_chunk(&mut utf8_err, &data);
                         if !s.is_empty() {
-                            session.append_to_buffer(&s).await;
-                            if session.activated.load(Ordering::Relaxed) {
+                            let emit = session.append_to_buffer(&s).await;
+                            if emit {
                                 pending.push_str(&s);
                                 if pending.len() >= COALESCE_MAX {
                                     emit_data(&app, &session_id, &pending);
@@ -605,11 +615,20 @@ pub async fn ssh_refresh_prompt(
 pub async fn ssh_activate_session(
     state: State<'_, AppState>,
     session_id: String,
-) -> AppResult<()> {
+) -> AppResult<String> {
     if let Some(session) = state.get(&session_id).await {
+        // Atomic with append_to_buffer's activated-read: take the buffer lock,
+        // flip activated, then snapshot. Anything appended before this point is
+        // in the returned snapshot (and was NOT emitted); anything after is
+        // emitted via ssh:data. No gap, no duplicate. The renderer writes the
+        // returned snapshot instead of a separate ssh_get_session_buffer fetch.
+        let buf = session.buffer.lock().await;
         session.activated.store(true, Ordering::Relaxed);
+        let snapshot = buf.clone();
+        drop(buf);
+        return Ok(snapshot);
     }
-    Ok(())
+    Ok(String::new())
 }
 
 #[tauri::command]
