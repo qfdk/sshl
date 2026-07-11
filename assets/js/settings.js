@@ -240,6 +240,17 @@ export function initSettingsUI() {
     }
     renderOptions();
 
+    /** 分片跑 canvas 验证：系统字体常有几百个名字，一次性验证会阻塞主线程几百 ms，
+     *  首次打开设置后点"取消"的卡顿就来自这里。每批之间让出事件循环，点击先响应。 */
+    async function detectInstalledFontsChunked(candidates, chunkSize = 24) {
+        const out = [];
+        for (let i = 0; i < candidates.length; i += chunkSize) {
+            out.push(...detectInstalledFonts(candidates.slice(i, i + chunkSize)));
+            await new Promise(r => setTimeout(r, 0));
+        }
+        return out;
+    }
+
     /** 调用 Rust 端枚举系统字体目录，再用 canvas 验证可渲染性后填充（Rust 文件名启发式可能含无效名）。 */
     async function refreshFontListFromSystem() {
         try {
@@ -248,7 +259,7 @@ export function initSettingsUI() {
             // canvas 验证：只保留真正能被 canvas/浏览器渲染的 family 名。
             // Rust 文件名启发式会吐出系统不存在的拆分名（如 "Jet Brains Mono Nerd Font Mono"），
             // 直接信任会让用户选中后 fallback、图标显示为 □。canvas 渲染不出的名字一律剔除。
-            const families = detectInstalledFonts(raw.filter(n => typeof n === 'string' && n.trim()));
+            const families = await detectInstalledFontsChunked(raw.filter(n => typeof n === 'string' && n.trim()));
             const nerd = families.filter(n => /nerd/i.test(n));
             // 内置字体永远在前；系统 Nerd Font 用内置 Mono 作兜底（系统名渲染不出时仍有图标）。
             const nerdFallback = '"JetBrainsMono Nerd Font Mono", monospace';
@@ -333,7 +344,13 @@ export function initSettingsUI() {
     }
 
     function revertAndClose() {
-        if (snapshot) setTerminalSettings(snapshot, { persist: false });
+        // 没改过任何设置就直接关，跳过 revert 触发的全终端清缓存 + fit + refresh 重排
+        if (snapshot) {
+            const cur = getTerminalSettings();
+            if (cur.fontSize !== snapshot.fontSize || cur.fontFamily !== snapshot.fontFamily) {
+                setTerminalSettings(snapshot, { persist: false });
+            }
+        }
         closeDialog();
     }
 
