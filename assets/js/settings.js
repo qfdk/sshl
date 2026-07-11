@@ -242,7 +242,7 @@ export function initSettingsUI() {
 
     /** 分片跑 canvas 验证：系统字体常有几百个名字，一次性验证会阻塞主线程几百 ms，
      *  首次打开设置后点"取消"的卡顿就来自这里。每批之间让出事件循环，点击先响应。 */
-    async function detectInstalledFontsChunked(candidates, chunkSize = 24) {
+    async function detectInstalledFontsChunked(candidates, chunkSize = 12) {
         const out = [];
         for (let i = 0; i < candidates.length; i += chunkSize) {
             out.push(...detectInstalledFonts(candidates.slice(i, i + chunkSize)));
@@ -395,4 +395,12 @@ export function initSettingsUI() {
         snapshot = null;
         dialog.classList.remove('active');
     });
+
+    // 启动空闲期预热字体列表：首次打开设置时列表已就绪，
+    // 点击路径上不再有 Rust 枚举 + canvas 验证的任何工作。
+    if ('requestIdleCallback' in window) {
+        requestIdleCallback(() => ensureFontList(), { timeout: 5000 });
+    } else {
+        setTimeout(ensureFontList, 3000);
+    }
 }
