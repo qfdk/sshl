@@ -1,6 +1,6 @@
 [package]
 name = "sshl"
-version = "0.2.5"
+version = "0.2.6"
 description = "SSHL - SSH client built with Tauri"
 authors = ["qfdk"]
 edition = "2021"
