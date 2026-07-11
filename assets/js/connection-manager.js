@@ -193,13 +193,10 @@ class ConnectionManager {
                             name: connection.name
                         });
 
-                        // 原子激活：activate 返回激活瞬间的缓冲快照并开始 emit，避免
-                        // fetch→activate 间隙丢掉慢 MOTD 后到达的首个 PS1 提示符
+                        // 原子激活：缓冲快照由后端作为首个 ssh:data 事件发出，
+                        // 与后续数据同通道保序（invoke 返回快照会与事件乱序）
                         try {
-                            const activateResult = await window.api.ssh.activateSession(result.sessionId);
-                            if (activateResult?.success && activateResult.buffer && terminalInfo?.term) {
-                                terminalInfo.term.write(activateResult.buffer);
-                            }
+                            await window.api.ssh.activateSession(result.sessionId);
                         } catch (err) {
                             console.warn(`[switchToSession reconnect] activate 失败:`, err);
                         }
@@ -272,12 +269,7 @@ class ConnectionManager {
                 }
             }
             try {
-                const activateResult = await window.api.ssh.activateSession(sessionInfo.sessionId);
-                if (activateResult?.sessionId && activateResult.sessionId !== sessionInfo.sessionId) {
-                    window.currentSessionId = activateResult.sessionId;
-                    window.sessionManager.updateSessionId(sessionInfo.sessionId, activateResult.sessionId);
-                    sessionInfo.sessionId = activateResult.sessionId;
-                }
+                await window.api.ssh.activateSession(sessionInfo.sessionId);
             } catch (err) {
                 console.warn(`[switchToSession] 在后端激活会话失败:`, err);
             }
@@ -453,13 +445,10 @@ class ConnectionManager {
                     });
                 }
 
-                // 原子激活：activate 返回激活瞬间的缓冲快照并开始 emit，避免
-                // fetch→activate 间隙丢掉慢 MOTD 后到达的首个 PS1 提示符
+                // 原子激活：缓冲快照由后端作为首个 ssh:data 事件发出，
+                // 与后续数据同通道保序（invoke 返回快照会与事件乱序）
                 try {
-                    const activateResult = await window.api.ssh.activateSession(result.sessionId);
-                    if (activateResult?.success && activateResult.buffer && terminalInfo?.term) {
-                        terminalInfo.term.write(activateResult.buffer);
-                    }
+                    await window.api.ssh.activateSession(result.sessionId);
                 } catch (err) {
                     console.warn(`[连接] 激活会话失败:`, err);
                 }
@@ -607,13 +596,10 @@ class ConnectionManager {
                     });
                 }
                 
-                // 原子激活：activate 返回激活瞬间的缓冲快照并开始 emit，避免
-                // fetch→activate 间隙丢掉慢 MOTD 后到达的首个 PS1 提示符
+                // 原子激活：缓冲快照由后端作为首个 ssh:data 事件发出，
+                // 与后续数据同通道保序（invoke 返回快照会与事件乱序）
                 try {
-                    const activateResult = await window.api.ssh.activateSession(result.sessionId);
-                    if (activateResult?.success && activateResult.buffer && terminalInfo?.term) {
-                        terminalInfo.term.write(activateResult.buffer);
-                    }
+                    await window.api.ssh.activateSession(result.sessionId);
                 } catch (err) {
                     console.warn(`[表单连接] 激活会话失败:`, err);
                 }

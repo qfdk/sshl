@@ -88,8 +88,9 @@ pub struct SshSession {
     /// Lazily loaded gid→groupname map (from /etc/group).
     pub group_cache: Mutex<Option<Arc<HashMap<u32, String>>>>,
     /// Renderer must explicitly activate the session to start receiving ssh:data events.
-    /// Until then, output is silently buffered; the renderer fetches the prelude via
-    /// ssh_get_session_buffer to avoid the welcome-banner duplicate-render bug.
+    /// Until then, output is silently buffered; ssh_activate_session emits the buffered
+    /// prelude as the first ssh:data event so snapshot and live data stay in one
+    /// ordered channel (avoids banner double-render and prompt/banner reordering).
     pub activated: AtomicBool,
     /// Notified the first time shell data lands in `buffer`. `ssh_connect` awaits this
     /// (with a 400ms cap) so the welcome/PS1 is visible the instant the loader closes —
@@ -613,22 +614,28 @@ pub async fn ssh_refresh_prompt(
 
 #[tauri::command]
 pub async fn ssh_activate_session(
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
-) -> AppResult<String> {
+) -> AppResult<()> {
     if let Some(session) = state.get(&session_id).await {
         // Atomic with append_to_buffer's activated-read: take the buffer lock,
-        // flip activated, then snapshot. Anything appended before this point is
-        // in the returned snapshot (and was NOT emitted); anything after is
-        // emitted via ssh:data. No gap, no duplicate. The renderer writes the
-        // returned snapshot instead of a separate ssh_get_session_buffer fetch.
+        // flip activated, then emit the snapshot as the FIRST ssh:data event —
+        // still holding the lock, so no later chunk can be appended (hence
+        // emitted) before it. Snapshot and live data now share one ordered
+        // event channel. Returning the snapshot via the invoke response raced
+        // it against ssh:data events (separate IPC paths, no ordering
+        // guarantee): with a slow MOTD the first PS1 could render before the
+        // banner. swap() keeps re-activation (session switch) from re-emitting
+        // the whole buffer.
         let buf = session.buffer.lock().await;
-        session.activated.store(true, Ordering::Relaxed);
-        let snapshot = buf.clone();
+        let was_activated = session.activated.swap(true, Ordering::Relaxed);
+        if !was_activated && !buf.is_empty() {
+            emit_data(&app, &session_id, &buf);
+        }
         drop(buf);
-        return Ok(snapshot);
     }
-    Ok(String::new())
+    Ok(())
 }
 
 #[tauri::command]

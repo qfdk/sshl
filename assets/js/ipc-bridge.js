@@ -61,8 +61,8 @@
       fillPassword: (sessionId, kind) => call('ssh_fill_password', { sessionId, kind }),
       resize: (sessionId, cols, rows) => call('ssh_resize', { sessionId, cols, rows }),
       refreshPrompt: (sessionId) => call('ssh_refresh_prompt', { sessionId }),
-      // 返回激活瞬间的缓冲快照（原子：置 activated + 快照），渲染端写入它即可，无需再单独 getSessionBuffer
-      activateSession: (sessionId) => call('ssh_activate_session', { sessionId }, 'buffer'),
+      // 激活后快照由后端作为首个 ssh:data 事件发出（与后续数据同通道保序），本调用无返回内容
+      activateSession: (sessionId) => call('ssh_activate_session', { sessionId }),
       getSessionBuffer: (sessionId) => call('ssh_get_session_buffer', { sessionId }, 'buffer'),
       onData: onEvent('ssh:data'),
       onClosed: (callback) => onEvent('ssh:closed')((evt, payload) => {
