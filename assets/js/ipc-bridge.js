@@ -53,7 +53,9 @@
 
   window.api = {
     ssh: {
-      connect: (details) => call('ssh_connect', { details }),                     // {success, sessionId}
+      connect: (details, attemptId) => call('ssh_connect', { details, attemptId }), // {success, sessionId}
+      cancelConnect: (attemptId) => call('ssh_cancel_connect', { attemptId }),
+      validateSession: (sessionId) => call('ssh_validate_session', { sessionId }, 'alive'),
       disconnect: (sessionId) => call('ssh_disconnect', { sessionId }),           // {success}
       execute: (sessionId, command) => call('ssh_execute', { sessionId, command }, 'output'),
       sendData: (sessionId, data) => call('ssh_send_data', { sessionId, data }),

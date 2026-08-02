@@ -916,6 +916,32 @@ input[type="checkbox"] {
   font-size: 14px;
 }
 
+.loading-cancel-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  margin-top: 14px;
+  padding: 5px 12px;
+  color: white;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+
+.loading-cancel-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.loading-cancel-button:focus-visible {
+  outline: 2px solid white;
+  outline-offset: 2px;
+}
+
 /* 文件列表样式改进 */
 .file-list tr.directory {
   cursor: pointer;

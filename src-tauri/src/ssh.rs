@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::future::{AbortHandle, Abortable};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::net::TcpStream;
@@ -136,9 +137,75 @@ fn warm_key(host: &str, port: u16, username: &str) -> String {
 fn russh_config() -> Arc<russh::client::Config> {
     Arc::new(russh::client::Config {
         inactivity_timeout: Some(Duration::from_secs(600)),
-        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_interval: Some(Duration::from_secs(10)),
+        keepalive_max: 1,
         ..Default::default()
     })
+}
+
+fn is_transient_connect_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(51 | 60 | 61 | 64 | 65))
+}
+
+async fn connect_tcp(addr: &str) -> AppResult<TcpStream> {
+    const ATTEMPTS: u64 = 4;
+    const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    for attempt in 1..=ATTEMPTS {
+        let connect_result =
+            match tokio::time::timeout(ATTEMPT_TIMEOUT, TcpStream::connect(addr)).await {
+                Ok(result) => result,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("connect timed out after {}s", ATTEMPT_TIMEOUT.as_secs()),
+                )),
+            };
+
+        match connect_result {
+            Ok(tcp) => return Ok(tcp),
+            Err(error) if is_transient_connect_error(&error) && attempt < ATTEMPTS => {
+                let delay = Duration::from_millis(400 * attempt);
+                tracing::warn!(
+                    "tcp connect {addr} transient {error}; retry {attempt}/{ATTEMPTS} in {}ms",
+                    delay.as_millis()
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => {
+                return Err(AppError::Ssh(format!("tcp connect {addr}: {error}")));
+            }
+        }
+    }
+
+    unreachable!("TCP retry loop always returns")
+}
+
+async fn open_session_channel(
+    handle: &Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    timeout: Duration,
+) -> AppResult<russh::Channel<russh::client::Msg>> {
+    let handle = handle.lock().await;
+    if handle.is_closed() {
+        return Err(AppError::Ssh("ssh transport is closed".into()));
+    }
+
+    match tokio::time::timeout(timeout, handle.channel_open_session()).await {
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(error)) => Err(AppError::Ssh(format!("open channel: {error}"))),
+        Err(_) => Err(AppError::Ssh(format!(
+            "open channel timed out after {}s",
+            timeout.as_secs()
+        ))),
+    }
 }
 
 /// TCP + SSH handshake + auth. Returns the russh Handle wrapped in Arc<Mutex<>>
@@ -152,30 +219,7 @@ pub(crate) async fn do_handshake(
     passphrase: Option<&str>,
 ) -> AppResult<Arc<Mutex<russh::client::Handle<ClientHandler>>>> {
     let addr = format!("{}:{}", host, port);
-    // macOS 冷启动/网络刚切换时常出现瞬时 EHOSTUNREACH / ENETUNREACH（ARP 缓存未填充），
-    // 给一次短暂重试再失败。
-    let tcp = match TcpStream::connect(&addr).await {
-        Ok(t) => t,
-        Err(e) => {
-            let kind = e.kind();
-            let transient = matches!(
-                kind,
-                std::io::ErrorKind::HostUnreachable
-                    | std::io::ErrorKind::NetworkUnreachable
-                    | std::io::ErrorKind::ConnectionRefused
-            ) || e.raw_os_error() == Some(65) // EHOSTUNREACH
-                || e.raw_os_error() == Some(51); // ENETUNREACH
-            if transient {
-                tracing::warn!("tcp connect {addr} transient {e}; retrying once");
-                tokio::time::sleep(Duration::from_millis(400)).await;
-                TcpStream::connect(&addr)
-                    .await
-                    .map_err(|e| AppError::Ssh(format!("tcp connect {addr}: {e}")))?
-            } else {
-                return Err(AppError::Ssh(format!("tcp connect {addr}: {e}")));
-            }
-        }
-    };
+    let tcp = connect_tcp(&addr).await?;
     tcp.set_nodelay(true).ok();
 
     let handler = ClientHandler { host: host.to_string(), port };
@@ -266,9 +310,48 @@ pub async fn ssh_connect(
     app: AppHandle,
     state: State<'_, AppState>,
     details: ConnectionDetails,
+    attempt_id: Option<String>,
 ) -> AppResult<ConnectResult> {
     let session_id = uuid::Uuid::new_v4().to_string();
+    let attempt_id = attempt_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
+    let target = format!("{}:{}", details.host, details.port);
 
+    tracing::info!("ssh connect start attempt={attempt_id} target={target}");
+    state.pending_insert(attempt_id.clone(), abort_handle).await;
+    let result = Abortable::new(
+        connect_session(app, state.inner(), details, session_id.clone()),
+        abort_registration,
+    )
+    .await;
+    state.pending_remove(&attempt_id).await;
+
+    match result {
+        Ok(result) => {
+            match &result {
+                Ok(_) => tracing::info!("ssh connect success attempt={attempt_id} target={target}"),
+                Err(error) => {
+                    tracing::warn!("ssh connect failed attempt={attempt_id} target={target}: {error}")
+                }
+            }
+            result
+        }
+        Err(_) => {
+            tracing::info!("ssh connect cancelled attempt={attempt_id} target={target}");
+            if let Some(session) = state.remove(&session_id).await {
+                let _ = session.outbound.send(Outbound::Close);
+            }
+            Err(AppError::Other("connection cancelled".into()))
+        }
+    }
+}
+
+async fn connect_session(
+    app: AppHandle,
+    state: &AppState,
+    details: ConnectionDetails,
+    session_id: String,
+) -> AppResult<ConnectResult> {
     let password = details.password.clone().or_else(|| {
         details.id.as_deref().and_then(|cid| load_secret(cid, "password"))
     });
@@ -277,24 +360,39 @@ pub async fn ssh_connect(
     });
 
     let key = warm_key(&details.host, details.port, &details.username);
-    let handle_arc = if let Some(warm) = state.warm_take(&key).await {
-        warm.handle
+    let (mut handle_arc, used_warm_connection) = if let Some(warm) = state.warm_take(&key).await {
+        (warm.handle, true)
     } else {
-        do_handshake(
-            &details.host,
-            details.port,
-            &details.username,
-            password.as_deref(),
-            details.private_key.as_deref(),
-            passphrase.as_deref(),
+        (
+            do_handshake(
+                &details.host,
+                details.port,
+                &details.username,
+                password.as_deref(),
+                details.private_key.as_deref(),
+                passphrase.as_deref(),
+            )
+            .await?,
+            false,
         )
-        .await?
     };
 
-    let channel = {
-        let h = handle_arc.lock().await;
-        h.channel_open_session().await
-            .map_err(|e| AppError::Ssh(format!("open channel: {e}")))?
+    let channel = match open_session_channel(&handle_arc, Duration::from_secs(2)).await {
+        Ok(channel) => channel,
+        Err(error) if used_warm_connection => {
+            tracing::warn!("prewarmed connection {key} is stale ({error}); reconnecting");
+            handle_arc = do_handshake(
+                &details.host,
+                details.port,
+                &details.username,
+                password.as_deref(),
+                details.private_key.as_deref(),
+                passphrase.as_deref(),
+            )
+            .await?;
+            open_session_channel(&handle_arc, Duration::from_secs(5)).await?
+        }
+        Err(error) => return Err(error),
     };
     channel.request_pty(false, "xterm-256color", details.cols, details.rows, 0, 0, &[]).await
         .map_err(|e| AppError::Ssh(format!("request pty: {e}")))?;
@@ -338,6 +436,69 @@ pub async fn ssh_connect(
     }
 
     Ok(ConnectResult { session_id })
+}
+
+#[tauri::command]
+pub async fn ssh_cancel_connect(
+    state: State<'_, AppState>,
+    attempt_id: String,
+) -> AppResult<bool> {
+    let cancelled = state.pending_abort(&attempt_id).await;
+    tracing::info!("ssh cancel attempt={attempt_id} matched={cancelled}");
+    Ok(cancelled)
+}
+
+async fn validate_session(session: &SshSession) -> bool {
+    let probe = async {
+        let channel_result = {
+            let handle = session.handle.lock().await;
+            if handle.is_closed() {
+                return false;
+            }
+            handle.channel_open_session().await
+        };
+
+        match channel_result {
+            Ok(channel) => {
+                let _ = channel.close().await;
+                true
+            }
+            Err(error) => {
+                let transport_open = {
+                    let handle = session.handle.lock().await;
+                    !handle.is_closed()
+                };
+                if transport_open {
+                    tracing::warn!("session probe rejected by live server: {error}");
+                }
+                transport_open
+            }
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), probe)
+        .await
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn ssh_validate_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<bool> {
+    let Some(session) = state.get(&session_id).await else {
+        return Ok(false);
+    };
+
+    if validate_session(&session).await {
+        return Ok(true);
+    }
+
+    tracing::warn!("discarding stale ssh session {session_id}");
+    if let Some(stale) = state.remove(&session_id).await {
+        let _ = stale.outbound.send(Outbound::Close);
+    }
+    Ok(false)
 }
 
 /// Prewarm a single connection: handshake + auth, park the Handle in the warm pool.
@@ -618,23 +779,24 @@ pub async fn ssh_activate_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<()> {
-    if let Some(session) = state.get(&session_id).await {
-        // Atomic with append_to_buffer's activated-read: take the buffer lock,
-        // flip activated, then emit the snapshot as the FIRST ssh:data event —
-        // still holding the lock, so no later chunk can be appended (hence
-        // emitted) before it. Snapshot and live data now share one ordered
-        // event channel. Returning the snapshot via the invoke response raced
-        // it against ssh:data events (separate IPC paths, no ordering
-        // guarantee): with a slow MOTD the first PS1 could render before the
-        // banner. swap() keeps re-activation (session switch) from re-emitting
-        // the whole buffer.
-        let buf = session.buffer.lock().await;
-        let was_activated = session.activated.swap(true, Ordering::Relaxed);
-        if !was_activated && !buf.is_empty() {
-            emit_data(&app, &session_id, &buf);
-        }
-        drop(buf);
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+
+    // Atomic with append_to_buffer's activated-read: take the buffer lock,
+    // flip activated, then emit the snapshot as the FIRST ssh:data event —
+    // still holding the lock, so no later chunk can be appended (hence
+    // emitted) before it. Snapshot and live data now share one ordered
+    // event channel. Returning the snapshot via the invoke response raced
+    // it against ssh:data events (separate IPC paths, no ordering
+    // guarantee): with a slow MOTD the first PS1 could render before the
+    // banner. swap() keeps re-activation (session switch) from re-emitting
+    // the whole buffer.
+    let buf = session.buffer.lock().await;
+    let was_activated = session.activated.swap(true, Ordering::Relaxed);
+    if !was_activated && !buf.is_empty() {
+        emit_data(&app, &session_id, &buf);
     }
+    drop(buf);
     Ok(())
 }
 
@@ -685,7 +847,13 @@ pub(crate) fn decode_stream_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_stream_chunk;
+    use super::{decode_stream_chunk, is_transient_connect_error};
+
+    #[test]
+    fn treats_macos_host_down_as_transient() {
+        let error = std::io::Error::from_raw_os_error(64);
+        assert!(is_transient_connect_error(&error));
+    }
 
     #[test]
     fn passes_through_complete_utf8() {

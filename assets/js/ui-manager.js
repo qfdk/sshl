@@ -9,7 +9,7 @@ class UIManager {
     }
     
     // 创建加载遮罩
-    createLoadingOverlay(text = '连接中...') {
+    createLoadingOverlay(text = '连接中...', onCancel = null) {
         // 如果已存在加载遮罩，先移除
         this.removeLoadingOverlay();
 
@@ -26,6 +26,15 @@ class UIManager {
 
         this.loadingOverlay.appendChild(spinner);
         this.loadingOverlay.appendChild(loadingText);
+
+        if (onCancel) {
+            const cancelButton = document.createElement('button');
+            cancelButton.type = 'button';
+            cancelButton.className = 'loading-cancel-button';
+            cancelButton.innerHTML = `${window.Icons.svg('x', 14)}取消连接`;
+            cancelButton.addEventListener('click', onCancel);
+            this.loadingOverlay.appendChild(cancelButton);
+        }
 
         document.body.appendChild(this.loadingOverlay);
 

@@ -53,6 +53,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // ssh
             ssh::ssh_connect,
+            ssh::ssh_cancel_connect,
+            ssh::ssh_validate_session,
             ssh::ssh_disconnect,
             ssh::ssh_send_data,
             ssh::ssh_fill_password,

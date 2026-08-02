@@ -1,3 +1,4 @@
+use futures::future::AbortHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ pub struct WarmConn {
 pub struct AppState {
     pub sessions: Arc<Mutex<HashMap<String, Arc<SshSession>>>>,
     pub warm_pool: Arc<Mutex<HashMap<String, WarmConn>>>,
+    pending_connections: Arc<Mutex<HashMap<String, AbortHandle>>>,
 }
 
 impl AppState {
@@ -31,6 +33,22 @@ impl AppState {
 
     pub async fn remove(&self, id: &str) -> Option<Arc<SshSession>> {
         self.sessions.lock().await.remove(id)
+    }
+
+    pub async fn pending_insert(&self, id: String, handle: AbortHandle) {
+        self.pending_connections.lock().await.insert(id, handle);
+    }
+
+    pub async fn pending_remove(&self, id: &str) {
+        self.pending_connections.lock().await.remove(id);
+    }
+
+    pub async fn pending_abort(&self, id: &str) -> bool {
+        if let Some(handle) = self.pending_connections.lock().await.remove(id) {
+            handle.abort();
+            return true;
+        }
+        false
     }
 
     pub async fn warm_take(&self, key: &str) -> Option<WarmConn> {

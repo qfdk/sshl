@@ -4,6 +4,127 @@
 class ConnectionManager {
     constructor() {
         this.isConnecting = false; // 连接中状态标志
+        this.activeConnectionAttempt = null;
+        this.connectionCancellationSetup = false;
+    }
+
+    setupConnectionCancellation() {
+        if (this.connectionCancellationSetup) return;
+        this.connectionCancellationSetup = true;
+
+        document.addEventListener('keydown', (event) => {
+            const attempt = this.activeConnectionAttempt;
+            if (event.key !== 'Escape' || !attempt || attempt.cancelled || attempt.resolved) return;
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            void this.cancelConnectionAttempt();
+        }, true);
+    }
+
+    beginConnectionAttempt() {
+        const id = window.crypto?.randomUUID
+            ? window.crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const attempt = {
+            id,
+            cancelled: false,
+            resolved: false,
+            sessionId: null
+        };
+
+        this.activeConnectionAttempt = attempt;
+        this.isConnecting = true;
+        window.uiManager.createLoadingOverlay(
+            '正在连接服务器...',
+            () => { void this.cancelConnectionAttempt(); }
+        );
+        return attempt;
+    }
+
+    async cancelConnectionAttempt() {
+        const attempt = this.activeConnectionAttempt;
+        if (!attempt || attempt.cancelled || attempt.resolved) return;
+
+        attempt.cancelled = true;
+        if (this.activeConnectionAttempt === attempt) {
+            this.activeConnectionAttempt = null;
+            this.isConnecting = false;
+        }
+        window.uiManager.removeLoadingOverlay();
+
+        if (attempt.sessionId) {
+            await window.api.ssh.disconnect(attempt.sessionId);
+            return;
+        }
+
+        if (window.api?.ssh?.cancelConnect) {
+            await window.api.ssh.cancelConnect(attempt.id);
+        }
+    }
+
+    async waitForConnection(details, attempt) {
+        const result = await window.api.ssh.connect(details, attempt.id);
+        if (result?.success) {
+            attempt.sessionId = result.sessionId;
+        }
+        attempt.resolved = true;
+
+        if (attempt.cancelled) {
+            if (attempt.sessionId) {
+                await window.api.ssh.disconnect(attempt.sessionId);
+            }
+            return null;
+        }
+
+        if (result?.success) {
+            window.uiManager.createLoadingOverlay('正在准备终端...');
+        }
+        return result;
+    }
+
+    finishConnectionAttempt(attempt) {
+        if (this.activeConnectionAttempt !== attempt) return;
+
+        this.activeConnectionAttempt = null;
+        this.isConnecting = false;
+        window.uiManager.removeLoadingOverlay();
+    }
+
+    async isSessionAlive(sessionId) {
+        if (!window.api?.ssh?.validateSession) return true;
+
+        const result = await window.api.ssh.validateSession(sessionId);
+        return Boolean(result?.success && result.alive);
+    }
+
+    discardStaleSession(sessionInfo) {
+        if (!sessionInfo) return;
+
+        const { sessionId, session } = sessionInfo;
+        window.sessionManager.removeSession(sessionId);
+        window.terminalManager.disposeTerminalInstance(sessionId);
+
+        if (window.currentSessionId === sessionId) {
+            window.currentSessionId = null;
+
+            const placeholder = document.getElementById('terminal-placeholder');
+            if (placeholder) placeholder.classList.remove('hidden');
+
+            window.uiManager.updateConnectionStatus(false);
+            window.uiManager.updateServerInfo(false);
+            window.fileManager.clearFileManagerCache();
+            window.fileManager.fileManagerInitialized = false;
+            window.fileManager.renderRemoteEmptyState(
+                '连接已失效，正在重新连接...',
+                session?.connectionId || null
+            );
+        }
+
+        const activeConnectionId = window.currentSessionId
+            ? window.sessionManager.getSession(window.currentSessionId)?.connectionId || null
+            : null;
+        this.updateActiveConnectionItem(activeConnectionId);
     }
     
     // 加载连接列表
@@ -135,32 +256,37 @@ class ConnectionManager {
     
     // 切换到现有会话
     async switchToSession(connectionId) {
-        // 获取会话信息
-        const sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
+        let sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
+        if (!sessionInfo) {
+            return false;
+        }
 
-        // 如果是当前会话，直接返回
-        if (sessionInfo && window.currentSessionId === sessionInfo.sessionId) {
+        if (!await this.isSessionAlive(sessionInfo.sessionId)) {
+            this.discardStaleSession(sessionInfo);
+            return false;
+        }
+
+        const activationResult = await window.api.ssh.activateSession(sessionInfo.sessionId);
+        if (!activationResult?.success) {
+            this.discardStaleSession(sessionInfo);
+            return false;
+        }
+
+        if (window.currentSessionId === sessionInfo.sessionId) {
             return true;
         }
 
-        // 清除文件管理器缓存
-        window.fileManager.clearFileManagerCache();
-
         try {
-            // 获取会话信息
-            const sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
+            window.fileManager.clearFileManagerCache();
+
+            sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
             if (!sessionInfo) {
                 console.error(`[switchToSession] 找不到连接ID: ${connectionId} 的会话`);
                 return false;
             }
 
-            // 如果是当前会话，直接返回
-            if (window.currentSessionId === sessionInfo.sessionId) {
-                return true;
-            }
-
             // 检查会话是否有效。Tauri 后端独立管理 session 生命周期，前端没有 stream 字段；
-            // 只在 sessionManager 完全缺失时视为失效。后端实际是否存活由 activateSession 检测。
+            // 后端存活探测已在切换前完成，这里只处理前端会话对象缺失的兼容路径。
             const session = sessionInfo.session;
             if (!session) {
                 // 清理旧会话及其失效的 xterm 实例
@@ -268,12 +394,6 @@ class ConnectionManager {
                     console.warn(`[switchToSession] 加载缓冲区数据失败:`, err);
                 }
             }
-            try {
-                await window.api.ssh.activateSession(sessionInfo.sessionId);
-            } catch (err) {
-                console.warn(`[switchToSession] 在后端激活会话失败:`, err);
-            }
-
             // 异步加载连接信息和更新UI
             window.api.config.getConnections().then(connections => {
                 const connection = connections.find(c => c.id === connectionId);
@@ -375,15 +495,10 @@ class ConnectionManager {
         // 如果已经在连接中，则忽略
         if (this.isConnecting) return;
 
+        let attempt = null;
         try {
             if (!window.api) {
                 alert('API未初始化，请重启应用');
-                return;
-            }
-
-            // 如果双击的是当前正在显示的会话，无需做任何切换/清空操作
-            const existing = window.sessionManager.getSessionByConnectionId(id);
-            if (existing && existing.sessionId === window.currentSessionId) {
                 return;
             }
 
@@ -421,10 +536,10 @@ class ConnectionManager {
             }
 
             // 如果没有现有会话或切换失败，建立新连接
-            this.isConnecting = true;
-            window.uiManager.createLoadingOverlay('正在连接服务器...');
+            attempt = this.beginConnectionAttempt();
 
-            const result = await window.api.ssh.connect(connection);
+            const result = await this.waitForConnection(connection, attempt);
+            if (!result) return;
 
             if (result && result.success) {
                 window.currentSessionId = result.sessionId;
@@ -491,11 +606,13 @@ class ConnectionManager {
                 alert(`连接失败: ${result ? result.error || 'unknown error' : 'unknown error'}`);
             }
         } catch (error) {
+            if (attempt?.cancelled) return;
             console.error('连接错误:', error);
             alert(`连接错误: ${error ? error.message || '未知错误' : '未知错误'}`);
         } finally {
-            this.isConnecting = false;
-            window.uiManager.removeLoadingOverlay();
+            if (attempt) {
+                this.finishConnectionAttempt(attempt);
+            }
         }
     }
     
@@ -515,10 +632,8 @@ class ConnectionManager {
         // 如果已经在连接中，则忽略
         if (this.isConnecting) return;
 
+        let attempt = null;
         try {
-            this.isConnecting = true;
-            window.uiManager.createLoadingOverlay('正在连接服务器...');
-
             const authType = document.getElementById('auth-type').value;
             const savePassword = document.getElementById('conn-save-password').checked;
 
@@ -546,7 +661,10 @@ class ConnectionManager {
                 return;
             }
 
-            const result = await window.api.ssh.connect(connectionDetails);
+            attempt = this.beginConnectionAttempt();
+            const result = await this.waitForConnection(connectionDetails, attempt);
+            if (!result) return;
+
             if (result.success) {
                 // 生成ID并保存会话
                 const generatedId = Date.now().toString();
@@ -634,11 +752,13 @@ class ConnectionManager {
                 alert(`连接失败: ${result.error}`);
             }
         } catch (error) {
+            if (attempt?.cancelled) return;
             console.error('连接错误:', error);
             alert(`连接错误: ${error.message}`);
         } finally {
-            this.isConnecting = false;
-            window.uiManager.removeLoadingOverlay();
+            if (attempt) {
+                this.finishConnectionAttempt(attempt);
+            }
         }
     }
     
