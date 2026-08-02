@@ -233,13 +233,14 @@
     }
 
     #new-permissions {
+        box-sizing: border-box;
         font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
-        font-size: 20px;
+        font-size: 16px;
         text-align: center;
         font-weight: 700;
-        border: 2px solid #d1d5db;
-        border-radius: 10px;
-        width: 80px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        width: 64px;
         background: white;
         transition: all 0.2s;
     }
