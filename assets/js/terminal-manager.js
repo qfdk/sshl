@@ -3,10 +3,29 @@
 
 import { getTerminalSettings } from './settings.js';
 
-// Palette index → "#rrggbb"（xterm 256 色标准调色板）
+// 终端主题：与用户 Ghostty 配置（Carbonfox 改）对齐 —— 背景/前景/光标/选区 + 16 色调色板。
+// 两条终端创建路径（createXtermInstance 默认 + initTerminal 的 termOptions）共用，
+// 保证 options 展开覆盖 theme 时也不会丢调色板。
+const TERM_THEME = {
+    background: '#1d1d1d',
+    foreground: '#f6f825',
+    cursor: '#f2f4f8',
+    cursorAccent: '#161616',
+    selectionBackground: '#2a2a2a',
+    selectionForeground: '#f2f4f8',
+    black: '#282828', red: '#ee5396', green: '#00ff74', yellow: '#08bdba',
+    blue: '#78a9ff', magenta: '#be95ff', cyan: '#33b1ff', white: '#dfdfe0',
+    brightBlack: '#484848', brightRed: '#f16da6', brightGreen: '#46c880', brightYellow: '#2dc7c4',
+    brightBlue: '#8cb6ff', brightMagenta: '#c8a5ff', brightCyan: '#52bdff', brightWhite: '#e4e4e5'
+};
+
+// Palette index → "#rrggbb"。0-15 与 TERM_THEME 调色板一致（getAnsiPalette 失败时的兜底，
+// 必须和真实渲染色一致，否则边缘采样解码出的色与 padding 不符露缝）。
 const ANSI_BASE_16 = [
-    '#000000','#cd3131','#0dbc79','#e5e510','#2472c8','#bc3fbc','#11a8cd','#e5e5e5',
-    '#666666','#f14c4c','#23d18b','#f5f543','#3b8eea','#d670d6','#29b8db','#e5e5e5'
+    TERM_THEME.black, TERM_THEME.red, TERM_THEME.green, TERM_THEME.yellow,
+    TERM_THEME.blue, TERM_THEME.magenta, TERM_THEME.cyan, TERM_THEME.white,
+    TERM_THEME.brightBlack, TERM_THEME.brightRed, TERM_THEME.brightGreen, TERM_THEME.brightYellow,
+    TERM_THEME.brightBlue, TERM_THEME.brightMagenta, TERM_THEME.brightCyan, TERM_THEME.brightWhite
 ];
 // 读取 xterm 运行时真实使用的 0-15 调色板（CanvasAddon 实际渲染用的就是它）。
 // 设 theme.ansi 在本 xterm+CanvasAddon 下不生效（仍用其自带默认，如 magenta=#75507b），
@@ -42,7 +61,7 @@ function paletteToHex(idx, pal) {
 // 作为采样里 mode=0（默认背景）cell 的「权威基准色」，绝不被自适应采样自身改写——
 // 否则一旦把 theme.background 染成某 TUI 的色（如 whiptail 紫），下一帧默认 cell 又被
 // 当成那个色统计，自我强化锁死、永不回退（dpkg-reconfigure 后整屏变紫即此 bug）。
-const DEFAULT_TERM_BG = '#1e1e2e';
+const DEFAULT_TERM_BG = TERM_THEME.background;
 
 // 单个 cell 的背景 → "#rrggbb"。mode=0（默认背景）返回 base（权威基准色），
 // 其余按 xterm 颜色模式常量解码：CM_P16=1<<24, CM_P256=2<<24, CM_RGB=3<<24。
@@ -155,11 +174,7 @@ function createXtermInstance(options) {
         cursorInactiveStyle: 'bar',
         fontSize: userSettings.fontSize,
         fontFamily: userSettings.fontFamily,
-        theme: {
-            background: '#1e1e2e',
-            foreground: '#f0f0f0',
-            cursor: '#ffffff'
-        },
+        theme: { ...TERM_THEME },
         allowTransparency: false,
         // xterm 5.x 的 term.unicode（Unicode11Addon 注册入口）是 proposed API，
         // 不开这个开关 loadAddon 直接抛错。VS Code 同样常开。
@@ -424,11 +439,7 @@ class TerminalManager {
                 cursorStyle: 'bar',
                 fontSize: userSettings.fontSize,
                 fontFamily: userSettings.fontFamily,
-                theme: {
-                    background: '#1e1e2e',
-                    foreground: '#FBF74B',
-                    cursor: '#FBF74B'
-                },
+                theme: { ...TERM_THEME },
                 allowTransparency: true,
                 blinkInterval: 500
             };

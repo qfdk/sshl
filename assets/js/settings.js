@@ -86,7 +86,7 @@ function buildNerdStack(installedNerd) {
 }
 
 const DEFAULTS = {
-    fontSize: 14,
+    fontSize: 16,
     // 默认即内置 Nerd Font —— 新装用户开箱即有图标，无需手动选字体。
     fontFamily: '"JetBrainsMono Nerd Font Mono", "Apple Color Emoji", Menlo, Monaco, monospace'
 };

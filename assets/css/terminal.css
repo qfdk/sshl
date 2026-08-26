@@ -7,7 +7,7 @@
 
 /* 唯一的颜色源：.terminal-container 的 --term-bg（由 JS 根据 OSC 11 / cell 采样动态更新） */
 .terminal-container {
-    background-color: var(--term-bg, #1e1e2e) !important;
+    background-color: var(--term-bg, #1d1d1d) !important;
 }
 
 /* 修复终端容器尺寸 */
