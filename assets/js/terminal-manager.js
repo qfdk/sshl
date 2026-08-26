@@ -161,6 +161,9 @@ function createXtermInstance(options) {
             cursor: '#ffffff'
         },
         allowTransparency: false,
+        // xterm 5.x 的 term.unicode（Unicode11Addon 注册入口）是 proposed API，
+        // 不开这个开关 loadAddon 直接抛错。VS Code 同样常开。
+        allowProposedApi: true,
         ...options
     });
 }
@@ -267,6 +270,11 @@ class TerminalManager {
                 const term = createXtermInstance(options);
                 const fitAddon = new FitAddon.FitAddon();
                 term.loadAddon(fitAddon);
+                // Unicode 11 宽度表：默认 Unicode 6 把绝大多数 emoji 算成 1 格，
+                // Apple Color Emoji 字形实占 2 格 → 被右侧 cell 背景盖掉（看似"显示不出来"）。
+                // '11' 与 VS Code / Hyper 出货配置一致；更激进（graphemes）会与远端 wcwidth 失配。
+                term.loadAddon(new Unicode11Addon.Unicode11Addon());
+                term.unicode.activeVersion = '11';
                 term.open(container);
                 loadCanvasRenderer(term);
                 // 强制 scrollBarWidth=0：滚动条已用 CSS 隐藏（不占位），FitAddon 默认仍会
@@ -285,7 +293,7 @@ class TerminalManager {
         };
 
         // canvas renderer 也要就绪，否则首次走动态加载、二次走 else 分支时 CanvasAddon 缺失。
-        if (!window.Terminal || !window.FitAddon || !window.CanvasAddon) {
+        if (!window.Terminal || !window.FitAddon || !window.CanvasAddon || !window.Unicode11Addon) {
             // 动态加载脚本：xterm → fit → canvas，全部就绪后再创建终端
             return new Promise((resolve, reject) => {
                 const loadScript = (src, label) => new Promise((res, rej) => {
@@ -308,6 +316,7 @@ class TerminalManager {
                 loadScript('app://node_modules/xterm/lib/xterm.js', 'xterm.js')
                     .then(() => loadScript('app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js', 'xterm-addon-fit.js'))
                     .then(() => loadScript('app://node_modules/xterm-addon-canvas/lib/xterm-addon-canvas.js', 'xterm-addon-canvas.js'))
+                    .then(() => loadScript('app://node_modules/xterm-addon-unicode11/lib/xterm-addon-unicode11.js', 'xterm-addon-unicode11.js'))
                     .then(() => buildTerminal(resolve, reject))
                     .catch(reject);
             });
