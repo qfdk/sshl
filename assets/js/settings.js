@@ -9,9 +9,12 @@ const GROUP_MONO = '等宽字体';
 
 // 内置（打包进 app）的 Nerd Font。@font-face 见 assets/css/fonts.css。
 // 永远可用，不依赖系统安装，是「图标字体」分组的稳定锚点，也是 canvas 能可靠渲染图标的字体。
+// "Apple Color Emoji" 必须排在任何系统等宽字体（含 monospace 泛型）之前：
+// Menlo 等自带 ⚡ 之类的单色字形，排后面就永远轮不到彩色 emoji。
+// 内置 NFM 已剔除 U+26A1 cmap 映射（见 fonts/ 构建说明），emoji 码点可正常落到彩色字体。
 const BUNDLED_NERD = {
     label: 'JetBrainsMono Nerd Font (内置·含图标)',
-    value: '"JetBrainsMono Nerd Font Mono", monospace',
+    value: '"JetBrainsMono Nerd Font Mono", "Apple Color Emoji", monospace',
     group: GROUP_NERD
 };
 
@@ -85,7 +88,13 @@ function buildNerdStack(installedNerd) {
 const DEFAULTS = {
     fontSize: 14,
     // 默认即内置 Nerd Font —— 新装用户开箱即有图标，无需手动选字体。
-    fontFamily: '"JetBrainsMono Nerd Font Mono", Menlo, Monaco, monospace'
+    fontFamily: '"JetBrainsMono Nerd Font Mono", "Apple Color Emoji", Menlo, Monaco, monospace'
+};
+
+// 旧版默认栈（无 emoji 字体）→ 自动迁移到新栈，老用户无需重选字体。
+const LEGACY_FONT_MIGRATION = {
+    '"JetBrainsMono Nerd Font Mono", Menlo, Monaco, monospace': DEFAULTS.fontFamily,
+    '"JetBrainsMono Nerd Font Mono", monospace': BUNDLED_NERD.value
 };
 
 /** 根据系统实际安装的字体动态生成 picker 选项。 */
@@ -122,9 +131,10 @@ function read() {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return { ...DEFAULTS };
         const parsed = JSON.parse(raw);
+        const family = parsed.fontFamily || DEFAULTS.fontFamily;
         return {
             fontSize: Number(parsed.fontSize) || DEFAULTS.fontSize,
-            fontFamily: parsed.fontFamily || DEFAULTS.fontFamily
+            fontFamily: LEGACY_FONT_MIGRATION[family] || family
         };
     } catch {
         return { ...DEFAULTS };
