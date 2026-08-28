@@ -95,4 +95,12 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* Tailwind v4 的 preflight 把 button 的 cursor 从 pointer 改成了 default，
+     于是 shadcn 的按钮全是箭头。恢复成手形，禁用态除外。 */
+  button:not(:disabled),
+  [role="button"]:not(:disabled),
+  summary,
+  label[for] {
+    cursor: pointer;
+  }
 }
