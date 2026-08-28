@@ -523,8 +523,7 @@ class UIManager {
         
         // 新建连接
         const newConnectionBtn = document.getElementById('new-connection-btn');
-        const connectionDialog = document.getElementById('connection-dialog');
-        if (newConnectionBtn && connectionDialog) {
+        if (newConnectionBtn) {
             newConnectionBtn.addEventListener('click', () => {
                 setConnectionDialogOpen(true);
                 // 重置认证方式为密码，并触发UI更新
@@ -546,7 +545,7 @@ class UIManager {
         // 取消连接
         const cancelConnectionBtn = document.getElementById('cancel-connection');
         const connectionForm = document.getElementById('connection-form');
-        if (cancelConnectionBtn && connectionForm && connectionDialog) {
+        if (cancelConnectionBtn && connectionForm) {
             cancelConnectionBtn.addEventListener('click', () => {
                 setConnectionDialogOpen(false);
                 connectionForm.reset();

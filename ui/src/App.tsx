@@ -8,9 +8,14 @@ import { FileManager } from './layout/FileManager';
 import { ConnectionDialog } from './layout/ConnectionDialog';
 import { SettingsDialog } from './layout/SettingsDialog';
 
+// useSyncExternalStore 要求 subscribe 引用稳定：内联箭头函数会让 React 每次渲染都
+// 重新订阅，通知会在 unsubscribe/subscribe 的间隙丢失。丢一次之后 store 已是新值，
+// setter 的「值未变化直接 return」会让后续调用全部短路，UI 再也不更新。
+const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
+
 export function App() {
   const activeTabId = useSyncExternalStore(
-    (callback) => subscribe('activeTabId', callback),
+    subscribeActiveTabId,
     getActiveTabId,
     () => 'terminal',
   );

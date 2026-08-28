@@ -5,11 +5,16 @@ import { Button } from '../components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
 
+// useSyncExternalStore 要求 subscribe 引用稳定：内联箭头函数会让 React 每次渲染都
+// 重新订阅，通知会在 unsubscribe/subscribe 的间隙丢失。丢一次之后 store 已是新值，
+// setter 的「值未变化直接 return」会让后续调用全部短路，UI 再也不更新。
+const subscribeConnectionDialogOpen = (callback: () => void) => subscribe('connectionDialogOpen', callback);
+
 const inputClassName = 'h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
 
 export function ConnectionDialog() {
   const open = useSyncExternalStore(
-    (callback) => subscribe('connectionDialogOpen', callback),
+    subscribeConnectionDialogOpen,
     getConnectionDialogOpen,
     () => false,
   );

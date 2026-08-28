@@ -37,7 +37,11 @@ const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   DialogContentProps
 >(({ className, children, forceMount, showCloseButton = true, ...props }, ref) => (
-  <DialogPortal forceMount={forceMount}>
+  // 不走 DialogPortal：Radix 的 Portal 内部用 useState(false) + effect 延迟一帧挂载,
+  // 而 vanilla manager 在 App 的 useEffect 里同步跑 getElementById 找对话框内的元素。
+  // 走 Portal 时它们全是 null,事件绑定和 initSettingsUI 会整块跳过——按钮点了没反应。
+  // Overlay/Content 都是 position:fixed + z-50,不经 Portal 也定位正确。
+  <>
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
@@ -56,7 +60,7 @@ const DialogContent = React.forwardRef<
         </DialogPrimitive.Close>
       )}
     </DialogPrimitive.Content>
-  </DialogPortal>
+  </>
 ))
 DialogContent.displayName = DialogPrimitive.Content.displayName
 
