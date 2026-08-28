@@ -154,7 +154,7 @@ export function ConnectionList({ manager, query }: ConnectionListProps) {
 
   const visible = manager.connections.filter(connection => matchesConnection(connection, query));
   if (!visible.length) return <div className="p-4 text-center text-xs text-muted-foreground">{manager.connections.length ? '没有匹配的连接' : '没有保存的连接'}</div>;
-  const groups = groupConnections(visible, manager.groupOrder as never[]);
+  const groups = groupConnections(visible, manager.groupOrder);
   const renderItems = (items: Connection[]) => items.map(connection => <ConnectionItem key={connection.id} connection={connection} manager={manager} />);
   return (
     <div ref={listRef} className="grid select-none gap-1 overflow-y-auto p-2" data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>

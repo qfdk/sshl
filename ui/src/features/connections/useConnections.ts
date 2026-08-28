@@ -373,7 +373,7 @@ export function useConnections(): ConnectionManager {
   }, [loadConnections]);
 
   const move = useCallback((connectionId: string, targetGroup: string, beforeId: string | null = null) => {
-    const next = moveConnection(connectionsRef.current, groupOrderRef.current, connectionId, targetGroup, beforeId as never);
+    const next = moveConnection(connectionsRef.current, groupOrderRef.current, connectionId, targetGroup, beforeId);
     setConnections(next);
     void appWindow().api.config.applyConnectionLayout(next.map(connection => ({ id: connection.id, group: connection.group?.trim() || '' })));
   }, []);
