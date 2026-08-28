@@ -649,53 +649,6 @@ body {
   font-weight: 500;
 }
 
-.form-group {
-  margin-bottom: 16px;
-  padding: 0 16px;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 14px;
-}
-
-.form-group input[type="text"],
-.form-group input[type="password"],
-.form-group input[type="number"],
-.form-group select {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 14px;
-  background-color: white;
-  color: inherit;
-  font-family: inherit;
-  box-sizing: border-box;
-}
-
-.form-group select {
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  padding-right: 32px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  background-size: 14px;
-  cursor: pointer;
-}
-
-.file-input-group {
-  display: flex;
-}
-
-.file-input-group input {
-  flex: 1;
-  margin-right: 8px;
-}
-
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
@@ -721,11 +674,8 @@ body {
   background-color: #f3f4f6;
 }
 
-
-
 /* 按钮样式 */
-.primary-button,
-#connection-form button[type="submit"] {
+.primary-button {
   background-color: #5695D7;
   color: white;
   border: none;
@@ -747,8 +697,7 @@ body {
   cursor: pointer;
 }
 
-.primary-button:hover,
-#connection-form button[type="submit"]:hover {
+.primary-button:hover {
   background-color: #4a7fb8;
 }
 
@@ -860,29 +809,31 @@ body {
   background-color: var(--success-color);
 }
 
-/* 改进认证方式选择器样式 */
-#auth-type {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  font-size: 14px;
-}
-
-/* 文件输入组样式 */
-.file-input-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.file-input-group input {
-  flex: 1;
-}
-
 /* 保存密码复选框样式 */
 input[type="checkbox"] {
   margin-right: 6px;
+}
+
+/* Legacy dialogs shared by settings and the permission editor. */
+.dialog-content {
+  background-color: white;
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  width: 100%;
+  max-width: 450px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.dialog-content h3 {
+  margin: 0;
+  padding: 16px 20px;
+  background-color: #f9fafb;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 18px;
+  font-weight: 500;
+  border-radius: 8px 8px 0 0;
 }
 
 /* 侧边栏折叠时样式调整 */
@@ -926,71 +877,6 @@ input[type="checkbox"] {
   color: #f0f0f0;
 }
 
-/* 改进连接对话框样式 */
-.dialog-content {
-  background-color: white;
-  border-radius: 8px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-  width: 100%;
-  max-width: 450px;
-  max-height: 90vh;
-  overflow-y: auto;
-  padding: 0;
-}
-
-.dialog-content h3 {
-  margin: 0;
-  padding: 16px 20px;
-  background-color: #f9fafb;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 18px;
-  font-weight: 500;
-  border-radius: 8px 8px 0 0;
-}
-
-#connection-form {
-  padding: 20px;
-}
-
-.form-group {
-  margin-bottom: 16px;
-  padding: 0;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #374151;
-}
-
-.form-group input[type="text"],
-.form-group input[type="password"],
-.form-group input[type="number"],
-.form-group select {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  font-size: 14px;
-  transition: border-color 0.2s;
-}
-
-.form-group input:focus,
-.form-group select:focus {
-  outline: none;
-  border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(86, 149, 215, 0.1);
-}
-
-/* 改进文件输入组 */
-.file-input-group {
-  display: flex;
-  gap: 8px;
-}
-
-/* Dialog 按钮规则统一搬到 connection-dialog.css */
 
 /* 添加加载状态样式 */
 .loading-overlay {

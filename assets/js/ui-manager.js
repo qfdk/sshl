@@ -6,6 +6,7 @@ import {
     getCurrentSessionId,
     setActiveTabId,
     setConnectionDialogOpen,
+    setEditingConnection,
 } from './app-state.mjs';
 
 class UIManager {
@@ -446,25 +447,6 @@ class UIManager {
     
     // 初始化UI事件监听
     initUIEvents() {
-        // 认证方式切换
-        const authTypeSelect = document.getElementById('auth-type');
-        if (authTypeSelect) {
-            authTypeSelect.addEventListener('change', this.toggleAuthFields);
-            this.toggleAuthFields(); // 初始设置
-        }
-
-        // 浏览私钥文件
-        const browsePrivateKeyBtn = document.getElementById('browse-private-key');
-        if (browsePrivateKeyBtn) {
-            browsePrivateKeyBtn.addEventListener('click', async (e) => {
-                e.preventDefault();
-                const result = await window.api.dialog.selectFile();
-                if (!result.canceled) {
-                    document.getElementById('conn-private-key-path').value = result.filePaths[0];
-                }
-            });
-        }
-        
         // 标签切换
         const tabs = document.querySelectorAll('.tab');
         tabs.forEach(tab => {
@@ -525,48 +507,11 @@ class UIManager {
         const newConnectionBtn = document.getElementById('new-connection-btn');
         if (newConnectionBtn) {
             newConnectionBtn.addEventListener('click', () => {
+                setEditingConnection(null);
                 setConnectionDialogOpen(true);
-                // 重置认证方式为密码，并触发UI更新
-                document.getElementById('auth-type').value = 'password';
-                this.toggleAuthFields();
-                // 确保是新建模式，清除编辑标记
-                const form = document.getElementById('connection-form');
-                if (form) {
-                    delete form.dataset.editingId;
-                }
-                // 重置提交按钮文本
-                const submitBtn = document.getElementById('connection-submit-btn');
-                if (submitBtn) {
-                    submitBtn.innerHTML = `${window.Icons.svg('arrow-right', 16)}连接`;
-                }
             });
         }
 
-        // 取消连接
-        const cancelConnectionBtn = document.getElementById('cancel-connection');
-        const connectionForm = document.getElementById('connection-form');
-        if (cancelConnectionBtn && connectionForm) {
-            cancelConnectionBtn.addEventListener('click', () => {
-                setConnectionDialogOpen(false);
-                connectionForm.reset();
-                // 重置认证方式为密码，并触发UI更新
-                document.getElementById('auth-type').value = 'password';
-                this.toggleAuthFields();
-                // 清除编辑模式标记
-                delete connectionForm.dataset.editingId;
-                // 重置提交按钮文本
-                const submitBtn = document.getElementById('connection-submit-btn');
-                if (submitBtn) {
-                    submitBtn.innerHTML = `${window.Icons.svg('arrow-right', 16)}连接`;
-                }
-            });
-        }
-
-        // 提交连接表单
-        if (connectionForm) {
-            connectionForm.addEventListener('submit', (e) => window.connectionManager.handleConnectionFormSubmit(e));
-        }
-        
         // 本地文件浏览按钮
         const browseLocalBtn = document.getElementById('browse-local');
         if (browseLocalBtn) {
@@ -675,52 +620,6 @@ class UIManager {
                     this.disabled = false;
                 }
             });
-        }
-    }
-    
-    // 切换认证方式显示/隐藏相关字段
-    toggleAuthFields() {
-        const authTypeSelect = document.getElementById('auth-type');
-        const passwordAuthFields = document.querySelector('.auth-password');
-        const privateKeyAuthFields = document.querySelectorAll('.auth-key');
-        
-        if (!authTypeSelect || !passwordAuthFields) return;
-        
-        const authType = authTypeSelect.value;
-
-        if (authType === 'password') {
-            passwordAuthFields.classList.remove('hidden');
-            privateKeyAuthFields.forEach(field => field.classList.add('hidden'));
-            // 清除私钥相关字段
-            document.getElementById('conn-private-key-path').value = '';
-            document.getElementById('conn-passphrase').value = '';
-        } else {
-            passwordAuthFields.classList.add('hidden');
-            privateKeyAuthFields.forEach(field => field.classList.remove('hidden'));
-            // 清除密码字段
-            document.getElementById('conn-password').value = '';
-
-            // 自动设置默认私钥路径为 ~/.ssh/id_rsa
-            if (window.api && window.api.file && window.api.file.getHomeDir) {
-                window.api.file.getHomeDir()
-                    .then(homeDir => {
-                        // 确定正确的路径分隔符
-                        const separator = homeDir.includes('\\') ? '\\' : '/';
-
-                        // 使用正确的分隔符构建路径
-                        let defaultPrivateKeyPath;
-                        if (separator === '\\') {
-                            // Windows 风格路径
-                            defaultPrivateKeyPath = homeDir + '\\.ssh\\id_rsa';
-                        } else {
-                            // Unix 风格路径
-                            defaultPrivateKeyPath = homeDir + '/.ssh/id_rsa';
-                        }
-
-                        document.getElementById('conn-private-key-path').value = defaultPrivateKeyPath;
-                    })
-                    .catch(err => console.error('获取用户主目录失败:', err));
-            }
         }
     }
     

@@ -5,11 +5,13 @@ import {
     getConnectionDialogOpen,
     getSettingsDialogOpen,
     getCurrentSessionId,
+    getEditingConnection,
     resetState,
     setActiveTabId,
     setConnectionDialogOpen,
     setSettingsDialogOpen,
     setCurrentSessionId,
+    setEditingConnection,
     subscribe,
 } from '../assets/js/app-state.mjs';
 
@@ -22,6 +24,16 @@ test('starts with the default active tab and no current session', () => {
     assert.equal(getCurrentSessionId(), null);
     assert.equal(getConnectionDialogOpen(), false);
     assert.equal(getSettingsDialogOpen(), false);
+});
+
+test('editing connection starts empty and can be set and cleared', () => {
+    const connection = { id: 'connection-1', name: 'Server' };
+
+    assert.equal(getEditingConnection(), null);
+    setEditingConnection(connection);
+    assert.equal(getEditingConnection(), connection);
+    setEditingConnection(null);
+    assert.equal(getEditingConnection(), null);
 });
 
 test('setters update the values returned by getters', () => {

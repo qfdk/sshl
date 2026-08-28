@@ -2,18 +2,21 @@ const initialState = {
     currentSessionId: null,
     activeTabId: 'terminal',
     connectionDialogOpen: false,
+    editingConnection: null,
     settingsDialogOpen: false,
 };
 
 let currentSessionId = initialState.currentSessionId;
 let activeTabId = initialState.activeTabId;
 let connectionDialogOpen = initialState.connectionDialogOpen;
+let editingConnection = initialState.editingConnection;
 let settingsDialogOpen = initialState.settingsDialogOpen;
 
 const subscribers = {
     currentSessionId: new Set(),
     activeTabId: new Set(),
     connectionDialogOpen: new Set(),
+    editingConnection: new Set(),
     settingsDialogOpen: new Set(),
 };
 
@@ -65,6 +68,19 @@ export function setConnectionDialogOpen(open) {
     notify('connectionDialogOpen', newValue, oldValue);
 }
 
+export function getEditingConnection() {
+    return editingConnection;
+}
+
+export function setEditingConnection(connection) {
+    const newValue = connection == null ? null : connection;
+    if (newValue === editingConnection) return;
+
+    const oldValue = editingConnection;
+    editingConnection = newValue;
+    notify('editingConnection', newValue, oldValue);
+}
+
 export function getSettingsDialogOpen() {
     return settingsDialogOpen;
 }
@@ -87,9 +103,11 @@ export function resetState() {
     currentSessionId = initialState.currentSessionId;
     activeTabId = initialState.activeTabId;
     connectionDialogOpen = initialState.connectionDialogOpen;
+    editingConnection = initialState.editingConnection;
     settingsDialogOpen = initialState.settingsDialogOpen;
     subscribers.currentSessionId.clear();
     subscribers.activeTabId.clear();
     subscribers.connectionDialogOpen.clear();
+    subscribers.editingConnection.clear();
     subscribers.settingsDialogOpen.clear();
 }

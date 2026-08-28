@@ -50,7 +50,7 @@ fs.writeFileSync(tmPath, tmSrc);
 //     顺序须与 index.ejs 原 CSS 数组一致以保留层叠优先级。
 //     app-runtime.css 不入 bundle：它必须在 xterm.css 之后单独加载（见 index.ejs）。
 const CSS_ORDER = [
-  'fonts.css', 'main.css', 'connection-dialog.css',
+  'fonts.css', 'main.css',
   'settings-dialog.css', 'file-manager.css', 'terminal.css', 'buttons.css',
 ];
 const bundleCss = CSS_ORDER
