@@ -27,9 +27,9 @@ type DragState = {
   item: HTMLElement;
 };
 
-type ConnectionListProps = { manager: ConnectionManager; query: string };
+type ConnectionListProps = { manager: ConnectionManager; query: string; collapsed?: boolean };
 
-function ConnectionItem({ connection, manager }: { connection: Connection; manager: ConnectionManager }) {
+function ConnectionItem({ connection, manager, collapsed = false }: { connection: Connection; manager: ConnectionManager; collapsed?: boolean }) {
   const session = sessionManager.getSessionByConnectionId(connection.id);
   const connected = Boolean(session);
   const active = connected && session!.sessionId === getCurrentSessionId();
@@ -38,16 +38,17 @@ function ConnectionItem({ connection, manager }: { connection: Connection; manag
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-          className={`group flex min-h-10 cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'} ${connected ? '' : 'text-muted-foreground'}`}
+          className={`group flex min-h-10 cursor-pointer select-none items-center rounded-md py-1.5 text-sm transition-colors ${collapsed ? 'justify-center px-0' : 'gap-2 px-2'} ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'} ${connected ? '' : 'text-muted-foreground'}`}
+          title={collapsed ? connection.name : undefined}
           data-connection-item
           data-id={connection.id}
           data-active={active ? 'true' : 'false'}
           data-connected={connected ? 'true' : 'false'}
           onDoubleClick={() => void manager.connectToSaved(connection.id)}
         >
-          <span className={`h-2 w-2 shrink-0 rounded-full ${connected ? 'bg-success' : 'bg-muted-foreground/40'}`} data-connection-status />
-          <span className="min-w-0 flex-1 truncate" title={connection.name}>{connection.name}</span>
-          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100" data-connection-actions>
+          <span className={`shrink-0 rounded-full ${collapsed ? 'h-2.5 w-2.5 ring-2 ring-border' : 'h-2 w-2'} ${connected ? 'bg-success' : 'bg-muted-foreground/40'}`} data-connection-status />
+          {!collapsed && <span className="min-w-0 flex-1 truncate" title={connection.name}>{connection.name}</span>}
+          <div className={`shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${collapsed ? 'hidden' : 'flex'}`} data-connection-actions>
             {connected && <button type="button" className="rounded p-1 hover:bg-background" title="断开连接" data-disconnect-connection onClick={event => { event.stopPropagation(); void manager.disconnect(session!.sessionId); }}><Power className="h-3.5 w-3.5" /></button>}
             <button type="button" className="rounded p-1 hover:bg-background disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能编辑' : '编辑连接'} disabled={connected} data-edit-connection onClick={event => { event.stopPropagation(); edit(); }}><Pencil className="h-3.5 w-3.5" /></button>
             <button type="button" className="rounded p-1 text-destructive hover:bg-background disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能删除' : '删除连接'} disabled={connected} data-delete-connection onClick={event => { event.stopPropagation(); void manager.deleteConnection(connection.id); }}><Trash2 className="h-3.5 w-3.5" /></button>
@@ -65,7 +66,7 @@ function ConnectionItem({ connection, manager }: { connection: Connection; manag
   );
 }
 
-export function ConnectionList({ manager, query }: ConnectionListProps) {
+export function ConnectionList({ manager, query, collapsed = false }: ConnectionListProps) {
   useSyncExternalStore(subscribeCurrentSessionId, getCurrentSessionId, () => null);
   const listRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -155,17 +156,19 @@ export function ConnectionList({ manager, query }: ConnectionListProps) {
   const visible = manager.connections.filter(connection => matchesConnection(connection, query));
   if (!visible.length) return <div className="p-4 text-center text-xs text-muted-foreground">{manager.connections.length ? '没有匹配的连接' : '没有保存的连接'}</div>;
   const groups = groupConnections(visible, manager.groupOrder);
-  const renderItems = (items: Connection[]) => items.map(connection => <ConnectionItem key={connection.id} connection={connection} manager={manager} />);
+  const renderItems = (items: Connection[]) => items.map(connection => <ConnectionItem key={connection.id} connection={connection} manager={manager} collapsed={collapsed} />);
   return (
-    <div ref={listRef} className="grid select-none gap-1 overflow-y-auto p-2" data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>
+    <div ref={listRef} className={`grid select-none gap-1 overflow-y-auto ${collapsed ? 'px-1 py-2' : 'p-2'}`} data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>
       <div className="grid gap-1" data-connection-default-items>{renderItems(getUngroupedConnections(visible))}</div>
       {groups.map(group => {
-        const collapsed = manager.isGroupCollapsed(group.name);
+        const groupCollapsed = manager.isGroupCollapsed(group.name);
         return <section key={group.name} data-connection-group data-group={group.name} className="grid gap-1">
-          <button type="button" className="flex cursor-pointer select-none items-center gap-1 rounded px-2 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted" data-connection-group-header data-group={group.name} aria-expanded={!collapsed} onClick={() => manager.toggleGroup(group.name)}>
-            {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}<span className="min-w-0 flex-1 truncate">{group.name}</span><span>{group.connections.length}</span>
+          <button type="button" className={`flex cursor-pointer select-none items-center rounded py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted ${collapsed ? 'justify-center px-0' : 'gap-1 px-2'}`} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} title={collapsed ? group.name : undefined} onClick={() => manager.toggleGroup(group.name)}>
+            {collapsed
+              ? <span className="text-[10px] tabular-nums">{group.connections.length}</span>
+              : <>{groupCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}<span className="min-w-0 flex-1 truncate">{group.name}</span><span>{group.connections.length}</span></>}
           </button>
-          {!collapsed && <div className="grid gap-1 pl-2">{renderItems(group.connections)}</div>}
+          {!groupCollapsed && <div className={`grid gap-1 ${collapsed ? '' : 'pl-2'}`}>{renderItems(group.connections)}</div>}
         </section>;
       })}
     </div>

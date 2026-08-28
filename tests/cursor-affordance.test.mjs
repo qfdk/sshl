@@ -20,3 +20,17 @@ test('collapsed sidebar is wide enough for its icon buttons', async () => {
     // 宽度类必须互斥，不能同时留在 class 里靠声明顺序决胜
     assert.doesNotMatch(sidebar, /\bw-72\b[^`]*\$\{collapsed \? 'w-1/);
 });
+
+// 收起侧边栏后仍要能看到每台机器的状态点——这是原本的行为，整块卸载连接列表就没了。
+test('collapsed sidebar still renders the connection list as status dots', async () => {
+    const [sidebar, list] = await Promise.all([
+        readFile(new URL('../ui/src/layout/Sidebar.tsx', import.meta.url), 'utf8'),
+        readFile(new URL('../ui/src/features/connections/ConnectionList.tsx', import.meta.url), 'utf8'),
+    ]);
+    // 列表不能被包在 {!collapsed && ...} 里
+    assert.doesNotMatch(sidebar, /\{!collapsed && <>[\s\S]*ConnectionList/);
+    assert.match(sidebar, /<ConnectionList[^/]*collapsed=\{collapsed\}/);
+    // 折叠态下名称隐藏、状态点保留
+    assert.match(list, /\{!collapsed && <span className="min-w-0 flex-1 truncate"/);
+    assert.match(list, /data-connection-status/);
+});
