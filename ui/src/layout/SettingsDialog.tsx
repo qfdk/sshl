@@ -1,7 +1,7 @@
-import { Check, Folder, GripVertical, Plus, Trash2, Type, X } from 'lucide-react';
+import { Check, Folder, GripVertical, Plus, RotateCcw, Trash2, Type, X } from 'lucide-react';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../lib/app-state';
-import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
+import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, DEFAULTS, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
 import { moveConnection, normalizeGroupName } from '../lib/connection-groups';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -94,6 +94,13 @@ export function SettingsDialog() {
     setFontFamily(next.fontFamily);
   };
 
+  // 只回到默认值并刷新预览，不落盘 —— 和面板里其他改动一样，要按保存才生效，
+  // 这样误点还能直接关掉不管。
+  const resetFontDefaults = () => {
+    setCustomFontFamily('');
+    applyFontChange(DEFAULTS.fontSize, DEFAULTS.fontFamily);
+  };
+
   const handleFontSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const family = selectedPreset === CUSTOM_SENTINEL ? (customFontFamily.trim() || DEFAULT_FONT_FAMILY) : selectedPreset;
@@ -164,7 +171,15 @@ export function SettingsDialog() {
           <div className="min-w-0 flex-1 p-6">
             <TabsContent value="font" id="settings-panel-font" data-settings-panel="font" className="mt-0 data-[state=inactive]:hidden">
               <Card className="border-border/80 shadow-sm">
-                <CardHeader><CardTitle className="text-base">字体</CardTitle><CardDescription>调整终端字号和字体，预览会实时更新。</CardDescription></CardHeader>
+                <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
+                  <div className="grid gap-1.5">
+                    <CardTitle className="text-base">字体</CardTitle>
+                    <CardDescription>调整终端字号和字体，预览会实时更新。</CardDescription>
+                  </div>
+                  <Button type="button" id="settings-reset" variant="outline" size="sm" className="shrink-0" onClick={resetFontDefaults}>
+                    <RotateCcw className="h-3.5 w-3.5" />还原默认
+                  </Button>
+                </CardHeader>
                 <form id="settings-form" onSubmit={handleFontSubmit}>
                   <CardContent className="grid gap-6">
                     <div className="grid gap-4 sm:grid-cols-[7rem_1fr]">
@@ -201,7 +216,7 @@ export function SettingsDialog() {
                       <div className="truncate">user@host:~$ ls -la /etc</div><div className="truncate text-slate-400">drwxr-xr-x  123 root  4096 May 24 10:42 .</div><div className="truncate">The quick brown fox 0123456789 → ✓</div><div className="truncate">Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文</div><div className="truncate">Nerd Font 图标: &#xe0b0; &#xf07b; &#xf015; &#xf120; &#xe0a0; &#xf09b; &#xf135;</div>
                     </div>
                   </CardContent>
-                  <DialogFooter className="border-t border-border px-6 py-4"><Button type="button" id="settings-cancel" variant="outline" onClick={closeWithoutSaving}>取消</Button><Button type="submit" id="settings-save"><Check className="h-4 w-4" />保存</Button></DialogFooter>
+                  <DialogFooter className="border-t border-border px-6 py-4"><Button type="submit" id="settings-save"><Check className="h-4 w-4" />保存</Button></DialogFooter>
                 </form>
               </Card>
             </TabsContent>

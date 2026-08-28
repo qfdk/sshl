@@ -25,7 +25,7 @@ const MONO_CANDIDATES = [
   'Courier New', 'Consolas',
 ];
 
-const DEFAULTS = { fontSize: 16, fontFamily: DEFAULT_FONT_FAMILY };
+export const DEFAULTS = { fontSize: 16, fontFamily: DEFAULT_FONT_FAMILY };
 const LEGACY_FONT_MIGRATION: Record<string, string> = {
   '"JetBrainsMono Nerd Font Mono", Menlo, Monaco, monospace': DEFAULTS.fontFamily,
   '"JetBrainsMono Nerd Font Mono", monospace': DEFAULTS.fontFamily,
