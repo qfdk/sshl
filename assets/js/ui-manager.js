@@ -481,12 +481,6 @@ class UIManager {
 
                 // 未连接也允许切换：终端显示 placeholder 引导重连，文件管理器仅本地可浏览。
 
-                tabs.forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-
-                tab.classList.add('active');
-                document.getElementById(`${tabId}-tab`).classList.add('active');
-
                 // 更新当前活动标签
                 setActiveTabId(tabId);
 

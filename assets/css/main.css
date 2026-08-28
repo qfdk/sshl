@@ -36,8 +36,8 @@ body {
 /* Sidebar */
 .sidebar {
   width: 250px;
-  background-color: white;
-  border-right: 1px solid var(--border-color);
+  background-color: var(--background);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   transition: width 0.3s ease;
@@ -69,10 +69,10 @@ body {
 }
 
 .primary-button {
-  background-color: var(--primary-color);
-  color: white;
+  background-color: var(--primary);
+  color: var(--primary-foreground);
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   cursor: pointer;
   font-size: 14px;
@@ -83,11 +83,11 @@ body {
 }
 
 .primary-button:hover {
-  background-color: var(--primary-hover);
+  background-color: color-mix(in oklab, var(--primary) 90%, black);
 }
 
 .primary-button svg {
-  margin-right: 8px;
+  margin-right: 0;
 }
 
 .sidebar.collapsed .primary-button span {
@@ -109,8 +109,10 @@ body {
 .search-box input {
   width: 100%;
   padding: 6px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-md);
+  background-color: var(--background);
+  color: var(--foreground);
   font-size: 14px;
 }
 
@@ -129,8 +131,8 @@ body {
 }
 
 .connection-default-items.drag-over {
-  border-radius: 6px;
-  background: rgba(86, 149, 215, 0.08);
+  border-radius: var(--radius-md);
+  background: var(--accent);
 }
 
 .connection-group {
@@ -145,7 +147,7 @@ body {
   padding: 6px 4px;
   border: 0;
   background: transparent;
-  color: #6b7280;
+  color: var(--muted-foreground);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -156,9 +158,9 @@ body {
 
 .connection-group-header:hover,
 .connection-group-header.drag-over {
-  color: var(--primary-color);
-  background-color: rgba(86, 149, 215, 0.08);
-  border-radius: 4px;
+  color: var(--accent-foreground);
+  background-color: var(--accent);
+  border-radius: var(--radius-md);
 }
 
 .connection-group-header svg {
@@ -173,7 +175,7 @@ body {
 }
 
 .connection-group-count {
-  color: #9ca3af;
+  color: var(--muted-foreground);
   font-size: 10px;
   font-weight: 600;
 }
@@ -203,13 +205,13 @@ body {
 
 .connection-drag-placeholder {
   flex: 0 0 auto;
-  border: 1px dashed rgba(86, 149, 215, 0.7);
-  border-radius: 6px;
-  background: rgba(86, 149, 215, 0.08);
+  border: 1px dashed var(--ring);
+  border-radius: var(--radius-md);
+  background: var(--accent);
 }
 
 .connection-item.drag-over {
-  outline: 1px dashed var(--primary-color);
+  outline: 1px dashed var(--ring);
   outline-offset: -1px;
 }
 
@@ -227,14 +229,16 @@ body {
   display: flex;
   align-items: center;
   padding: 8px;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   cursor: grab;
   margin-bottom: 4px;
   touch-action: none;
 }
 
 .connection-item:hover {
-  background-color: #f3f4f6;
+  background-color: var(--accent);
+  color: var(--accent-foreground);
 }
 
 .connection-status-indicator {
@@ -245,11 +249,11 @@ body {
 }
 
 .connection-status-indicator.online {
-  background-color: var(--success-color);
+  background-color: var(--success);
 }
 
 .connection-status-indicator.offline {
-  background-color: var(--secondary-color);
+  background-color: var(--muted-foreground);
 }
 
 .connection-name {
@@ -286,14 +290,14 @@ body {
   width: 100%;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 4px;
-  color: #4b5563;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
   font-size: 13px;
 }
 
 .sidebar-footer-btn:hover {
-  background-color: #f3f4f6;
-  color: #111827;
+  background-color: var(--accent);
+  color: var(--accent-foreground);
 }
 
 .sidebar.collapsed .sidebar-footer-btn span {
@@ -312,7 +316,8 @@ body {
 }
 
 .icon-button:hover {
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: var(--accent);
+  color: var(--accent-foreground);
 }
 
 .icon-button:disabled {
@@ -325,12 +330,12 @@ body {
 }
 
 .disconnect-connection {
-  color: #e74c3c;
+  color: var(--destructive);
 }
 
 .disconnect-connection:hover {
-  background-color: rgba(231, 76, 60, 0.15);
-  color: #c0392b;
+  background-color: var(--accent);
+  color: var(--destructive);
 }
 
 /* 已连接的连接项始终显示动作区，让断开按钮可见 */
@@ -341,7 +346,7 @@ body {
 .no-connections {
   padding: 12px;
   text-align: center;
-  color: var(--secondary-color);
+  color: var(--muted-foreground);
   font-size: 14px;
 }
 
@@ -355,8 +360,11 @@ body {
 
 .tabs {
   display: flex;
-  background-color: white;
-  border-bottom: 1px solid var(--border-color);
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  background-color: var(--background);
+  border-bottom: 1px solid var(--border);
 }
 
 .tab {
@@ -366,8 +374,8 @@ body {
 }
 
 .tab.active {
-  border-bottom-color: var(--primary-color);
-  color: var(--primary-color);
+  border-bottom-color: var(--primary);
+  color: var(--primary);
   font-weight: 500;
 }
 
@@ -379,6 +387,10 @@ body {
 .tab-pane {
   display: none;
   height: 100%;
+}
+
+.tab-pane[data-state="active"] {
+  display: block;
 }
 
 .tab-pane.active {
@@ -836,11 +848,12 @@ body {
 
 /* 改进连接项样式，添加激活状态 */
 .connection-item[data-active="true"] {
-  background-color: rgba(86, 149, 215, 0.1);
+  background-color: color-mix(in oklab, var(--accent) 75%, var(--background));
+  color: var(--accent-foreground);
 }
 
 .connection-item[data-active="true"]:hover {
-  background-color: rgba(86, 149, 215, 0.15);
+  background-color: var(--accent);
 }
 
 .connection-item[data-active="true"] .connection-status-indicator {
@@ -1062,11 +1075,11 @@ input[type="checkbox"] {
 /* 添加到 main.css 文件末尾 */
 
 /* 标签栏布局修改，使其支持右侧显示服务器信息 */
-.tabs {
+.tabs-header {
   display: flex;
+  flex: 0 0 auto;
   justify-content: space-between;
-  background-color: white;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .tabs-left {

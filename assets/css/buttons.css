@@ -1,9 +1,9 @@
 /* 优化新建连接按钮 */
 #new-connection-btn {
-    background-color: #5695D7;
-    color: white;
+    background-color: var(--primary);
+    color: var(--primary-foreground);
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     padding: 10px 16px;
     font-size: 14px;
     font-weight: 500;
@@ -17,13 +17,13 @@
 }
 
 #new-connection-btn:hover {
-    background-color: #4a7fb8;
+    background-color: color-mix(in oklab, var(--primary) 90%, black);
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
     transform: translateY(-1px);
 }
 
 #new-connection-btn:active {
-    background-color: #3e6da3;
+    background-color: color-mix(in oklab, var(--primary) 80%, black);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
     transform: translateY(1px);
 }
@@ -55,20 +55,20 @@
 }
 
 #toggle-sidebar:hover {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: var(--accent);
 }
 
 /* 更新连接列表项样式 */
 .connection-item {
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     margin-bottom: 6px;
     transition: background-color 0.2s;
 }
 
 .connection-item:hover {
-    background-color: rgba(86, 149, 215, 0.1);
+    background-color: var(--accent);
 }
 
 .connection-item[data-active="true"] {
-    background-color: rgba(86, 149, 215, 0.2);
+    background-color: color-mix(in oklab, var(--accent) 75%, var(--background));
 }

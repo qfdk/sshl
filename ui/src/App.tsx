@@ -1,5 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { initializeApp } from '../../assets/js/main-entry.js';
+import { getActiveTabId, setActiveTabId, subscribe } from '../../assets/js/app-state.mjs';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Sidebar } from './layout/Sidebar';
 import { Terminal } from './layout/Terminal';
 import { FileManager } from './layout/FileManager';
@@ -7,6 +9,23 @@ import { ConnectionDialog } from './layout/ConnectionDialog';
 import { SettingsDialog } from './layout/SettingsDialog';
 
 export function App() {
+  const activeTabId = useSyncExternalStore(
+    (callback) => subscribe('activeTabId', callback),
+    getActiveTabId,
+    () => 'terminal',
+  );
+
+  useEffect(() => {
+    // Vanilla managers still inspect these compatibility classes when deciding
+    // which tab needs initialization.
+    document.querySelectorAll<HTMLElement>('.tab[data-tab]').forEach((tab) => {
+      tab.classList.toggle('active', tab.dataset.tab === activeTabId);
+    });
+    document.querySelectorAll<HTMLElement>('.tab-pane').forEach((pane) => {
+      pane.classList.toggle('active', pane.id === `${activeTabId}-tab`);
+    });
+  }, [activeTabId]);
+
   useEffect(() => {
     initializeApp();
   }, []);
@@ -17,35 +36,43 @@ export function App() {
         <Sidebar />
 
         <div className="main-content">
-          <div className="tabs">
-            <div className="tabs-left">
-              <div className="tab active" data-tab="terminal">终端</div>
-              <div className="tab" data-tab="file-manager">文件管理</div>
-            </div>
-            <div className="tabs-right">
-              <div className="fill-password-group" id="fill-password-group" hidden>
-                <button id="fill-password-btn" className="fill-password-btn" type="button" title="填充密码（用于 sudo / su 等密码提示）">
-                  <span className="fill-password-icon" />
-                  <span className="fill-password-label">填充密码</span>
-                </button>
-                <button id="fill-password-menu-btn" className="fill-password-caret" type="button" title="选择账号密码 / 管理" aria-label="选择账号密码">▾</button>
-                <div id="fill-password-menu" className="fill-password-menu" hidden />
+          <Tabs value={activeTabId} onValueChange={setActiveTabId} className="tabs">
+            <div className="tabs-header">
+              <div className="tabs-left">
+                <TabsList className="h-auto justify-start rounded-none bg-transparent p-0 text-foreground">
+                  <TabsTrigger value="terminal" data-tab="terminal" className="tab">
+                    终端
+                  </TabsTrigger>
+                  <TabsTrigger value="file-manager" data-tab="file-manager" className="tab">
+                    文件管理
+                  </TabsTrigger>
+                </TabsList>
               </div>
-              <div className="server-info" id="main-server-info">
-                <span className="server-indicator" />
-                <span className="server-name">未连接</span>
+              <div className="tabs-right">
+                <div className="fill-password-group" id="fill-password-group" hidden>
+                  <button id="fill-password-btn" className="fill-password-btn" type="button" title="填充密码（用于 sudo / su 等密码提示）">
+                    <span className="fill-password-icon" />
+                    <span className="fill-password-label">填充密码</span>
+                  </button>
+                  <button id="fill-password-menu-btn" className="fill-password-caret" type="button" title="选择账号密码 / 管理" aria-label="选择账号密码">▾</button>
+                  <div id="fill-password-menu" className="fill-password-menu" hidden />
+                </div>
+                <div className="server-info" id="main-server-info">
+                  <span className="server-indicator" />
+                  <span className="server-name">未连接</span>
+                </div>
               </div>
             </div>
-          </div>
 
-          <div className="tab-content">
-            <div className="tab-pane active" id="terminal-tab">
-              <Terminal />
+            <div className="tab-content">
+              <TabsContent value="terminal" id="terminal-tab" forceMount className="tab-pane mt-0 data-[state=inactive]:hidden">
+                <Terminal />
+              </TabsContent>
+              <TabsContent value="file-manager" id="file-manager-tab" forceMount className="tab-pane mt-0 data-[state=inactive]:hidden">
+                <FileManager />
+              </TabsContent>
             </div>
-            <div className="tab-pane" id="file-manager-tab">
-              <FileManager />
-            </div>
-          </div>
+          </Tabs>
         </div>
       </div>
 
