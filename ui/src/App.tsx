@@ -1,5 +1,4 @@
-import { useEffect, useSyncExternalStore } from 'react';
-import { initializeApp } from '../../assets/js/main-entry.js';
+import { useSyncExternalStore } from 'react';
 import { getActiveTabId, setActiveTabId, subscribe } from '../../assets/js/app-state.mjs';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Sidebar } from './layout/Sidebar';
@@ -20,20 +19,7 @@ export function App() {
     () => 'terminal',
   );
 
-  useEffect(() => {
-    // Vanilla managers still inspect these compatibility classes when deciding
-    // which tab needs initialization.
-    document.querySelectorAll<HTMLElement>('.tab[data-tab]').forEach((tab) => {
-      tab.classList.toggle('active', tab.dataset.tab === activeTabId);
-    });
-    document.querySelectorAll<HTMLElement>('.tab-pane').forEach((pane) => {
-      pane.classList.toggle('active', pane.id === `${activeTabId}-tab`);
-    });
-  }, [activeTabId]);
 
-  useEffect(() => {
-    initializeApp();
-  }, []);
 
   return (
     <>

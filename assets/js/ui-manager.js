@@ -2,9 +2,7 @@
 // 处理UI相关功能
 
 import {
-    getActiveTabId,
     getCurrentSessionId,
-    setActiveTabId,
     setConnectionDialogOpen,
     setEditingConnection,
 } from './app-state.mjs';
@@ -447,38 +445,6 @@ class UIManager {
     
     // 初始化UI事件监听
     initUIEvents() {
-        // 标签切换
-        const tabs = document.querySelectorAll('.tab');
-        tabs.forEach(tab => {
-            tab.addEventListener('click', this.debounce(function () {
-                const tabId = tab.getAttribute('data-tab');
-
-                // 避免切换到相同标签
-                if (tabId === getActiveTabId()) {
-                    return;
-                }
-
-                // 设置标志以防止多次操作
-                window.terminalManager.isTabSwitching = true;
-
-                // 未连接也允许切换：终端显示 placeholder 引导重连，文件管理器仅本地可浏览。
-
-                // 更新当前活动标签
-                setActiveTabId(tabId);
-
-                // 如果切换到终端标签，调整终端大小，但不要刷新终端内容
-                if (tabId === 'terminal' && window.terminalManager.activeTerminal) {
-                    window.terminalManager.ensureTerminalVisible();
-                    setTimeout(() => {
-                        window.terminalManager.resizeTerminal();
-                        window.terminalManager.isTabSwitching = false; // 重置标志，一切完成后
-                    }, 50);
-                } else {
-                    window.terminalManager.isTabSwitching = false; // 重置其他标签的标志
-                }
-            }, 100)); // 减少防抖延迟到100毫秒提高响应性
-        });
-        
         // 侧边栏折叠/展开
         const sidebarToggle = document.getElementById('toggle-sidebar');
         const sidebar = document.querySelector('.sidebar');
@@ -498,8 +464,6 @@ class UIManager {
                     }
                 }
 
-                // 侧边栏变化后调整终端大小
-                setTimeout(() => window.terminalManager.resizeTerminal(), 300);
             });
         }
         

@@ -2,13 +2,9 @@
 // 应用程序入口文件，导入所有模块并初始化应用
 
 // 导入所有管理器模块
-import sessionManager from './session-manager.js';
-import terminalManager from './terminal-manager.js';
 import fileManager from './file-manager.js';
 import connectionManager from './connection-manager.js';
 import uiManager from './ui-manager.js';
-import { initSettingsUI } from './settings.js';
-import { initGroupManager } from './group-manager.js';
 
 // 添加自定义样式（仅注入依赖 Icons.dataUri 的右键菜单图标样式；其余已静态化到 app-runtime.css）
 function addCustomStyles() {
@@ -84,7 +80,7 @@ function addCustomStyles() {
 }
 
 // 初始化应用程序
-export function initializeApp() {
+export function initializeApp(terminalManager, sessionManager) {
     // 添加自定义样式
     addCustomStyles();
 
@@ -100,9 +96,6 @@ export function initializeApp() {
     // 初始化UI事件监听
     uiManager.initUIEvents();
 
-    // 初始化设置面板
-    initSettingsUI();
-    initGroupManager();
 
     // 设置路径输入框的回车键处理
     uiManager.setupEnterKeyHandler('remote-path', path => fileManager.loadRemoteFiles(path));
@@ -215,11 +208,6 @@ export function initializeApp() {
     });
 
     // 初始化终端占位符
-    const placeholder = document.getElementById('terminal-placeholder');
-    if (placeholder) {
-        placeholder.classList.remove('hidden');
-    }
-
     setupPaneDivider();
 }
 
@@ -278,8 +266,6 @@ function setupPaneDivider() {
 }
 
 export {
-    sessionManager,
-    terminalManager,
     fileManager,
     connectionManager,
     uiManager

@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [template, manager, groupManager, styles, icons, app, sidebar, uiManager, mainStyles] = await Promise.all([
+const [template, manager, groupManager, settingsDialog, icons, app, sidebar, uiManager, mainStyles] = await Promise.all([
     readFile(new URL('../views/partials/sidebar.ejs', import.meta.url), 'utf8'),
     readFile(new URL('../assets/js/connection-manager.js', import.meta.url), 'utf8'),
     readFile(new URL('../assets/js/group-manager.js', import.meta.url), 'utf8'),
-    readFile(new URL('../assets/css/settings-dialog.css', import.meta.url), 'utf8'),
+    readFile(new URL('../ui/src/layout/SettingsDialog.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../assets/js/icons.js', import.meta.url), 'utf8'),
     readFile(new URL('../ui/src/App.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../ui/src/layout/Sidebar.tsx', import.meta.url), 'utf8'),
@@ -32,10 +32,10 @@ test('sidebar keeps the same named groups as settings and leaves ungrouped conne
     assert.match(app, /<TabsContent[\s\S]*value="file-manager"[\s\S]*id="file-manager-tab"[\s\S]*forceMount[\s\S]*data-\[state=inactive\]:hidden/);
     assert.match(mainStyles, /\.tab-pane\[data-state="active"\]\s*\{[\s\S]*display:\s*block/);
     assert.match(app, /useSyncExternalStore/);
-    assert.match(uiManager, /setActiveTabId\(tabId\)/);
+    assert.doesNotMatch(uiManager, /setActiveTabId\(tabId\)/);
     assert.doesNotMatch(uiManager, /tabs\.forEach\(t => t\.classList\.remove\('active'\)\)/);
     assert.doesNotMatch(uiManager, /tab\.classList\.add\('active'\)/);
-    assert.match(uiManager, /setTimeout\(\(\) => window\.terminalManager\.resizeTerminal\(\), 300\)/);
+    assert.doesNotMatch(uiManager, /terminalManager\.resizeTerminal/);
 });
 
 test('group manager exposes drag sorting for persisted group order', () => {
@@ -46,5 +46,6 @@ test('group manager exposes drag sorting for persisted group order', () => {
     assert.doesNotMatch(groupManager, /draggable\s*=\s*true/);
     assert.match(groupManager, /reorderGroups/);
     assert.match(groupManager, /getConnectionGroups/);
-    assert.match(styles, /\.group-manager-drag-handle/);
+    assert.match(settingsDialog, /GripVertical/);
+    assert.match(settingsDialog, /onPointerDown/);
 });

@@ -7,13 +7,13 @@
     <% if (typeof cssBundle !== 'undefined' && cssBundle) { %>
         <link rel="stylesheet" href="<%= cssBundle %>">
     <% } else { %>
-        <% ['assets/css/fonts.css','assets/css/main.css','assets/css/settings-dialog.css','assets/css/file-manager.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
+        <% ['assets/css/fonts.css','assets/css/main.css','assets/css/file-manager.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
             <link rel="stylesheet" href="app://<%= cssPath %>">
         <% }); %>
     <% } %>
 
     <!-- xterm.css 预加载，xterm.js (~283KB) 不预加载——用 preload 提前下载
-         但不解析；terminal-manager.js 首次创建终端时才 import 解析。
+         但不解析；React 终端 hook 首次创建终端时才 import 解析。
          这样 app 启动跳过 xterm parse (~300ms)，第一次连接的代价已被 SSH 握手掩盖。 -->
     <link rel="stylesheet" href="app://node_modules/xterm/css/xterm.css">
     <!-- 运行时样式（原由 main-entry.js JS 注入，已静态化）。必须在 xterm.css 之后，
@@ -23,50 +23,7 @@
     <link rel="preload" as="script" href="app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js">
 </head>
 <body>
-<div class="app-container">
-    <%- include('partials/sidebar') %>
-
-    <div class="main-content">
-        <div class="tabs">
-            <div class="tabs-left">
-                <div class="tab active" data-tab="terminal">终端</div>
-                <div class="tab" data-tab="file-manager">文件管理</div>
-            </div>
-            <div class="tabs-right">
-                <div class="fill-password-group" id="fill-password-group" hidden>
-                    <button id="fill-password-btn" class="fill-password-btn" type="button" title="填充密码（用于 sudo / su 等密码提示）">
-                        <span class="fill-password-icon"></span>
-                        <span class="fill-password-label">填充密码</span>
-                    </button>
-                    <button id="fill-password-menu-btn" class="fill-password-caret" type="button" title="选择账号密码 / 管理" aria-label="选择账号密码">▾</button>
-                    <div id="fill-password-menu" class="fill-password-menu" hidden></div>
-                </div>
-                <div class="server-info" id="main-server-info">
-                    <span class="server-indicator"></span>
-                    <span class="server-name">未连接</span>
-                </div>
-            </div>
-        </div>
-
-        <div class="tab-content">
-            <div class="tab-pane active" id="terminal-tab">
-                <%- include('partials/terminal') %>
-            </div>
-            <div class="tab-pane" id="file-manager-tab">
-                <%- include('partials/file-manager') %>
-            </div>
-        </div>
-    </div>
-</div>
-
-<div class="status-bar">
-    <div class="connection-status">
-        <span class="status-indicator offline"></span>
-        <span class="status-text">未连接</span>
-    </div>
-</div>
-<%- include('partials/connection-dialog') %>
-<%- include('partials/settings-dialog') %>
+<div id="root"></div>
 
 <!-- Load the modular JS files through the index entry point -->
 <script src="app://assets/js/icons.js"></script>

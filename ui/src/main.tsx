@@ -3,7 +3,6 @@ import { App } from './App';
 import './index.css';
 import '../../assets/css/fonts.css';
 import '../../assets/css/main.css';
-import '../../assets/css/settings-dialog.css';
 import '../../assets/css/file-manager.css';
 import '../../assets/css/terminal.css';
 import '../../assets/css/buttons.css';

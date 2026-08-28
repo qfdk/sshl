@@ -177,7 +177,7 @@ export function ConnectionDialog() {
           id="connection-dialog"
           forceMount
           showCloseButton
-          className={`max-w-2xl ${open ? 'active' : ''}`}
+          className="max-w-2xl"
         >
           <DialogHeader className="border-b border-border pb-4">
             <DialogTitle className="flex items-center gap-2 text-xl">
@@ -186,28 +186,30 @@ export function ConnectionDialog() {
             </DialogTitle>
           </DialogHeader>
 
-          <form id="connection-form" className="!p-0 grid gap-5" onSubmit={handleSubmit}>
+          {/* Select stays outside the form so Radix does not add its hidden native select fallback. */}
+          <form id="connection-form" onSubmit={handleSubmit} />
+          <div className="grid gap-5">
             <div className="grid gap-2">
               <Label htmlFor="conn-name">名称</Label>
-              <Input id="conn-name" value={form.name} onChange={event => updateField('name', event.target.value)} placeholder="我的服务器" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+              <Input id="conn-name" form="connection-form" value={form.name} onChange={event => updateField('name', event.target.value)} placeholder="我的服务器" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="conn-group">分组 <span className="text-xs font-normal text-muted-foreground">（可选）</span></Label>
-              <Input id="conn-group" value={form.group} onChange={event => updateField('group', event.target.value)} placeholder="例如：生产环境、开发环境" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+              <Input id="conn-group" form="connection-form" value={form.group} onChange={event => updateField('group', event.target.value)} placeholder="例如：生产环境、开发环境" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
             </div>
             <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">
               <div className="grid gap-2">
                 <Label htmlFor="conn-host">主机</Label>
-                <Input id="conn-host" value={form.host} onChange={event => updateField('host', event.target.value)} placeholder="example.com 或 192.168.1.1" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                <Input id="conn-host" form="connection-form" value={form.host} onChange={event => updateField('host', event.target.value)} placeholder="example.com 或 192.168.1.1" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="conn-port">端口</Label>
-                <Input id="conn-port" type="number" value={form.port} onChange={event => updateField('port', event.target.value)} min="1" max="65535" autoComplete="off" />
+                <Input id="conn-port" form="connection-form" type="number" value={form.port} onChange={event => updateField('port', event.target.value)} min="1" max="65535" autoComplete="off" />
               </div>
             </div>
             <div className="grid gap-2">
               <Label htmlFor="conn-username">用户名</Label>
-              <Input id="conn-username" value={form.username} onChange={event => updateField('username', event.target.value)} placeholder="root" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+              <Input id="conn-username" form="connection-form" value={form.username} onChange={event => updateField('username', event.target.value)} placeholder="root" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
             </div>
             <div className="grid gap-2">
               <Label htmlFor="auth-type">认证方式</Label>
@@ -224,20 +226,20 @@ export function ConnectionDialog() {
             {form.authType === 'password' ? (
               <div className="grid gap-2">
                 <Label htmlFor="conn-password">密码</Label>
-                <Input id="conn-password" type="password" value={form.password} onChange={event => updateField('password', event.target.value)} autoComplete="new-password" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                <Input id="conn-password" form="connection-form" type="password" value={form.password} onChange={event => updateField('password', event.target.value)} autoComplete="new-password" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
               </div>
             ) : (
               <>
                 <div className="grid gap-2">
                   <Label htmlFor="conn-private-key-path">私钥文件</Label>
                   <div className="flex gap-2">
-                    <Input id="conn-private-key-path" value={form.privateKey} onChange={event => updateField('privateKey', event.target.value)} readOnly autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                    <Input id="conn-private-key-path" form="connection-form" value={form.privateKey} onChange={event => updateField('privateKey', event.target.value)} readOnly autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
                     <Button type="button" id="browse-private-key" variant="outline" className="shrink-0" onClick={handleBrowsePrivateKey}><FolderOpen className="h-4 w-4" />浏览</Button>
                   </div>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="conn-passphrase">私钥密码 (可选)</Label>
-                  <Input id="conn-passphrase" type="password" value={form.passphrase} onChange={event => updateField('passphrase', event.target.value)} autoComplete="new-password" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                  <Input id="conn-passphrase" form="connection-form" type="password" value={form.passphrase} onChange={event => updateField('passphrase', event.target.value)} autoComplete="new-password" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
                 </div>
               </>
             )}
@@ -247,9 +249,9 @@ export function ConnectionDialog() {
             </div>
             <DialogFooter className="border-t border-border pt-5">
               <Button type="button" id="cancel-connection" variant="outline" onClick={() => handleOpenChange(false)}><X className="h-4 w-4" />取消</Button>
-              <Button type="submit" id="connection-submit-btn">{editingConnection ? <Save className="h-4 w-4" /> : <ArrowRight className="h-4 w-4" />}{editingConnection ? '保存' : '连接'}</Button>
+              <Button type="submit" form="connection-form" id="connection-submit-btn">{editingConnection ? <Save className="h-4 w-4" /> : <ArrowRight className="h-4 w-4" />}{editingConnection ? '保存' : '连接'}</Button>
             </DialogFooter>
-          </form>
+          </div>
         </DialogContent>
       </Dialog>
 

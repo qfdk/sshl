@@ -8,6 +8,7 @@ import {
     moveConnection,
 } from './connection-groups.mjs';
 import {
+    getActiveTabId,
     getCurrentSessionId,
     setConnectionDialogOpen,
     setEditingConnection,
@@ -542,8 +543,7 @@ class ConnectionManager {
                         window.fileManager.fileManagerInitialized = false;
                         
                         // 如果当前活动标签是文件管理器，立即初始化它
-                        const activeTab = document.querySelector('.tab.active');
-                        if (activeTab && activeTab.getAttribute('data-tab') === 'file-manager') {
+                        if (getActiveTabId() === 'file-manager') {
                             // 显示文件管理器加载状态
                             window.uiManager.showFileManagerLoading(true);
                             // 延迟初始化以确保UI已更新
@@ -617,8 +617,7 @@ class ConnectionManager {
             window.fileManager.fileManagerInitialized = false;
 
             // 如果当前活动标签是文件管理器，立即初始化它
-            const activeTab = document.querySelector('.tab.active');
-            if (activeTab && activeTab.getAttribute('data-tab') === 'file-manager') {
+            if (getActiveTabId() === 'file-manager') {
                 // 显示文件管理器加载状态
                 window.uiManager.showFileManagerLoading(true);
 
@@ -745,11 +744,8 @@ class ConnectionManager {
                 // 重置文件管理器状态
                 window.fileManager.fileManagerInitialized = false;
 
-                // 获取当前激活的标签
-                const currentActiveTab = document.querySelector('.tab.active');
-
                 // 如果文件管理器标签处于活动状态，现在初始化它
-                if (currentActiveTab && currentActiveTab.getAttribute('data-tab') === 'file-manager') {
+                if (getActiveTabId() === 'file-manager') {
                     // 显示加载状态
                     window.uiManager.showFileManagerLoading(true);
 
@@ -760,10 +756,6 @@ class ConnectionManager {
                     }, 100);
                 }
 
-                // 保持当前激活的标签类型
-                if (currentActiveTab) {
-                    currentActiveTab.click();
-                }
             } else {
                 alert(`连接失败: ${result ? result.error || 'unknown error' : 'unknown error'}`);
             }
@@ -879,13 +871,8 @@ class ConnectionManager {
                 // 重置文件管理器状态
                 window.fileManager.fileManagerInitialized = false;
 
-                // 获取当前激活的标签
-                const activeTab = document.querySelector('.tab.active');
-                if (activeTab) {
-                    const tabId = activeTab.getAttribute('data-tab');
-                    
-                    // 如果当前活动标签是文件管理器，初始化它
-                    if (tabId === 'file-manager') {
+                // 如果当前活动标签是文件管理器，初始化它
+                if (getActiveTabId() === 'file-manager') {
                         // 显示加载状态
                         window.uiManager.showFileManagerLoading(true);
                         
@@ -894,10 +881,6 @@ class ConnectionManager {
                             window.fileManager.initFileManager(result.sessionId);
                             window.fileManager.fileManagerInitialized = true;
                         }, 100);
-                    }
-                    
-                    // 触发标签点击以确保UI状态一致
-                    activeTab.click();
                 }
             } else {
                 alert(`连接失败: ${result.error}`);

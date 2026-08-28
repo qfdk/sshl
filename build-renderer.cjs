@@ -4,7 +4,7 @@
  *   1. Mirror ./assets, ./views, and the xterm npm packages into ./src/.
  *   2. Render views/index.ejs to ./src/index.html with Tauri-friendly paths
  *      (no app:// protocol, no /node_modules, ipc-bridge.js injected before main).
- *   3. Patch terminal-manager.js's hard-coded app:// xterm paths to use vendor/.
+ *   3. Keep legacy renderer assets compatible with the React entry point.
  */
 const fs = require('fs');
 const path = require('path');
@@ -41,17 +41,12 @@ fs.copyFileSync(path.join(NODE_MODULES, 'xterm-addon-fit/lib/xterm-addon-fit.js'
 fs.copyFileSync(path.join(NODE_MODULES, 'xterm-addon-canvas/lib/xterm-addon-canvas.js'), path.join(OUT_DIR, 'vendor/xterm-addon-canvas/lib/xterm-addon-canvas.js'));
 fs.copyFileSync(path.join(NODE_MODULES, 'xterm-addon-unicode11/lib/xterm-addon-unicode11.js'), path.join(OUT_DIR, 'vendor/xterm-addon-unicode11/lib/xterm-addon-unicode11.js'));
 
-// 2. Patch terminal-manager.js's hard-coded app:// xterm references
-const tmPath = path.join(OUT_DIR, 'assets/js/terminal-manager.js');
-const tmSrc = fs.readFileSync(tmPath, 'utf8').replace(/app:\/\/node_modules\//g, 'vendor/');
-fs.writeFileSync(tmPath, tmSrc);
-
-// 2.5 合并 CSS bundle —— 减少 app:// 资源往返（7 个 CSS → 1 个）。
+// 2.5 合并 CSS bundle —— 减少 app:// 资源往返（5 个 CSS → 1 个）。
 //     顺序须与 index.ejs 原 CSS 数组一致以保留层叠优先级。
 //     app-runtime.css 不入 bundle：它必须在 xterm.css 之后单独加载（见 index.ejs）。
 const CSS_ORDER = [
   'fonts.css', 'main.css',
-  'settings-dialog.css', 'file-manager.css', 'terminal.css', 'buttons.css',
+  'file-manager.css', 'terminal.css', 'buttons.css',
 ];
 const bundleCss = CSS_ORDER
   .map((name) => `/* === ${name} === */\n${fs.readFileSync(path.join(OUT_DIR, 'assets/css', name), 'utf8')}`)

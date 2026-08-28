@@ -1,4 +1,5 @@
 import { ChevronLeft, Plus, Settings } from 'lucide-react';
+import { setSettingsDialogOpen } from '../../../assets/js/app-state.mjs';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 
@@ -24,7 +25,7 @@ export function Sidebar() {
       <div className="connection-list" id="connection-list" />
 
       <div className="sidebar-footer">
-        <Button id="open-settings-btn" variant="ghost" className="icon-button sidebar-footer-btn" title="设置">
+        <Button id="open-settings-btn" variant="ghost" className="icon-button sidebar-footer-btn" title="设置" onClick={() => setSettingsDialogOpen(true)}>
           <Settings className="h-4 w-4" />
           <span>设置</span>
         </Button>
