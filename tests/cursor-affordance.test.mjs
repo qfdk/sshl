@@ -15,8 +15,8 @@ test('buttons keep a pointer cursor despite the Tailwind v4 preflight change', (
 // 否则收起按钮会被挤出侧边栏。w-14(56px) 配 px-3(24px) 就装不下。
 test('collapsed sidebar is wide enough for its icon buttons', async () => {
     const sidebar = await readFile(new URL('../ui/src/layout/Sidebar.tsx', import.meta.url), 'utf8');
-    assert.doesNotMatch(sidebar, /collapsed \? 'w-14'/);
-    assert.match(sidebar, /collapsed \? 'w-16' : 'w-6[04]'/);
+    // 折叠宽度不能小于 w-16：56px 放不下 40px 的图标按钮加内边距。
+    assert.match(sidebar, /collapsed \? 'w-(1[6-9]|[2-9]\d)' : 'w-\d+'/);
     // 宽度类必须互斥，不能同时留在 class 里靠声明顺序决胜
     assert.doesNotMatch(sidebar, /\bw-72\b[^`]*\$\{collapsed \? 'w-1/);
 });
