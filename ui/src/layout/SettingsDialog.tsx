@@ -10,6 +10,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { cn } from '../lib/utils';
 
 const subscribeSettingsDialogOpen = (callback: () => void) => subscribe('settingsDialogOpen', callback);
 const inputClassName = 'h-10 w-full';
@@ -27,7 +28,15 @@ export function SettingsDialog() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [assignments, setAssignments] = useState<Map<string, string>>(new Map());
   const [newGroupName, setNewGroupName] = useState('');
+  // 拖动中只记录落点，松手才提交。原先在 pointermove 里直接改数据，列表会边拖边重排，
+  // 鼠标下的行不断变化，很难放准。
+  // 分组改动只存在本地，必须点保存才写入。没有脏标记时用户无从判断改动是否生效，
+  // 关掉对话框还会静默丢失。
+  const [savedSnapshot, setSavedSnapshot] = useState('');
   const [draggedGroup, setDraggedGroup] = useState<string | null>(null);
+  const [groupDropBefore, setGroupDropBefore] = useState<string | null | undefined>(undefined);
+  const groupDragRef = useRef<{ name: string; pointerId: number; startY: number; active: boolean } | null>(null);
+  const groupDropRef = useRef<string | null | undefined>(undefined);
   const snapshotRef = useRef<ReturnType<typeof getTerminalSettings> | null>(null);
 
   useEffect(() => {
@@ -45,6 +54,9 @@ export function SettingsDialog() {
   }, [open]);
 
 
+  const snapshotOf = (map: Map<string, string>, list: string[]) =>
+    JSON.stringify([[...map.entries()].sort(), list]);
+
   const loadGroups = async () => {
     try {
       const appWindow = window as AppWindow;
@@ -54,9 +66,11 @@ export function SettingsDialog() {
       ]);
       const nextConnections = Array.isArray(connectionResult) ? connectionResult : [];
       const nextGroups = Array.isArray(groupResult) ? groupResult.map(normalizeGroupName).filter(Boolean) : [];
+      const nextAssignments = new Map<string, string>(nextConnections.map((connection: Connection) => [connection.id, normalizeGroupName(connection.group)]));
       setConnections(nextConnections);
       setGroups(nextGroups);
-      setAssignments(new Map(nextConnections.map((connection: Connection) => [connection.id, normalizeGroupName(connection.group)])));
+      setAssignments(nextAssignments);
+      setSavedSnapshot(snapshotOf(nextAssignments, nextGroups));
     } catch (error) {
       console.error('加载分组管理失败:', error);
       alert(`加载分组管理失败: ${(error as Error).message || error}`);
@@ -117,6 +131,32 @@ export function SettingsDialog() {
     setAssignments(previous => new Map([...previous].map(([id, group]) => [id, group === name ? '' : group])));
   };
 
+  const setGroupDrop = (before: string | null | undefined) => {
+    groupDropRef.current = before;
+    setGroupDropBefore(before);
+  };
+
+  // 收尾挂 window：指针可能在容器外松开，否则拖拽状态会卡住。
+  const finishGroupDrag = (event: PointerEvent) => {
+    const drag = groupDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const before = groupDropRef.current;
+    groupDragRef.current = null;
+    setDraggedGroup(null);
+    setGroupDrop(undefined);
+    if (!drag.active || event.type === 'pointercancel' || before === undefined) return;
+    moveGroup(drag.name, before);
+  };
+
+  useEffect(() => {
+    window.addEventListener('pointerup', finishGroupDrag, true);
+    window.addEventListener('pointercancel', finishGroupDrag, true);
+    return () => {
+      window.removeEventListener('pointerup', finishGroupDrag, true);
+      window.removeEventListener('pointercancel', finishGroupDrag, true);
+    };
+  });
+
   const moveGroup = (name: string, targetName: string | null) => {
     if (name === targetName) return;
     setGroups(previous => {
@@ -127,6 +167,8 @@ export function SettingsDialog() {
     });
   };
 
+  const groupsDirty = savedSnapshot !== '' && savedSnapshot !== snapshotOf(assignments, groups);
+
   const saveGroups = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     try {
@@ -135,6 +177,7 @@ export function SettingsDialog() {
       if (!result?.success && result?.success !== undefined) throw new Error(result.error || '保存失败');
       await (window as AppWindow).connectionManager.loadConnections();
       await loadGroups();
+      setSettingsDialogOpen(false);
     } catch (error) {
       console.error('保存分组失败:', error);
       alert(`保存分组失败: ${(error as Error).message || error}`);
@@ -208,14 +251,34 @@ export function SettingsDialog() {
                 <form id="group-manager-form" onSubmit={saveGroups}>
                   <CardContent className="grid gap-6">
                     <div className="flex gap-2"><Input id="group-new-name" className="flex-1" placeholder="新分组名称" autoComplete="off" maxLength={40} value={newGroupName} onChange={event => setNewGroupName(event.target.value)} /><Button type="button" id="group-add-btn" onClick={addGroup} className="shrink-0"><Plus className="h-4 w-4" />添加分组</Button></div>
-                    <div className="grid gap-2"><div className="text-sm font-medium">已有分组</div><div id="group-manager-groups" className="grid max-h-56 gap-2 overflow-y-auto pr-1" onPointerUp={() => setDraggedGroup(null)} onPointerCancel={() => setDraggedGroup(null)}>
+                    <div className="grid gap-2"><div className="text-sm font-medium">已有分组</div><div id="group-manager-groups" className="grid max-h-56 gap-2 overflow-y-auto pr-1">
                       {!groups.length && <div className="p-3 text-center text-xs text-muted-foreground">还没有分组，添加后可在下方快速分配机器。</div>}
-                      {groups.map(name => <div key={name} data-group-row={name} className={`flex items-center gap-2 rounded-md border border-border bg-card p-2 ${draggedGroup === name ? 'opacity-45' : ''}`} onPointerMove={event => { if (!draggedGroup || draggedGroup === name) return; const rect = event.currentTarget.getBoundingClientRect(); moveGroup(draggedGroup, event.clientY >= rect.top + rect.height / 2 ? groups[groups.indexOf(name) + 1] || null : name); }}>
-                        <Button type="button" variant="ghost" size="icon" className="h-7 w-7 cursor-grab text-muted-foreground" aria-label={`拖拽排序：${name}`} onPointerDown={event => { event.preventDefault(); setDraggedGroup(name); }} onPointerUp={() => setDraggedGroup(null)}><GripVertical className="h-4 w-4" /></Button>
+                      {groups.map(name => {
+                        const dropAbove = draggedGroup !== null && draggedGroup !== name && groupDropBefore === name;
+                        const isLast = groups[groups.length - 1] === name;
+                        const dropBelow = draggedGroup !== null && draggedGroup !== name && isLast && groupDropBefore === null;
+                        return <div key={name} data-group-row={name} className={cn(
+                          'relative flex items-center gap-2 rounded-md border border-border bg-card p-2 transition-opacity',
+                          draggedGroup === name && 'opacity-45',
+                          dropAbove && 'before:absolute before:inset-x-1 before:-top-1 before:h-0.5 before:rounded-full before:bg-primary',
+                          dropBelow && 'after:absolute after:inset-x-1 after:-bottom-1 after:h-0.5 after:rounded-full after:bg-primary',
+                        )}
+                        onPointerMove={event => {
+                          const drag = groupDragRef.current;
+                          if (!drag || drag.pointerId !== event.pointerId) return;
+                          // 6px 阈值：低于它算点击，不能一碰就开始排序
+                          if (!drag.active && Math.abs(event.clientY - drag.startY) < 6) return;
+                          if (!drag.active) { drag.active = true; setDraggedGroup(drag.name); }
+                          if (drag.name === name) return;
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          setGroupDrop(event.clientY >= rect.top + rect.height / 2 ? groups[groups.indexOf(name) + 1] ?? null : name);
+                        }}>
+                        <Button type="button" variant="ghost" size="icon" className="h-7 w-7 cursor-grab text-muted-foreground active:cursor-grabbing" aria-label={`拖拽排序：${name}`} onPointerDown={event => { event.preventDefault(); groupDragRef.current = { name, pointerId: event.pointerId, startY: event.clientY, active: false }; }}><GripVertical className="h-4 w-4" /></Button>
                         <Input defaultValue={name} maxLength={40} aria-label={`分组名称：${name}`} onBlur={event => renameGroup(name, event.target.value)} className="h-8 flex-1" />
                         <span className="min-w-6 text-right text-xs text-muted-foreground">{connections.filter(connection => normalizeGroupName(assignments.get(connection.id)) === name).length}</span>
                         <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-destructive" title="删除分组（机器移到默认列表）" onClick={() => removeGroup(name)}><Trash2 className="h-4 w-4" /></Button>
-                      </div>)}
+                      </div>;
+                      })}
                     </div></div>
                     <div className="grid gap-2"><div className="text-sm font-medium">快速分配机器</div><div id="group-manager-connections" className="grid max-h-56 gap-2 overflow-y-auto pr-1">
                       {!connections.length && <div className="p-3 text-center text-xs text-muted-foreground">没有保存的机器。</div>}
@@ -225,7 +288,10 @@ export function SettingsDialog() {
                       {connections.map(connection => <div key={connection.id} className="flex min-h-10 items-center gap-2 rounded-md border border-border bg-card p-2"><span className="min-w-24 truncate text-sm font-medium" title={connection.name || connection.host}>{connection.name || connection.host}</span><span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground" title={`${connection.username}@${connection.host}`}>{connection.username}@{connection.host}</span><Select value={assignments.get(connection.id) || '__ungrouped__'} onValueChange={value => setAssignments(previous => new Map(previous).set(connection.id, value === '__ungrouped__' ? '' : value))}><SelectTrigger className="w-32 shrink-0" aria-label={`分组：${connection.name || connection.host}`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__ungrouped__">{UNGROUPED_LABEL}</SelectItem>{groups.map(group => <SelectItem key={group} value={group}>{group}</SelectItem>)}</SelectContent></Select></div>)}
                     </div></div>
                   </CardContent>
-                  <DialogFooter className="border-t border-border px-6 py-4"><Button type="submit" id="group-manager-save"><Check className="h-4 w-4" />保存</Button></DialogFooter>
+                  <DialogFooter className="items-center gap-3 border-t border-border px-6 py-4 sm:justify-between">
+                    <span className="text-xs text-muted-foreground">{groupsDirty ? '有未保存的改动' : '改动已保存'}</span>
+                    <Button type="submit" id="group-manager-save" disabled={!groupsDirty}><Check className="h-4 w-4" />保存</Button>
+                  </DialogFooter>
                 </form>
               </Card>
             </TabsContent>
