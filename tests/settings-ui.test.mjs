@@ -14,6 +14,10 @@ test('settings navigation provides a rendered icon for every section', () => {
     assert.match(icons, /'type':\s*'/);
 });
 
+test('hidden settings panels stay hidden until their tab is selected', () => {
+    assert.match(styles, /\.settings-panel\[hidden\]\s*\{[\s\S]*display:\s*none/);
+});
+
 test('settings panels share the same body and bottom action layout', () => {
     assert.equal((template.match(/class="settings-panel-body"/g) || []).length, 2);
     assert.equal((template.match(/class="settings-panel-footer"/g) || []).length, 2);

@@ -80,6 +80,7 @@ pub fn run() {
             local_fs::file_delete_local_directory,
             // config
             config_store::config_get_connections,
+            config_store::config_get_connection_groups,
             config_store::config_save_connection,
             config_store::config_delete_connection,
             config_store::config_apply_connection_layout,

@@ -106,9 +106,10 @@
     config: {
       // Frontend code iterates over the array directly — return raw, no wrapping.
       getConnections: () => call('config_get_connections', undefined, 'raw'),
+      getConnectionGroups: () => call('config_get_connection_groups', undefined, 'raw'),
       saveConnection: (connection) => call('config_save_connection', { connection }),
       deleteConnection: (id) => call('config_delete_connection', { id }),
-      applyConnectionLayout: (layout) => call('config_apply_connection_layout', { layout }),
+      applyConnectionLayout: (layout, groups) => call('config_apply_connection_layout', { layout, groups: groups ?? null }),
       onConnectionsUpdated: (callback) => {
         let unlistenFn = null;
         const stop = () => { try { unlistenFn && unlistenFn(); } catch {} };

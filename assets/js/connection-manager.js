@@ -2,9 +2,10 @@
 // 处理连接相关功能
 
 import {
-    UNGROUPED_LABEL,
+    getUngroupedConnections,
     groupConnections,
     matchesConnection,
+    moveConnection,
 } from './connection-groups.mjs';
 
 const COLLAPSED_GROUPS_KEY = 'sshl.collapsedConnectionGroups';
@@ -48,146 +49,126 @@ class ConnectionManager {
         if (!connectionList) return;
         this.connectionGroupSetup = true;
 
-        connectionList.addEventListener('click', (event) => {
+        connectionList.addEventListener('click', event => {
             const header = event.target.closest('.connection-group-header');
             if (!header) return;
             this.toggleConnectionGroup(header.dataset.group);
         });
 
-        connectionList.addEventListener('pointerdown', (event) => {
+        connectionList.addEventListener('pointerdown', event => {
             if (event.button !== 0 || event.target.closest('button')) return;
             const item = event.target.closest('.connection-item');
             if (!item) return;
-            this.pointerDrag = {
-                item,
-                list: connectionList,
+            this.dragState = {
+                connectionId: item.dataset.id,
                 pointerId: event.pointerId,
                 startX: event.clientX,
                 startY: event.clientY,
-                latestX: event.clientX,
-                latestY: event.clientY,
-                offsetX: event.clientX - item.getBoundingClientRect().left,
-                offsetY: event.clientY - item.getBoundingClientRect().top,
-                active: true,
-                moved: false,
-                frame: 0,
+                active: false,
+                targetGroup: null,
+                beforeId: null,
                 hoverTarget: null,
+                item,
             };
-            this.beginPointerDrag(this.pointerDrag);
-            connectionList.setPointerCapture?.(event.pointerId);
         });
 
-        connectionList.addEventListener('pointermove', (event) => {
-            const drag = this.pointerDrag;
+        connectionList.addEventListener('pointermove', event => {
+            const drag = this.dragState;
             if (!drag || drag.pointerId !== event.pointerId) return;
             const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
-            if (distance >= 6) drag.moved = true;
-            event.preventDefault();
-            drag.latestX = event.clientX;
-            drag.latestY = event.clientY;
-            if (!drag.frame) {
-                drag.frame = requestAnimationFrame(() => {
-                    drag.frame = 0;
-                    if (this.pointerDrag === drag) this.positionPointerDraggedItem(drag);
-                });
+            if (!drag.active && distance < 6) return;
+            if (!drag.active) {
+                drag.active = true;
+                drag.item.classList.add('dragging');
+                drag.item.style.pointerEvents = 'none';
+                connectionList.classList.add('pointer-dragging');
+                connectionList.setPointerCapture?.(event.pointerId);
             }
+            event.preventDefault();
+            this.updateConnectionDropTarget(event);
         });
 
-        const finishPointerDrag = async (event) => {
-            const drag = this.pointerDrag;
-            if (!drag || drag.pointerId !== event.pointerId) return;
-            this.pointerDrag = null;
-            if (drag.frame) cancelAnimationFrame(drag.frame);
-            if (drag.active) {
-                event.preventDefault();
-                drag.latestX = event.clientX;
-                drag.latestY = event.clientY;
-                if (drag.moved) this.positionPointerDraggedItem(drag);
-                if (drag.placeholder?.isConnected) drag.placeholder.replaceWith(drag.item);
-                drag.list.querySelectorAll('.drag-over').forEach(element => element.classList.remove('drag-over'));
-                drag.item.classList.remove('dragging');
-                drag.item.style.cssText = drag.originalStyle;
-                drag.list.classList.remove('pointer-dragging');
-                drag.list.releasePointerCapture?.(event.pointerId);
-                if (drag.moved) {
-                    await this.persistConnectionLayout();
-                    await this.loadConnections();
-                }
-            } else {
-                drag.list.releasePointerCapture?.(event.pointerId);
-            }
-        };
-
-        connectionList.addEventListener('pointerup', finishPointerDrag);
-        connectionList.addEventListener('pointercancel', finishPointerDrag);
+        const finish = event => this.finishConnectionDrag(event);
+        connectionList.addEventListener('pointerup', finish);
+        connectionList.addEventListener('pointercancel', finish);
+        window.addEventListener('pointerup', finish, true);
+        window.addEventListener('pointercancel', finish, true);
     }
 
-    beginPointerDrag(drag) {
-        const rect = drag.item.getBoundingClientRect();
-        const placeholder = document.createElement('div');
-        placeholder.className = 'connection-drag-placeholder';
-        placeholder.style.height = `${rect.height}px`;
-        placeholder.style.marginBottom = getComputedStyle(drag.item).marginBottom;
-        drag.placeholder = placeholder;
-        drag.originalStyle = drag.item.getAttribute('style') || '';
-        drag.baseLeft = rect.left;
-        drag.baseTop = rect.top;
-        drag.item.replaceWith(placeholder);
-        document.body.appendChild(drag.item);
-        drag.item.classList.add('dragging');
-        drag.item.style.position = 'fixed';
-        drag.item.style.left = `${rect.left}px`;
-        drag.item.style.top = `${rect.top}px`;
-        drag.item.style.width = `${rect.width}px`;
-        drag.item.style.zIndex = '3000';
-        drag.item.style.pointerEvents = 'none';
-        drag.item.style.margin = '0';
-        drag.item.style.willChange = 'transform';
-        drag.active = true;
-        drag.list.classList.add('pointer-dragging');
-    }
-
-    positionPointerDraggedItem(drag) {
-        const { list, placeholder } = drag;
-        const element = document.elementFromPoint(drag.latestX, drag.latestY);
+    updateConnectionDropTarget(event) {
+        const drag = this.dragState;
+        const connectionList = document.getElementById('connection-list');
+        if (!drag || !connectionList) return;
+        const element = document.elementFromPoint(event.clientX, event.clientY);
         const targetItem = element?.closest('.connection-item');
         const targetHeader = element?.closest('.connection-group-header');
-        if (drag.item) {
-            drag.item.style.transform = `translate3d(${drag.latestX - drag.offsetX - drag.baseLeft}px, ${drag.latestY - drag.offsetY - drag.baseTop}px, 0)`;
-        }
+        const targetDefault = element?.closest('.connection-default-items');
+        drag.hoverTarget?.classList.remove('drag-over');
+        drag.hoverTarget = null;
+        drag.targetGroup = null;
+        drag.beforeId = null;
 
-        if (drag.hoverTarget !== targetItem && drag.hoverTarget !== targetHeader) {
-            drag.hoverTarget?.classList.remove('drag-over');
-            drag.hoverTarget = null;
-        }
-
-        if (targetItem && targetItem !== drag.item) {
-            const items = targetItem.closest('.connection-group-items');
-            if (!items) return;
+        if (targetItem && targetItem.dataset.id !== drag.connectionId) {
+            const targetGroup = targetItem.closest('.connection-group')?.dataset.group || '';
             const rect = targetItem.getBoundingClientRect();
-            const next = drag.latestY < rect.top + rect.height / 2 ? targetItem : targetItem.nextSibling;
-            if (next !== placeholder) items.insertBefore(placeholder, next);
+            const placeBefore = event.clientY < rect.top + rect.height / 2;
+            const nextItem = targetItem.nextElementSibling?.closest?.('.connection-item');
+            drag.targetGroup = targetGroup;
+            drag.beforeId = placeBefore ? targetItem.dataset.id : nextItem?.dataset.id || null;
             targetItem.classList.add('drag-over');
             drag.hoverTarget = targetItem;
             return;
         }
 
         if (targetHeader) {
-            const items = targetHeader.closest('.connection-group')?.querySelector('.connection-group-items');
-            if (items && placeholder.parentElement !== items) items.appendChild(placeholder);
+            const group = targetHeader.closest('.connection-group');
+            drag.targetGroup = targetHeader.dataset.group || '';
+            if (group?.classList.contains('collapsed')) {
+                group.classList.remove('collapsed');
+            }
             targetHeader.classList.add('drag-over');
+            group?.classList.add('drag-over');
             drag.hoverTarget = targetHeader;
+            return;
+        }
+
+        if (targetDefault) {
+            drag.targetGroup = '';
+            targetDefault.classList.add('drag-over');
+            drag.hoverTarget = targetDefault;
         }
     }
 
-    async persistConnectionLayout() {
-        const layout = [...document.querySelectorAll('.connection-item')].map(item => {
-            const group = item.closest('.connection-group')?.dataset.group || UNGROUPED_LABEL;
-            return {
-                id: item.dataset.id,
-                group: group === UNGROUPED_LABEL ? '' : group,
-            };
-        });
+    finishConnectionDrag(event) {
+        const drag = this.dragState;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        this.dragState = null;
+        if (!drag.active) return;
+        event.preventDefault();
+        const connectionList = document.getElementById('connection-list');
+        drag.item.classList.remove('dragging');
+        drag.item.style.pointerEvents = '';
+        connectionList?.classList.remove('pointer-dragging');
+        connectionList?.querySelectorAll('.drag-over').forEach(element => element.classList.remove('drag-over'));
+        connectionList?.releasePointerCapture?.(event.pointerId);
+        if (event.type === 'pointercancel' || drag.targetGroup === null) return;
+
+        this.connections = moveConnection(
+            this.connections,
+            this.groupOrder,
+            drag.connectionId,
+            drag.targetGroup,
+            drag.beforeId,
+        );
+        this.renderConnectionList();
+        void this.persistConnectionLayout(this.connections);
+    }
+
+    async persistConnectionLayout(connections = this.connections) {
+        const layout = connections.map(connection => ({
+            id: connection.id,
+            group: connection.group?.trim() || '',
+        }));
         if (layout.length) await window.api.config.applyConnectionLayout(layout);
     }
 
@@ -196,12 +177,7 @@ class ConnectionManager {
         if (this.collapsedGroups.has(groupName)) this.collapsedGroups.delete(groupName);
         else this.collapsedGroups.add(groupName);
         localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...this.collapsedGroups]));
-        const group = [...document.querySelectorAll('.connection-group')].find(element => element.dataset.group === groupName);
-        if (!group) return;
-        const collapsed = this.collapsedGroups.has(groupName);
-        group.classList.toggle('collapsed', collapsed);
-        const header = group.querySelector('.connection-group-header');
-        if (header) header.setAttribute('aria-expanded', String(!collapsed));
+        this.renderConnectionList();
     }
 
 
@@ -329,76 +305,93 @@ class ConnectionManager {
     // 加载连接列表
     async loadConnections() {
         try {
-            if (!window.api || !window.api.config) {
-                console.error('API未初始化，无法加载连接');
+            if (!window.api?.config) {
+                console.error('API未初始化，无法加载连接列表');
                 return;
             }
 
-            const connections = await window.api.config.getConnections();
-            const connectionList = document.getElementById('connection-list');
-            const query = document.getElementById('connection-search')?.value || '';
-            const visibleConnections = (connections || []).filter(connection => matchesConnection(connection, query));
-
-            connectionList.innerHTML = '';
-
-            if (!visibleConnections.length) {
-                connectionList.innerHTML = connections?.length
-                    ? '<div class="no-connections">没有匹配的连接</div>'
-                    : '<div class="no-connections">没有保存的连接</div>';
-                return;
-            }
-
-            for (const group of groupConnections(visibleConnections)) {
-                const groupElement = document.createElement('section');
-                groupElement.className = 'connection-group';
-                groupElement.dataset.group = group.name;
-                const collapsed = this.collapsedGroups.has(group.name);
-                if (collapsed) groupElement.classList.add('collapsed');
-
-                const header = document.createElement('button');
-                header.type = 'button';
-                header.className = 'connection-group-header';
-                header.dataset.group = group.name;
-                header.setAttribute('aria-expanded', String(!collapsed));
-                header.innerHTML = `${window.Icons.svg(collapsed ? 'chevron-right' : 'chevron-down', 14, 2.25)}<span class="connection-group-name"></span><span class="connection-group-count">${group.connections.length}</span>`;
-                header.querySelector('.connection-group-name').textContent = group.name;
-                groupElement.appendChild(header);
-
-                const items = document.createElement('div');
-                items.className = 'connection-group-items';
-                for (const connection of group.connections) {
-                    const existingSessionInfo = window.sessionManager.getSessionByConnectionId(connection.id);
-                    const isConnected = existingSessionInfo !== null;
-                    const isActive = isConnected && existingSessionInfo.sessionId === window.currentSessionId;
-                    const statusClass = isConnected ? 'online' : 'offline';
-                    const item = document.createElement('div');
-                    item.className = 'connection-item';
-                    item.draggable = true;
-                    item.dataset.id = connection.id;
-                    item.dataset.active = isActive ? 'true' : 'false';
-                    item.dataset.connected = isConnected ? 'true' : 'false';
-                    item.dataset.name = connection.name;
-                    const disconnectBtn = isConnected ? `<button class="icon-button disconnect-connection" data-session-id="${escapeHtml(existingSessionInfo.sessionId)}" title="断开连接">${window.Icons.svg('power', 14, 2.5)}</button>` : '';
-                    item.innerHTML = `
-                        <div class="connection-status-indicator ${statusClass}"></div>
-                        <div class="connection-name">${escapeHtml(connection.name)}</div>
-                        <div class="connection-actions">
-                            ${disconnectBtn}
-                            <button class="icon-button edit-connection" data-id="${escapeHtml(connection.id)}" title="${isConnected ? '断开后才能编辑' : '编辑连接'}"${isConnected ? ' disabled' : ''}>${window.Icons.svg('square-pen', 14, 2.5)}</button>
-                            <button class="icon-button delete-connection" data-id="${escapeHtml(connection.id)}" title="${isConnected ? '断开后才能删除' : '删除连接'}"${isConnected ? ' disabled' : ''}>${window.Icons.svg('trash-2', 14, 2.5)}</button>
-                        </div>
-                    `;
-                    item.addEventListener('dblclick', async () => { await this.connectToSaved(connection.id); });
-                    item.addEventListener('mouseenter', window.uiManager.handleItemHover);
-                    item.addEventListener('mouseleave', window.uiManager.handleItemLeave);
-                    items.appendChild(item);
-                }
-                groupElement.appendChild(items);
-                connectionList.appendChild(groupElement);
-            }
+            const [connections, groupOrder] = await Promise.all([
+                window.api.config.getConnections(),
+                window.api.config.getConnectionGroups(),
+            ]);
+            this.connections = Array.isArray(connections) ? connections : [];
+            this.groupOrder = Array.isArray(groupOrder) ? groupOrder : [];
+            this.renderConnectionList();
         } catch (error) {
             console.error('加载连接失败:', error);
         }
+    }
+
+    renderConnectionList() {
+        const connectionList = document.getElementById('connection-list');
+        if (!connectionList) return;
+        const query = document.getElementById('connection-search')?.value || '';
+        const visibleConnections = this.connections.filter(connection => matchesConnection(connection, query));
+        const ungroupedConnections = getUngroupedConnections(visibleConnections);
+        const groups = groupConnections(visibleConnections, this.groupOrder);
+
+        connectionList.innerHTML = '';
+        if (!visibleConnections.length) {
+            connectionList.innerHTML = this.connections.length
+                ? '<div class="no-connections">没有匹配的连接</div>'
+                : '<div class="no-connections">没有保存的连接</div>';
+            return;
+        }
+
+        const defaultItems = document.createElement('div');
+        defaultItems.className = 'connection-default-items';
+        for (const connection of ungroupedConnections) defaultItems.appendChild(this.createConnectionItem(connection));
+        connectionList.appendChild(defaultItems);
+
+        for (const group of groups) {
+            const groupElement = document.createElement('section');
+            groupElement.className = 'connection-group';
+            groupElement.dataset.group = group.name;
+            const collapsed = this.collapsedGroups.has(group.name);
+            if (collapsed) groupElement.classList.add('collapsed');
+
+            const header = document.createElement('button');
+            header.type = 'button';
+            header.className = 'connection-group-header';
+            header.dataset.group = group.name;
+            header.setAttribute('aria-expanded', String(!collapsed));
+            header.innerHTML = `${window.Icons.svg(collapsed ? 'chevron-right' : 'chevron-down', 14, 2.25)}<span class="connection-group-name"></span><span class="connection-group-count">${group.connections.length}</span>`;
+            header.querySelector('.connection-group-name').textContent = group.name;
+            groupElement.appendChild(header);
+
+            const items = document.createElement('div');
+            items.className = 'connection-group-items';
+            for (const connection of group.connections) items.appendChild(this.createConnectionItem(connection));
+            groupElement.appendChild(items);
+            connectionList.appendChild(groupElement);
+        }
+    }
+
+    createConnectionItem(connection) {
+        const existingSessionInfo = window.sessionManager.getSessionByConnectionId(connection.id);
+        const isConnected = existingSessionInfo !== null;
+        const isActive = isConnected && existingSessionInfo.sessionId === window.currentSessionId;
+        const statusClass = isConnected ? 'online' : 'offline';
+        const item = document.createElement('div');
+        item.className = 'connection-item';
+        item.dataset.id = connection.id;
+        item.dataset.active = isActive ? 'true' : 'false';
+        item.dataset.connected = isConnected ? 'true' : 'false';
+        item.dataset.name = connection.name;
+        const disconnectBtn = isConnected ? `<button class="icon-button disconnect-connection" data-session-id="${escapeHtml(existingSessionInfo.sessionId)}" title="断开连接">${window.Icons.svg('power', 14, 2.5)}</button>` : '';
+        item.innerHTML = `
+            <div class="connection-status-indicator ${statusClass}"></div>
+            <div class="connection-name">${escapeHtml(connection.name)}</div>
+            <div class="connection-actions">
+                ${disconnectBtn}
+                <button class="icon-button edit-connection" data-id="${escapeHtml(connection.id)}" title="${isConnected ? '断开后才能编辑' : '编辑连接'}"${isConnected ? ' disabled' : ''}>${window.Icons.svg('square-pen', 14, 2.5)}</button>
+                <button class="icon-button delete-connection" data-id="${escapeHtml(connection.id)}" title="${isConnected ? '断开后才能删除' : '删除连接'}"${isConnected ? ' disabled' : ''}>${window.Icons.svg('trash-2', 14, 2.5)}</button>
+            </div>
+        `;
+        item.addEventListener('dblclick', async () => { await this.connectToSaved(connection.id); });
+        item.addEventListener('mouseenter', window.uiManager.handleItemHover);
+        item.addEventListener('mouseleave', window.uiManager.handleItemLeave);
+        return item;
     }
 
     // 更新活跃连接项：data-active 只标记当前前台会话；指示器 online/offline 基于该连接是否有活跃会话

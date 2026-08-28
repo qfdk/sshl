@@ -1,6 +1,7 @@
 // 单一本地存储：~/.sshl/sshl.db（SQLite）。
 //   connections 表 —— 连接元数据（明文）
-//   secrets 表     —— 密码/账号密码（AES-256-GCM 密文，base64），密钥仍在独立的 master.key
+//   connection_groups 表 —— 分组名称与显式排序
+//   secrets 表           —— 密码/账号密码（AES-256-GCM 密文，base64），密钥仍在独立的 master.key
 //
 // 进程内用一个全局连接 + Mutex 串行化访问（数据量极小，无并发压力）。首次访问时
 // 建表，并把旧的 connections.json / secrets.json 一次性迁移进库后删除，保持目录干净。
@@ -29,8 +30,8 @@ fn open() -> AppResult<Connection> {
     let dir = dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = db_path()?;
-    let conn = Connection::open(&path)
-        .map_err(|e| AppError::Config(format!("open sshl.db: {e}")))?;
+    let conn =
+        Connection::open(&path).map_err(|e| AppError::Config(format!("open sshl.db: {e}")))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS connections (
             id             TEXT PRIMARY KEY,
@@ -43,6 +44,10 @@ fn open() -> AppResult<Connection> {
             has_passphrase INTEGER NOT NULL DEFAULT 0,
             sort_order     INTEGER NOT NULL DEFAULT 0,
             group_name     TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS connection_groups (
+            name       TEXT PRIMARY KEY,
+            sort_order INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS secrets (
             key   TEXT PRIMARY KEY,
@@ -76,6 +81,16 @@ fn open() -> AppResult<Connection> {
     }
 
     migrate_from_json(&conn)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO connection_groups(name, sort_order)
+         SELECT TRIM(group_name), MIN(sort_order)
+         FROM connections
+         WHERE TRIM(group_name) <> ''
+         GROUP BY TRIM(group_name)",
+        [],
+    )
+    .map_err(|e| AppError::Config(format!("migrate groups: {e}")))?;
+
     Ok(conn)
 }
 

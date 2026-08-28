@@ -120,6 +120,19 @@ body {
   padding: 0 12px;
 }
 
+.connection-default-items {
+  min-height: 4px;
+}
+
+.connection-default-items:not(:empty) {
+  margin-bottom: 8px;
+}
+
+.connection-default-items.drag-over {
+  border-radius: 6px;
+  background: rgba(86, 149, 215, 0.08);
+}
+
 .connection-group {
   margin-bottom: 8px;
 }

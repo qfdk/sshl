@@ -63,6 +63,15 @@ impl ConfigStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
     }
+
+    pub(crate) async fn read_groups(&self) -> AppResult<Vec<String>> {
+        db::with_db(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT name FROM connection_groups ORDER BY sort_order, rowid")?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +95,13 @@ pub async fn config_get_connections(
     store: tauri::State<'_, ConfigStore>,
 ) -> AppResult<Vec<StoredConnection>> {
     store.read_all().await
+}
+
+#[tauri::command]
+pub async fn config_get_connection_groups(
+    store: tauri::State<'_, ConfigStore>,
+) -> AppResult<Vec<String>> {
+    store.read_groups().await
 }
 
 #[tauri::command]
@@ -157,6 +173,13 @@ pub async fn config_save_connection(
                 stored.group,
             ],
         )?;
+        if !stored.group.is_empty() {
+            conn.execute(
+                "INSERT OR IGNORE INTO connection_groups(name, sort_order)
+                 SELECT ?1, COALESCE(MAX(sort_order) + 1, 0) FROM connection_groups",
+                rusqlite::params![stored.group],
+            )?;
+        }
         Ok(())
     })?;
 
@@ -177,8 +200,23 @@ pub async fn config_apply_connection_layout(
     app: AppHandle,
     _store: tauri::State<'_, ConfigStore>,
     layout: Vec<ConnectionLayoutInput>,
+    groups: Option<Vec<String>>,
 ) -> AppResult<()> {
     db::with_db(|conn| {
+        if let Some(groups) = &groups {
+            conn.execute("DELETE FROM connection_groups", [])?;
+            let mut saved = std::collections::HashSet::new();
+            for name in groups {
+                let name = name.trim();
+                if name.is_empty() || !saved.insert(name.to_string()) {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT INTO connection_groups(name, sort_order) VALUES (?1, ?2)",
+                    rusqlite::params![name, saved.len() as i64 - 1],
+                )?;
+            }
+        }
         for (order, item) in layout.iter().enumerate() {
             conn.execute(
                 "UPDATE connections SET sort_order=?1, group_name=?2 WHERE id=?3",

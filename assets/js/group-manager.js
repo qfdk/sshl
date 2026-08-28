@@ -1,4 +1,4 @@
-import { UNGROUPED_LABEL, groupConnections, normalizeGroupName } from './connection-groups.mjs';
+import { UNGROUPED_LABEL, normalizeGroupName, reorderGroups } from './connection-groups.mjs';
 
 export function initGroupManager() {
     const dialog = document.getElementById('settings-dialog');
@@ -18,6 +18,7 @@ export function initGroupManager() {
     let groups = [];
     let assignments = new Map();
     let loaded = false;
+    let draggedGroup = null;
 
     function switchTab(name) {
         for (const button of tabs) {
@@ -37,6 +38,13 @@ export function initGroupManager() {
             for (const name of groups) {
                 const row = document.createElement('div');
                 row.className = 'group-manager-group-row';
+                row.dataset.group = name;
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = 'group-manager-drag-handle';
+                handle.title = '拖拽调整分组顺序';
+                handle.setAttribute('aria-label', `拖拽排序：${name}`);
+                handle.innerHTML = window.Icons.svg('grip-vertical', 15, 2.25);
                 const input = document.createElement('input');
                 input.type = 'text';
                 input.value = name;
@@ -50,9 +58,9 @@ export function initGroupManager() {
                 remove.type = 'button';
                 remove.className = 'icon-button group-manager-delete';
                 remove.dataset.group = name;
-                remove.title = '删除分组（机器移到未分组）';
+                remove.title = '删除分组（机器移到默认列表）';
                 remove.innerHTML = window.Icons.svg('trash-2', 14, 2.25);
-                row.append(input, count, remove);
+                row.append(handle, input, count, remove);
                 groupsContainer.appendChild(row);
             }
         }
@@ -93,12 +101,13 @@ export function initGroupManager() {
     async function load() {
         if (loaded) return;
         try {
-            const result = await window.api.config.getConnections();
-            connections = Array.isArray(result) ? result : [];
-            groups = groupConnections(connections)
-                .map(group => group.name)
-                .filter(name => name !== UNGROUPED_LABEL);
-            assignments = new Map(connections.map(connection => [connection.id, connection.group || '']));
+            const [connectionResult, groupResult] = await Promise.all([
+                window.api.config.getConnections(),
+                window.api.config.getConnectionGroups(),
+            ]);
+            connections = Array.isArray(connectionResult) ? connectionResult : [];
+            groups = Array.isArray(groupResult) ? groupResult.map(normalizeGroupName).filter(Boolean) : [];
+            assignments = new Map(connections.map(connection => [connection.id, normalizeGroupName(connection.group)]));
             loaded = true;
             render();
         } catch (error) {
@@ -122,6 +131,72 @@ export function initGroupManager() {
         render();
         newGroupInput.focus();
     });
+
+    let groupDrag = null;
+
+    const finishGroupDrag = event => {
+        const drag = groupDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        groupDrag = null;
+        if (!drag.active) return;
+        event.preventDefault();
+        drag.row.classList.remove('dragging');
+        groupsContainer.classList.remove('group-dragging');
+        groupsContainer.querySelectorAll('.drag-over-before, .drag-over-after').forEach(element => {
+            element.classList.remove('drag-over-before', 'drag-over-after');
+        });
+        drag.handle.releasePointerCapture?.(event.pointerId);
+        if (event.type === 'pointercancel') {
+            groups = drag.originalGroups;
+        } else {
+            groups = [...groupsContainer.querySelectorAll('.group-manager-group-row')].map(row => row.dataset.group);
+        }
+        render();
+    };
+
+    groupsContainer.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        const handle = event.target.closest('.group-manager-drag-handle');
+        const row = handle?.closest('.group-manager-group-row');
+        if (!row) return;
+        event.preventDefault();
+        groupDrag = {
+            handle,
+            row,
+            pointerId: event.pointerId,
+            startY: event.clientY,
+            active: false,
+            originalGroups: [...groups],
+        };
+    });
+
+    groupsContainer.addEventListener('pointermove', event => {
+        const drag = groupDrag;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        if (!drag.active && Math.abs(event.clientY - drag.startY) < 6) return;
+        if (!drag.active) {
+            drag.active = true;
+            drag.row.classList.add('dragging');
+            groupsContainer.classList.add('group-dragging');
+            drag.handle.setPointerCapture?.(event.pointerId);
+        }
+        event.preventDefault();
+        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.group-manager-group-row');
+        if (!target || target === drag.row || !groupsContainer.contains(target)) return;
+        const rect = target.getBoundingClientRect();
+        const placeAfter = event.clientY >= rect.top + rect.height / 2;
+        const reference = placeAfter ? target.nextElementSibling : target;
+        if (reference !== drag.row) groupsContainer.insertBefore(drag.row, reference);
+        groupsContainer.querySelectorAll('.drag-over-before, .drag-over-after').forEach(element => {
+            element.classList.remove('drag-over-before', 'drag-over-after');
+        });
+        target.classList.add(placeAfter ? 'drag-over-after' : 'drag-over-before');
+    });
+
+    groupsContainer.addEventListener('pointerup', finishGroupDrag);
+    groupsContainer.addEventListener('pointercancel', finishGroupDrag);
+    window.addEventListener('pointerup', finishGroupDrag, true);
+    window.addEventListener('pointercancel', finishGroupDrag, true);
 
     groupsContainer.addEventListener('change', event => {
         const input = event.target.closest('input[data-group]');
@@ -150,7 +225,7 @@ export function initGroupManager() {
         event.preventDefault();
         try {
             const layout = connections.map(connection => ({ id: connection.id, group: assignments.get(connection.id) || '' }));
-            const result = await window.api.config.applyConnectionLayout(layout);
+            const result = await window.api.config.applyConnectionLayout(layout, groups);
             if (!result?.success && result?.success !== undefined) throw new Error(result.error || '保存失败');
             loaded = false;
             await window.connectionManager.loadConnections();
