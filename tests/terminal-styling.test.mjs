@@ -52,3 +52,11 @@ test('file table fixes the metadata columns and lets the name take the rest', as
     // 名称列不能再被 max-w-0 压到最窄
     assert.doesNotMatch(pane, /max-w-0 truncate px-3 py-2/);
 });
+
+// SelectTrigger 渲染成 <button>，是可标记控件。用 <label> 包住整行时，点击下拉框会
+// 触发两次（自身 + label 转发），表现为弹开又立刻关闭；点行内空白也会莫名弹开。
+test('quick-assign rows are not labels wrapping a select', async () => {
+    const settings = await readFile(new URL('../ui/src/layout/SettingsDialog.tsx', import.meta.url), 'utf8');
+    assert.doesNotMatch(settings, /<label key=\{connection\.id\}/);
+    assert.match(settings, /<div key=\{connection\.id\}/);
+});
