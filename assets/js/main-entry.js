@@ -84,7 +84,7 @@ function addCustomStyles() {
 }
 
 // 初始化应用程序
-function initializeApp() {
+export function initializeApp() {
     // 添加自定义样式
     addCustomStyles();
 
@@ -275,29 +275,6 @@ function setupPaneDivider() {
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
     });
-}
-
-// 检测es模块兼容性
-function isEsModulesSupported() {
-    try {
-        new Function('import("")');
-        return true;
-    } catch (err) {
-        return false;
-    }
-}
-
-// 如果不支持ES模块，显示一个错误信息
-if (!isEsModulesSupported()) {
-    document.body.innerHTML = `
-        <div style="padding: 20px; text-align: center; font-family: sans-serif;">
-            <h2>浏览器不支持</h2>
-            <p>您的浏览器不支持现代JavaScript模块系统，请升级到最新版本的浏览器。</p>
-        </div>
-    `;
-} else {
-    // 当文档加载完成时执行初始化
-    document.addEventListener('DOMContentLoaded', initializeApp);
 }
 
 export {

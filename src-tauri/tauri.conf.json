@@ -4,7 +4,10 @@
   "version": "0.2.8",
   "identifier": "me.qfdk.sshl",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm vite",
+    "beforeBuildCommand": "pnpm vite build"
   },
   "app": {
     "withGlobalTauri": true,

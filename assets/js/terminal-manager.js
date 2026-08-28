@@ -1,6 +1,10 @@
 // terminal-manager.js
 // 专门处理终端相关功能
 
+import { Terminal } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import { CanvasAddon } from 'xterm-addon-canvas';
+import { Unicode11Addon } from 'xterm-addon-unicode11';
 import { getTerminalSettings } from './settings.js';
 import {
     getActiveTabId,
@@ -193,7 +197,7 @@ function createXtermInstance(options) {
 // （它需要已挂载的 DOM）。加载失败时静默回退 DOM renderer，不影响基本可用性。
 function loadCanvasRenderer(term) {
     try {
-        term.loadAddon(new CanvasAddon.CanvasAddon());
+        term.loadAddon(new CanvasAddon());
     } catch (err) {
         console.warn('[terminal] canvas renderer 加载失败，回退 DOM renderer:', err);
     }
@@ -288,12 +292,12 @@ class TerminalManager {
         const buildTerminal = (resolve, reject) => {
             try {
                 const term = createXtermInstance(options);
-                const fitAddon = new FitAddon.FitAddon();
+                const fitAddon = new FitAddon();
                 term.loadAddon(fitAddon);
                 // Unicode 11 宽度表：默认 Unicode 6 把绝大多数 emoji 算成 1 格，
                 // Apple Color Emoji 字形实占 2 格 → 被右侧 cell 背景盖掉（看似"显示不出来"）。
                 // '11' 与 VS Code / Hyper 出货配置一致；更激进（graphemes）会与远端 wcwidth 失配。
-                term.loadAddon(new Unicode11Addon.Unicode11Addon());
+                term.loadAddon(new Unicode11Addon());
                 term.unicode.activeVersion = '11';
                 term.open(container);
                 loadCanvasRenderer(term);
@@ -312,38 +316,7 @@ class TerminalManager {
             }
         };
 
-        // canvas renderer 也要就绪，否则首次走动态加载、二次走 else 分支时 CanvasAddon 缺失。
-        if (!window.Terminal || !window.FitAddon || !window.CanvasAddon || !window.Unicode11Addon) {
-            // 动态加载脚本：xterm → fit → canvas，全部就绪后再创建终端
-            return new Promise((resolve, reject) => {
-                const loadScript = (src, label) => new Promise((res, rej) => {
-                    const el = document.createElement('script');
-                    el.src = src;
-                    el.onload = res;
-                    el.onerror = () => {
-                        console.error(`加载 ${label} 失败`);
-                        rej(new Error(`Failed to load ${label}`));
-                    };
-                    document.head.appendChild(el);
-                });
-
-                // 加载样式
-                const xtermStylesheet = document.createElement('link');
-                xtermStylesheet.rel = 'stylesheet';
-                xtermStylesheet.href = 'app://node_modules/xterm/css/xterm.css';
-                document.head.appendChild(xtermStylesheet);
-
-                loadScript('app://node_modules/xterm/lib/xterm.js', 'xterm.js')
-                    .then(() => loadScript('app://node_modules/xterm-addon-fit/lib/xterm-addon-fit.js', 'xterm-addon-fit.js'))
-                    .then(() => loadScript('app://node_modules/xterm-addon-canvas/lib/xterm-addon-canvas.js', 'xterm-addon-canvas.js'))
-                    .then(() => loadScript('app://node_modules/xterm-addon-unicode11/lib/xterm-addon-unicode11.js', 'xterm-addon-unicode11.js'))
-                    .then(() => buildTerminal(resolve, reject))
-                    .catch(reject);
-            });
-        } else {
-            // 脚本已加载，直接创建终端
-            return new Promise((resolve, reject) => buildTerminal(resolve, reject));
-        }
+        return new Promise((resolve, reject) => buildTerminal(resolve, reject));
     }
     
     // 判断终端光标所在行是否为密码提示（sudo / ssh 等）。供「填充密码」按钮按需显隐。
