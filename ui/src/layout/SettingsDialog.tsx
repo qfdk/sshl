@@ -121,7 +121,10 @@ export function SettingsDialog() {
 
   const renameGroup = (oldName: string, value: string) => {
     const newName = value.trim();
-    if (!newName || (newName !== oldName && groups.includes(newName))) return;
+    // 名字没变就什么都别做。这是 onBlur 触发的：点下拉框会让输入框失焦，若照样
+    // setState，整列表会重渲染并打断 Select 的展开。
+    if (!newName || newName === oldName) return;
+    if (groups.includes(newName)) return;
     setGroups(previous => previous.map(group => group === oldName ? newName : group));
     setAssignments(previous => new Map([...previous].map(([id, group]) => [id, group === oldName ? newName : group])));
   };
