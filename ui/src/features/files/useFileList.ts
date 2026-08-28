@@ -96,8 +96,14 @@ export function formatFileSize(bytes = 0) {
   return `${(bytes / Math.pow(1024, index)).toFixed(2)} ${units[index] || 'TB'}`;
 }
 
+// 固定宽度的列里日期要可预测：省掉秒，用零填充的两位数，避免宽度随内容跳动。
+const dateFormatter = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false,
+});
+
 export function formatDate(value?: number) {
-  return value ? new Date(value).toLocaleString() : '-';
+  return value ? dateFormatter.format(new Date(value)) : '-';
 }
 
 export function formatPermissions(mode?: number) {

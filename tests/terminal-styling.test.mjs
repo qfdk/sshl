@@ -41,3 +41,14 @@ test('terminal mount point carries the class the overrides target', async () => 
     const terminal = await readFile(new URL('../ui/src/layout/Terminal.tsx', import.meta.url), 'utf8');
     assert.match(terminal, /id="terminal-container"[^>]*className="terminal-container/);
 });
+
+// 文件名是这张表里唯一长度不可预测的内容，应该吃掉剩余宽度；大小/日期/所有者/权限
+// 用固定宽度，列边界才不会随目录内容左右跳动。
+test('file table fixes the metadata columns and lets the name take the rest', async () => {
+    const pane = await readFile(new URL('../ui/src/features/files/FilePane.tsx', import.meta.url), 'utf8');
+    assert.match(pane, /<Table className="table-fixed/);
+    assert.match(pane, /w-20 px-3 text-right">大小/);
+    assert.match(pane, /w-36 px-3">修改日期/);
+    // 名称列不能再被 max-w-0 压到最窄
+    assert.doesNotMatch(pane, /max-w-0 truncate px-3 py-2/);
+});

@@ -103,14 +103,14 @@ export function FilePane({
         <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>
           <ContextMenuTrigger asChild>
             <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
-              <Table className="text-xs">
+              <Table className="table-fixed text-xs">
                 <TableHeader className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
                   <TableRow>
                     <TableHead className="h-9 px-3">名称</TableHead>
-                    <TableHead className="h-9 px-3">大小</TableHead>
-                    <TableHead className="h-9 px-3">修改日期</TableHead>
-                    {isRemote && <TableHead className="h-9 px-3">所有者</TableHead>}
-                    {isRemote && <TableHead className="h-9 px-3">权限</TableHead>}
+                    <TableHead className="h-9 w-20 px-3 text-right">大小</TableHead>
+                    <TableHead className="h-9 w-36 px-3">修改日期</TableHead>
+                    {isRemote && <TableHead className="h-9 w-24 px-3">所有者</TableHead>}
+                    {isRemote && <TableHead className="h-9 w-16 px-3">权限</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -145,15 +145,15 @@ export function FilePane({
                           if (!parent) onContextTarget(entry);
                         }}
                       >
-                        <TableCell className={cn('max-w-0 truncate px-3 py-2', entry.isDirectory && 'text-primary')}>
+                        <TableCell className={cn('truncate px-3 py-2', entry.isDirectory && 'text-primary')} title={entry.name}>
                           <span className="mr-2 inline-flex align-middle">
                             {entry.isDirectory ? <Folder className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
                           </span>
                           {entry.name}
                         </TableCell>
-                        <TableCell className="whitespace-nowrap px-3 py-2">{entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
-                        <TableCell className="whitespace-nowrap px-3 py-2">{formatDate(entry.modifyTime)}</TableCell>
-                        {isRemote && <TableCell className="px-3 py-2">{entry.owner || 'unknown'}</TableCell>}
+                        <TableCell className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">{entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
+                        <TableCell className="whitespace-nowrap px-3 py-2 tabular-nums text-muted-foreground">{formatDate(entry.modifyTime)}</TableCell>
+                        {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{entry.owner || 'unknown'}</TableCell>}
                         {isRemote && (
                           <TableCell
                             className="cursor-pointer px-3 py-2"
