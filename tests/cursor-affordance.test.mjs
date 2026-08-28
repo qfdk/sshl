@@ -34,3 +34,11 @@ test('collapsed sidebar still renders the connection list as status dots', async
     assert.match(list, /\{!collapsed && <span className="min-w-0 flex-1 truncate"/);
     assert.match(list, /data-connection-status/);
 });
+
+// shadcn Button 是 inline-flex，mx-auto 对它不生效——折叠态要居中必须靠父容器 flex。
+test('collapsed sidebar centres its buttons through flex containers', async () => {
+    const sidebar = await readFile(new URL('../ui/src/layout/Sidebar.tsx', import.meta.url), 'utf8');
+    assert.doesNotMatch(sidebar, /mx-auto/);
+    assert.match(sidebar, /collapsed \? 'flex shrink-0 justify-center pt-2'/);
+    assert.match(sidebar, /collapsed \? 'flex justify-center p-2'/);
+});
