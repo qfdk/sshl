@@ -8,6 +8,7 @@ import fileManager from './file-manager.js';
 import connectionManager from './connection-manager.js';
 import uiManager from './ui-manager.js';
 import { initSettingsUI } from './settings.js';
+import { initGroupManager } from './group-manager.js';
 
 // 添加自定义样式（仅注入依赖 Icons.dataUri 的右键菜单图标样式；其余已静态化到 app-runtime.css）
 function addCustomStyles() {
@@ -103,6 +104,7 @@ function initializeApp() {
 
     // 初始化设置面板
     initSettingsUI();
+    initGroupManager();
 
     // 设置路径输入框的回车键处理
     uiManager.setupEnterKeyHandler('remote-path', path => fileManager.loadRemoteFiles(path));

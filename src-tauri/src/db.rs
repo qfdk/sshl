@@ -41,7 +41,8 @@ fn open() -> AppResult<Connection> {
             private_key    TEXT,
             has_password   INTEGER NOT NULL DEFAULT 0,
             has_passphrase INTEGER NOT NULL DEFAULT 0,
-            sort_order     INTEGER NOT NULL DEFAULT 0
+            sort_order     INTEGER NOT NULL DEFAULT 0,
+            group_name     TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS secrets (
             key   TEXT PRIMARY KEY,
@@ -49,6 +50,24 @@ fn open() -> AppResult<Connection> {
         );",
     )
     .map_err(|e| AppError::Config(format!("init schema: {e}")))?;
+
+    let mut columns = conn
+        .prepare("PRAGMA table_info(connections)")
+        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
+    let column_names = columns
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
+    let has_group_name = column_names.iter().any(|name| name == "group_name");
+    drop(columns);
+    if !has_group_name {
+        conn.execute(
+            "ALTER TABLE connections ADD COLUMN group_name TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
+    }
 
     #[cfg(unix)]
     {
@@ -89,8 +108,8 @@ fn migrate_from_json(conn: &Connection) -> AppResult<()> {
                         }
                         let _ = conn.execute(
                             "INSERT OR REPLACE INTO connections
-                             (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order)
-                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                             (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order,group_name)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                             rusqlite::params![
                                 id,
                                 v.get("name").and_then(|x| x.as_str()).unwrap_or(""),
@@ -101,6 +120,7 @@ fn migrate_from_json(conn: &Connection) -> AppResult<()> {
                                 v.get("hasPassword").and_then(|x| x.as_bool()).unwrap_or(false) as i64,
                                 v.get("hasPassphrase").and_then(|x| x.as_bool()).unwrap_or(false) as i64,
                                 i as i64,
+                                v.get("group").and_then(|x| x.as_str()).unwrap_or(""),
                             ],
                         );
                     }

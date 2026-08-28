@@ -58,6 +58,10 @@ body {
 .app-logo {
   font-weight: bold;
   font-size: 16px;
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  cursor: default;
 }
 
 .sidebar.collapsed .app-logo {
@@ -116,13 +120,104 @@ body {
   padding: 0 12px;
 }
 
+.connection-group {
+  margin-bottom: 8px;
+}
+
+.connection-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 4px;
+  border: 0;
+  background: transparent;
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.connection-group-header:hover,
+.connection-group-header.drag-over {
+  color: var(--primary-color);
+  background-color: rgba(86, 149, 215, 0.08);
+  border-radius: 4px;
+}
+
+.connection-group-header svg {
+  flex: 0 0 auto;
+}
+
+.connection-group-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connection-group-count {
+  color: #9ca3af;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.connection-group-items {
+  min-height: 4px;
+}
+
+.connection-group.collapsed .connection-group-items {
+  display: none;
+}
+
+.connection-item {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.connection-list.pointer-dragging,
+.connection-list.pointer-dragging .connection-item {
+  cursor: grabbing;
+}
+
+.connection-item.dragging {
+  opacity: 0.45;
+}
+
+.connection-drag-placeholder {
+  flex: 0 0 auto;
+  border: 1px dashed rgba(86, 149, 215, 0.7);
+  border-radius: 6px;
+  background: rgba(86, 149, 215, 0.08);
+}
+
+.connection-item.drag-over {
+  outline: 1px dashed var(--primary-color);
+  outline-offset: -1px;
+}
+
+.sidebar.collapsed .connection-group-header {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.sidebar.collapsed .connection-group-header > :not(svg) {
+  display: none;
+}
+
 .connection-item {
   display: flex;
   align-items: center;
   padding: 8px;
   border-radius: 4px;
-  cursor: pointer;
+  cursor: grab;
   margin-bottom: 4px;
+  touch-action: none;
 }
 
 .connection-item:hover {

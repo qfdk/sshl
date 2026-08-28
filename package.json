@@ -8,6 +8,7 @@
   "scripts": {
     "tauri": "tauri",
     "build:renderer": "node build-renderer.cjs",
+    "test": "node --test tests/*.test.mjs",
     "build": "pnpm run build:renderer && pnpm tauri build --bundles app",
     "deploy:app": "bash scripts/deploy.sh",
     "dev": "pnpm run build:renderer && pnpm tauri dev"

@@ -82,6 +82,7 @@ pub fn run() {
             config_store::config_get_connections,
             config_store::config_save_connection,
             config_store::config_delete_connection,
+            config_store::config_apply_connection_layout,
             config_store::cred_list,
             config_store::cred_set,
             config_store::cred_delete,

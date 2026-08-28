@@ -1,6 +1,12 @@
 /* Connection Dialog Improvements */
 
 /* Fix checkbox alignment */
+.form-hint {
+    color: #9ca3af;
+    font-size: 12px;
+    font-weight: 400;
+}
+
 .checkbox-container {
     display: flex;
     align-items: center;

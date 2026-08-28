@@ -294,6 +294,7 @@ export function initSettingsUI() {
         selectFamily(snapshot.fontFamily);
         syncPreview(snapshot);
         dialog.classList.add('active');
+        document.dispatchEvent(new CustomEvent('settings:opened'));
         fontSizeInput.focus();
     }
 

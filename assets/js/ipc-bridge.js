@@ -108,6 +108,7 @@
       getConnections: () => call('config_get_connections', undefined, 'raw'),
       saveConnection: (connection) => call('config_save_connection', { connection }),
       deleteConnection: (id) => call('config_delete_connection', { id }),
+      applyConnectionLayout: (layout) => call('config_apply_connection_layout', { layout }),
       onConnectionsUpdated: (callback) => {
         let unlistenFn = null;
         const stop = () => { try { unlistenFn && unlistenFn(); } catch {} };

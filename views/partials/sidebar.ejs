@@ -16,17 +16,33 @@
     </div>
 
     <div class="connection-list" id="connection-list">
-      <% if (connections && connections.length > 0) { %>
-        <% connections.forEach(function(connection) { %>
-          <div class="connection-item" data-id="<%= connection.id %>">
-            <div class="connection-status-indicator offline"></div>
-            <div class="connection-name"><%= connection.name %></div>
-            <div class="connection-actions">
-              <button class="icon-button delete-connection" data-id="<%= connection.id %>">
-                <i data-lucide="trash-2" data-size="12"></i>
-              </button>
+      <% const groupedConnections = new Map(); %>
+      <% (connections || []).forEach(function(connection) { %>
+        <% const groupName = (connection.group || '').trim() || '未分组'; %>
+        <% if (!groupedConnections.has(groupName)) groupedConnections.set(groupName, []); %>
+        <% groupedConnections.get(groupName).push(connection); %>
+      <% }); %>
+      <% if (groupedConnections.size > 0) { %>
+        <% groupedConnections.forEach(function(groupConnections, groupName) { %>
+          <section class="connection-group" data-group="<%= groupName %>">
+            <button type="button" class="connection-group-header" data-group="<%= groupName %>" aria-expanded="true">
+              <span class="connection-group-name"><%= groupName %></span>
+              <span class="connection-group-count"><%= groupConnections.length %></span>
+            </button>
+            <div class="connection-group-items">
+              <% groupConnections.forEach(function(connection) { %>
+                <div class="connection-item" data-id="<%= connection.id %>">
+                  <div class="connection-status-indicator offline"></div>
+                  <div class="connection-name"><%= connection.name %></div>
+                  <div class="connection-actions">
+                    <button class="icon-button delete-connection" data-id="<%= connection.id %>">
+                      <i data-lucide="trash-2" data-size="12"></i>
+                    </button>
+                  </div>
+                </div>
+              <% }); %>
             </div>
-          </div>
+          </section>
         <% }); %>
       <% } else { %>
         <div class="no-connections">没有保存的连接</div>

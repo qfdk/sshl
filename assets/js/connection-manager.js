@@ -1,16 +1,215 @@
 // connection-manager.js
 // 处理连接相关功能
 
+import {
+    UNGROUPED_LABEL,
+    groupConnections,
+    matchesConnection,
+} from './connection-groups.mjs';
+
+const COLLAPSED_GROUPS_KEY = 'sshl.collapsedConnectionGroups';
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+    }[char]));
+}
+
 class ConnectionManager {
     constructor() {
         this.isConnecting = false; // 连接中状态标志
         this.activeConnectionAttempt = null;
         this.connectionCancellationSetup = false;
+        this.connectionSearchSetup = false;
+        this.connectionGroupSetup = false;
+        this.draggedConnectionId = null;
+        this.collapsedGroups = new Set();
+        try {
+            const saved = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) || '[]');
+            if (Array.isArray(saved)) this.collapsedGroups = new Set(saved);
+        } catch {}
     }
+
+    setupConnectionSearch() {
+        if (this.connectionSearchSetup) return;
+        const search = document.getElementById('connection-search');
+        if (!search) return;
+        this.connectionSearchSetup = true;
+        search.addEventListener('input', () => { void this.loadConnections(); });
+    }
+
+    setupConnectionGroupInteractions() {
+        if (this.connectionGroupSetup) return;
+        const connectionList = document.getElementById('connection-list');
+        if (!connectionList) return;
+        this.connectionGroupSetup = true;
+
+        connectionList.addEventListener('click', (event) => {
+            const header = event.target.closest('.connection-group-header');
+            if (!header) return;
+            this.toggleConnectionGroup(header.dataset.group);
+        });
+
+        connectionList.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0 || event.target.closest('button')) return;
+            const item = event.target.closest('.connection-item');
+            if (!item) return;
+            this.pointerDrag = {
+                item,
+                list: connectionList,
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                latestX: event.clientX,
+                latestY: event.clientY,
+                offsetX: event.clientX - item.getBoundingClientRect().left,
+                offsetY: event.clientY - item.getBoundingClientRect().top,
+                active: true,
+                moved: false,
+                frame: 0,
+                hoverTarget: null,
+            };
+            this.beginPointerDrag(this.pointerDrag);
+            connectionList.setPointerCapture?.(event.pointerId);
+        });
+
+        connectionList.addEventListener('pointermove', (event) => {
+            const drag = this.pointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+            if (distance >= 6) drag.moved = true;
+            event.preventDefault();
+            drag.latestX = event.clientX;
+            drag.latestY = event.clientY;
+            if (!drag.frame) {
+                drag.frame = requestAnimationFrame(() => {
+                    drag.frame = 0;
+                    if (this.pointerDrag === drag) this.positionPointerDraggedItem(drag);
+                });
+            }
+        });
+
+        const finishPointerDrag = async (event) => {
+            const drag = this.pointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            this.pointerDrag = null;
+            if (drag.frame) cancelAnimationFrame(drag.frame);
+            if (drag.active) {
+                event.preventDefault();
+                drag.latestX = event.clientX;
+                drag.latestY = event.clientY;
+                if (drag.moved) this.positionPointerDraggedItem(drag);
+                if (drag.placeholder?.isConnected) drag.placeholder.replaceWith(drag.item);
+                drag.list.querySelectorAll('.drag-over').forEach(element => element.classList.remove('drag-over'));
+                drag.item.classList.remove('dragging');
+                drag.item.style.cssText = drag.originalStyle;
+                drag.list.classList.remove('pointer-dragging');
+                drag.list.releasePointerCapture?.(event.pointerId);
+                if (drag.moved) {
+                    await this.persistConnectionLayout();
+                    await this.loadConnections();
+                }
+            } else {
+                drag.list.releasePointerCapture?.(event.pointerId);
+            }
+        };
+
+        connectionList.addEventListener('pointerup', finishPointerDrag);
+        connectionList.addEventListener('pointercancel', finishPointerDrag);
+    }
+
+    beginPointerDrag(drag) {
+        const rect = drag.item.getBoundingClientRect();
+        const placeholder = document.createElement('div');
+        placeholder.className = 'connection-drag-placeholder';
+        placeholder.style.height = `${rect.height}px`;
+        placeholder.style.marginBottom = getComputedStyle(drag.item).marginBottom;
+        drag.placeholder = placeholder;
+        drag.originalStyle = drag.item.getAttribute('style') || '';
+        drag.baseLeft = rect.left;
+        drag.baseTop = rect.top;
+        drag.item.replaceWith(placeholder);
+        document.body.appendChild(drag.item);
+        drag.item.classList.add('dragging');
+        drag.item.style.position = 'fixed';
+        drag.item.style.left = `${rect.left}px`;
+        drag.item.style.top = `${rect.top}px`;
+        drag.item.style.width = `${rect.width}px`;
+        drag.item.style.zIndex = '3000';
+        drag.item.style.pointerEvents = 'none';
+        drag.item.style.margin = '0';
+        drag.item.style.willChange = 'transform';
+        drag.active = true;
+        drag.list.classList.add('pointer-dragging');
+    }
+
+    positionPointerDraggedItem(drag) {
+        const { list, placeholder } = drag;
+        const element = document.elementFromPoint(drag.latestX, drag.latestY);
+        const targetItem = element?.closest('.connection-item');
+        const targetHeader = element?.closest('.connection-group-header');
+        if (drag.item) {
+            drag.item.style.transform = `translate3d(${drag.latestX - drag.offsetX - drag.baseLeft}px, ${drag.latestY - drag.offsetY - drag.baseTop}px, 0)`;
+        }
+
+        if (drag.hoverTarget !== targetItem && drag.hoverTarget !== targetHeader) {
+            drag.hoverTarget?.classList.remove('drag-over');
+            drag.hoverTarget = null;
+        }
+
+        if (targetItem && targetItem !== drag.item) {
+            const items = targetItem.closest('.connection-group-items');
+            if (!items) return;
+            const rect = targetItem.getBoundingClientRect();
+            const next = drag.latestY < rect.top + rect.height / 2 ? targetItem : targetItem.nextSibling;
+            if (next !== placeholder) items.insertBefore(placeholder, next);
+            targetItem.classList.add('drag-over');
+            drag.hoverTarget = targetItem;
+            return;
+        }
+
+        if (targetHeader) {
+            const items = targetHeader.closest('.connection-group')?.querySelector('.connection-group-items');
+            if (items && placeholder.parentElement !== items) items.appendChild(placeholder);
+            targetHeader.classList.add('drag-over');
+            drag.hoverTarget = targetHeader;
+        }
+    }
+
+    async persistConnectionLayout() {
+        const layout = [...document.querySelectorAll('.connection-item')].map(item => {
+            const group = item.closest('.connection-group')?.dataset.group || UNGROUPED_LABEL;
+            return {
+                id: item.dataset.id,
+                group: group === UNGROUPED_LABEL ? '' : group,
+            };
+        });
+        if (layout.length) await window.api.config.applyConnectionLayout(layout);
+    }
+
+    toggleConnectionGroup(groupName) {
+        if (!groupName) return;
+        if (this.collapsedGroups.has(groupName)) this.collapsedGroups.delete(groupName);
+        else this.collapsedGroups.add(groupName);
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...this.collapsedGroups]));
+        const group = [...document.querySelectorAll('.connection-group')].find(element => element.dataset.group === groupName);
+        if (!group) return;
+        const collapsed = this.collapsedGroups.has(groupName);
+        group.classList.toggle('collapsed', collapsed);
+        const header = group.querySelector('.connection-group-header');
+        if (header) header.setAttribute('aria-expanded', String(!collapsed));
+    }
+
 
     setupConnectionCancellation() {
         if (this.connectionCancellationSetup) return;
         this.connectionCancellationSetup = true;
+        this.setupConnectionSearch();
+        this.setupConnectionGroupInteractions();
 
         document.addEventListener('keydown', (event) => {
             const attempt = this.activeConnectionAttempt;
@@ -137,66 +336,71 @@ class ConnectionManager {
 
             const connections = await window.api.config.getConnections();
             const connectionList = document.getElementById('connection-list');
+            const query = document.getElementById('connection-search')?.value || '';
+            const visibleConnections = (connections || []).filter(connection => matchesConnection(connection, query));
 
             connectionList.innerHTML = '';
 
-            if (connections && connections.length > 0) {
-                connections.forEach(connection => {
-                    // 检查该连接是否有活跃会话（不论是否在前台）
+            if (!visibleConnections.length) {
+                connectionList.innerHTML = connections?.length
+                    ? '<div class="no-connections">没有匹配的连接</div>'
+                    : '<div class="no-connections">没有保存的连接</div>';
+                return;
+            }
+
+            for (const group of groupConnections(visibleConnections)) {
+                const groupElement = document.createElement('section');
+                groupElement.className = 'connection-group';
+                groupElement.dataset.group = group.name;
+                const collapsed = this.collapsedGroups.has(group.name);
+                if (collapsed) groupElement.classList.add('collapsed');
+
+                const header = document.createElement('button');
+                header.type = 'button';
+                header.className = 'connection-group-header';
+                header.dataset.group = group.name;
+                header.setAttribute('aria-expanded', String(!collapsed));
+                header.innerHTML = `${window.Icons.svg(collapsed ? 'chevron-right' : 'chevron-down', 14, 2.25)}<span class="connection-group-name"></span><span class="connection-group-count">${group.connections.length}</span>`;
+                header.querySelector('.connection-group-name').textContent = group.name;
+                groupElement.appendChild(header);
+
+                const items = document.createElement('div');
+                items.className = 'connection-group-items';
+                for (const connection of group.connections) {
                     const existingSessionInfo = window.sessionManager.getSessionByConnectionId(connection.id);
                     const isConnected = existingSessionInfo !== null;
-                    // 是否是当前前台会话
-                    const isActive = isConnected &&
-                        existingSessionInfo.sessionId === window.currentSessionId;
-
+                    const isActive = isConnected && existingSessionInfo.sessionId === window.currentSessionId;
                     const statusClass = isConnected ? 'online' : 'offline';
-
                     const item = document.createElement('div');
                     item.className = 'connection-item';
-                    item.setAttribute('data-id', connection.id);
-                    item.setAttribute('data-active', isActive ? 'true' : 'false');
-                    item.setAttribute('data-connected', isConnected ? 'true' : 'false');
-                    // 储存名称，但不使用title属性（会显示原生工具提示）
-                    item.setAttribute('data-name', connection.name);
-
-                    const disconnectBtn = isConnected ? `
-                            <button class="icon-button disconnect-connection" data-session-id="${existingSessionInfo.sessionId}" title="断开连接">
-                                ${window.Icons.svg('power', 14, 2.5)}
-                            </button>` : '';
-
+                    item.draggable = true;
+                    item.dataset.id = connection.id;
+                    item.dataset.active = isActive ? 'true' : 'false';
+                    item.dataset.connected = isConnected ? 'true' : 'false';
+                    item.dataset.name = connection.name;
+                    const disconnectBtn = isConnected ? `<button class="icon-button disconnect-connection" data-session-id="${escapeHtml(existingSessionInfo.sessionId)}" title="断开连接">${window.Icons.svg('power', 14, 2.5)}</button>` : '';
                     item.innerHTML = `
                         <div class="connection-status-indicator ${statusClass}"></div>
-                        <div class="connection-name">${connection.name}</div>
+                        <div class="connection-name">${escapeHtml(connection.name)}</div>
                         <div class="connection-actions">
                             ${disconnectBtn}
-                            <button class="icon-button edit-connection" data-id="${connection.id}" title="${isConnected ? '断开后才能编辑' : '编辑连接'}"${isConnected ? ' disabled' : ''}>
-                                ${window.Icons.svg('square-pen', 14, 2.5)}
-                            </button>
-                            <button class="icon-button delete-connection" data-id="${connection.id}" title="${isConnected ? '断开后才能删除' : '删除连接'}"${isConnected ? ' disabled' : ''}>
-                                ${window.Icons.svg('trash-2', 14, 2.5)}
-                            </button>
+                            <button class="icon-button edit-connection" data-id="${escapeHtml(connection.id)}" title="${isConnected ? '断开后才能编辑' : '编辑连接'}"${isConnected ? ' disabled' : ''}>${window.Icons.svg('square-pen', 14, 2.5)}</button>
+                            <button class="icon-button delete-connection" data-id="${escapeHtml(connection.id)}" title="${isConnected ? '断开后才能删除' : '删除连接'}"${isConnected ? ' disabled' : ''}>${window.Icons.svg('trash-2', 14, 2.5)}</button>
                         </div>
                     `;
-
-                    // 添加双击事件
-                    item.addEventListener('dblclick', async () => {
-                        await this.connectToSaved(connection.id);
-                    });
-
-                    // 添加鼠标悬停事件，用于显示自定义工具提示
+                    item.addEventListener('dblclick', async () => { await this.connectToSaved(connection.id); });
                     item.addEventListener('mouseenter', window.uiManager.handleItemHover);
                     item.addEventListener('mouseleave', window.uiManager.handleItemLeave);
-
-                    connectionList.appendChild(item);
-                });
-            } else {
-                connectionList.innerHTML = '<div class="no-connections">没有保存的连接</div>';
+                    items.appendChild(item);
+                }
+                groupElement.appendChild(items);
+                connectionList.appendChild(groupElement);
             }
         } catch (error) {
             console.error('加载连接失败:', error);
         }
     }
-    
+
     // 更新活跃连接项：data-active 只标记当前前台会话；指示器 online/offline 基于该连接是否有活跃会话
     // 已连接但还没断开按钮的项动态注入按钮；已断开则移除按钮
     updateActiveConnectionItem(activeConnectionId) {
@@ -450,6 +654,7 @@ class ConnectionManager {
         document.getElementById('conn-host').value = connection.host || '';
         document.getElementById('conn-port').value = connection.port || 22;
         document.getElementById('conn-username').value = connection.username || '';
+        document.getElementById('conn-group').value = connection.group || '';
         
         // 设置认证类型 —— 后端不持久化 authType，根据 privateKey 字段推断
         const inferredAuthType = connection.authType
@@ -642,6 +847,7 @@ class ConnectionManager {
                 host: document.getElementById('conn-host').value,
                 port: parseInt(document.getElementById('conn-port').value),
                 username: document.getElementById('conn-username').value,
+                group: document.getElementById('conn-group').value.trim(),
                 authType: authType
             };
 
@@ -774,6 +980,7 @@ class ConnectionManager {
                 host: document.getElementById('conn-host').value,
                 port: parseInt(document.getElementById('conn-port').value),
                 username: document.getElementById('conn-username').value,
+                group: document.getElementById('conn-group').value.trim(),
                 authType: authType
             };
 

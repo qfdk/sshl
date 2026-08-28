@@ -1,7 +1,7 @@
 /* 终端设置对话框 —— 紧凑、现代风 */
 
 .settings-dialog-content {
-    max-width: 460px;
+    max-width: 680px;
     padding: 0;
     overflow: hidden;
 }
@@ -35,6 +35,58 @@
     background-color: #f3f4f6;
     color: #111827;
 }
+
+.settings-layout {
+    display: flex;
+    min-height: 390px;
+}
+
+.settings-sidebar {
+    display: flex;
+    flex: 0 0 138px;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 8px;
+    border-right: 1px solid #eef0f3;
+    background: #f8fafc;
+}
+
+.settings-tab {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 10px 11px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #6b7280;
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+}
+
+.settings-tab:hover {
+    background: #eef4fb;
+    color: #374151;
+}
+
+.settings-tab.active {
+    background: #e5effb;
+    color: #3176b8;
+    font-weight: 600;
+}
+
+.settings-tab svg {
+    flex: 0 0 auto;
+}
+
+.settings-panels {
+    min-width: 0;
+    flex: 1;
+}
+
 
 #settings-form {
     padding: 16px;
@@ -178,4 +230,118 @@
 
 .settings-actions {
     margin-top: 4px;
+}
+
+.group-manager-create {
+    display: flex;
+    gap: 8px;
+    padding: 16px 20px 8px;
+}
+
+.group-manager-create input {
+    flex: 1;
+}
+
+.group-manager-create button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--primary-color);
+    border-radius: 6px;
+    padding: 8px 12px;
+    background: var(--primary-color);
+    color: white;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.group-manager-create button:hover {
+    background: var(--primary-hover);
+}
+
+.group-manager-section {
+    padding: 8px 20px;
+}
+
+.group-manager-section-title {
+    margin-bottom: 8px;
+    color: #6b7280;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#group-manager-groups,
+#group-manager-connections {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.group-manager-group-row,
+.group-manager-connection-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 6px 8px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #fafafa;
+}
+
+.group-manager-group-row input {
+    min-width: 0;
+    flex: 1;
+}
+
+.group-manager-group-count {
+    min-width: 24px;
+    color: #9ca3af;
+    font-size: 12px;
+    text-align: right;
+}
+
+.group-manager-delete {
+    color: #ef4444;
+}
+
+.group-manager-connection-row {
+    cursor: default;
+}
+
+.group-manager-connection-name {
+    min-width: 120px;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-manager-connection-detail {
+    flex: 1;
+    overflow: hidden;
+    color: #9ca3af;
+    font-family: monospace;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-manager-connection-row select {
+    width: 150px;
+    padding: 5px 8px;
+}
+
+.group-manager-empty {
+    padding: 12px;
+    color: #9ca3af;
+    font-size: 12px;
+    text-align: center;
+}
+
+.group-manager-actions {
+    padding: 12px 20px 16px;
 }

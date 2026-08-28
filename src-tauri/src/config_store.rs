@@ -24,6 +24,8 @@ pub struct StoredConnection {
     pub has_password: bool,
     #[serde(default)]
     pub has_passphrase: bool,
+    #[serde(default)]
+    pub group: String,
 }
 
 fn default_port() -> u16 {
@@ -42,7 +44,7 @@ impl ConfigStore {
     pub(crate) async fn read_all(&self) -> AppResult<Vec<StoredConnection>> {
         db::with_db(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id,name,host,port,username,private_key,has_password,has_passphrase
+                "SELECT id,name,host,port,username,private_key,has_password,has_passphrase,group_name
                  FROM connections ORDER BY sort_order, rowid",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -55,6 +57,7 @@ impl ConfigStore {
                     private_key: r.get(5)?,
                     has_password: r.get::<_, i64>(6)? != 0,
                     has_passphrase: r.get::<_, i64>(7)? != 0,
+                    group: r.get(8)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -74,6 +77,8 @@ pub struct SaveConnectionInput {
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub passphrase: Option<String>,
+    #[serde(default)]
+    pub group: String,
 }
 
 #[tauri::command]
@@ -112,6 +117,7 @@ pub async fn config_save_connection(
         private_key: connection.private_key,
         has_password,
         has_passphrase,
+        group: connection.group.trim().to_string(),
     };
 
     // upsert：已存在则保留原排序，否则追加到末尾（sort_order = max+1）
@@ -131,12 +137,13 @@ pub async fn config_save_connection(
             })?;
         conn.execute(
             "INSERT INTO connections
-                (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order,group_name)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, host=excluded.host, port=excluded.port,
                 username=excluded.username, private_key=excluded.private_key,
-                has_password=excluded.has_password, has_passphrase=excluded.has_passphrase",
+                has_password=excluded.has_password, has_passphrase=excluded.has_passphrase,
+                group_name=excluded.group_name",
             rusqlite::params![
                 stored.id,
                 stored.name,
@@ -147,6 +154,7 @@ pub async fn config_save_connection(
                 stored.has_password as i64,
                 stored.has_passphrase as i64,
                 order,
+                stored.group,
             ],
         )?;
         Ok(())
@@ -154,6 +162,33 @@ pub async fn config_save_connection(
 
     let _ = app.emit("connections:updated", ());
     Ok(stored)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionLayoutInput {
+    pub id: String,
+    #[serde(default)]
+    pub group: String,
+}
+
+#[tauri::command]
+pub async fn config_apply_connection_layout(
+    app: AppHandle,
+    _store: tauri::State<'_, ConfigStore>,
+    layout: Vec<ConnectionLayoutInput>,
+) -> AppResult<()> {
+    db::with_db(|conn| {
+        for (order, item) in layout.iter().enumerate() {
+            conn.execute(
+                "UPDATE connections SET sort_order=?1, group_name=?2 WHERE id=?3",
+                rusqlite::params![order as i64, item.group.trim(), item.id],
+            )?;
+        }
+        Ok(())
+    })?;
+    let _ = app.emit("connections:updated", ());
+    Ok(())
 }
 
 #[tauri::command]
