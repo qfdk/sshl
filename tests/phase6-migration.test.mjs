@@ -1,74 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { access, readFile } from 'node:fs/promises';
-
-const files = {
-    main: '../assets/js/main-entry.js',
-    connectionManager: '../assets/js/connection-manager.js',
-    terminal: '../ui/src/features/terminal/useTerminal.ts',
-    terminalUi: '../ui/src/layout/Terminal.tsx',
-    session: '../ui/src/lib/session-manager.ts',
-    settings: '../ui/src/layout/SettingsDialog.tsx',
-    settingsLib: '../ui/src/lib/terminal-settings.ts',
-    renderer: '../build-renderer.cjs',
-    index: '../views/index.ejs',
-};
-const content = Object.fromEntries(await Promise.all(Object.entries(files).map(async ([key, file]) => [key, await readFile(new URL(file, import.meta.url), 'utf8')])));
-
-test('phase 6 removes the three vanilla modules and old partials', async () => {
-    for (const file of ['../assets/js/terminal-manager.js', '../assets/js/settings.js', '../assets/js/session-manager.js', '../assets/css/settings-dialog.css', '../views/partials/settings-dialog.ejs', '../views/partials/terminal.ejs']) {
-        await assert.rejects(access(new URL(file, import.meta.url)));
-    }
-    assert.doesNotMatch(content.main, /terminal-manager|settings\.js|session-manager\.js|initSettingsUI|initGroupManager/);
-});
-
-test('terminal React hook preserves renderer ordering and the seven timing-sensitive paths', () => {
-    const source = content.terminal;
-    assert.match(source, /term\.open\(container[\s\S]*loadCanvasRenderer\(term\)/);
-    assert.match(source, /alignScreenToBottom/);
-    assert.match(source, /attachResizeHandler/);
-    assert.match(source, /getAnsiPalette[\s\S]*paletteToHex[\s\S]*cellBgHex[\s\S]*sampleEdgeBg[\s\S]*parseOscColor/);
-    assert.match(source, /term\.loadAddon\(new Unicode11Addon\(\)\)/);
-    assert.match(source, /allowProposedApi: true/);
-    assert.match(source, /terminalsRef/);
-});
-
-test('terminal UI uses a React ref mount point and the hook', () => {
-    assert.match(content.terminalUi, /useRef/);
-    assert.match(content.terminalUi, /ref=\{containerRef\}/);
-    assert.match(content.terminalUi, /useTerminal\(containerRef\)/);
-});
-
-test('session state remains a simple module-level Map', () => {
-    assert.match(content.session, /new Map/);
-    assert.match(content.session, /getSessionByConnectionId/);
-    assert.match(content.session, /currentRemotePath/);
-    assert.doesNotMatch(content.session, /zustand|redux/);
-});
-
-// 首次连接的缓冲快照由后端作为首个 ssh:data 事件发出，与后续数据同通道保序。
-// 曾经的写法是 invoke getSessionBuffer 拿快照再 term.write，那样快照会和事件通道乱序，
-// 导致欢迎横幅重复渲染——这是已修过的 bug，不能退回。
-// 唯一允许拉缓冲区的地方是 switchToSession 里「为已有会话新建终端实例」的回放路径。
-test('connect paths activate atomically instead of pulling the buffer over invoke', () => {
-    const source = content.connectionManager;
-    assert.equal(
-        (source.match(/原子激活：缓冲快照由后端作为首个 ssh:data 事件发出/g) || []).length,
-        3,
-        'all three connect paths must activate atomically',
-    );
-    assert.equal(
-        (source.match(/getSessionBuffer/g) || []).length,
-        1,
-        'the buffer may only be pulled when replaying into a freshly created terminal',
-    );
-    assert.match(source, /terminalResult\.isNew[\s\S]{0,240}getSessionBuffer/);
-});
-
-// #terminal-tab 的显隐由 shadcn Tabs 的 data-state 控制。旧规则
-// `#terminal-tab:not(.active){display:none}` 依赖 vanilla tab 写上的 .active 类，
-// 那个类随 tab 迁移消失后，这条规则会把整个终端区永久隐藏（表现为白屏）。
-test('terminal visibility is not gated on the removed .active class', async () => {
-    const runtime = await readFile(new URL('../assets/css/app-runtime.css', import.meta.url), 'utf8');
-    assert.doesNotMatch(runtime, /#terminal-tab:not\(\.active\)/);
-});
+const root = new URL('../', import.meta.url);
+const source = Object.fromEntries(await Promise.all(Object.entries({ connection: 'ui/src/features/connections/useConnections.ts', terminal: 'ui/src/features/terminal/useTerminal.ts', terminalUi: 'ui/src/layout/Terminal.tsx', session: 'ui/src/lib/session-manager.ts', app: 'ui/src/App.tsx', ipc: 'ui/src/lib/ipc.ts', index: 'ui/src/main.tsx' }).map(async ([key, file]) => [key, await readFile(new URL(file, root), 'utf8')])));
+test('phase 8 removes the legacy renderer tree', async () => { for (const file of ['assets', 'views', 'build-renderer.cjs']) await assert.rejects(access(new URL(file, root))); });
+test('terminal React hook preserves renderer ordering and timing-sensitive paths', () => { assert.match(source.terminal, /term\.open\(container[\s\S]*loadCanvasRenderer\(term\)/); assert.match(source.terminal, /alignScreenToBottom/); assert.match(source.terminal, /attachResizeHandler/); assert.match(source.terminal, /getAnsiPalette[\s\S]*paletteToHex[\s\S]*cellBgHex[\s\S]*sampleEdgeBg[\s\S]*parseOscColor/); assert.match(source.terminal, /term\.loadAddon\(new Unicode11Addon\(\)\)/); assert.match(source.terminal, /allowProposedApi: true/); assert.match(source.terminal, /terminalsRef/); });
+test('terminal UI uses a React ref mount point and the hook', () => { assert.match(source.terminalUi, /useRef/); assert.match(source.terminalUi, /ref=\{containerRef\}/); assert.match(source.terminalUi, /useTerminal\(containerRef\)/); });
+test('session state remains a simple module-level Map', () => { assert.match(source.session, /new Map/); assert.match(source.session, /getSessionByConnectionId/); assert.match(source.session, /currentRemotePath/); assert.doesNotMatch(source.session, /zustand|redux/); });
+test('connect paths activate atomically instead of pulling the buffer over invoke', () => { assert.equal((source.connection.match(/原子激活：缓冲快照由后端作为首个 ssh:data 事件发出/g) || []).length, 3); assert.equal((source.connection.match(/getSessionBuffer/g) || []).length, 1); assert.match(source.connection, /terminalResult\.isNew[\s\S]{0,300}getSessionBuffer/); });
+test('terminal visibility is controlled by shadcn Tabs data state', () => { assert.match(source.app, /data-\[state=inactive\]:hidden/); });
+test('IPC uses the typed Tauri modules and never the global bridge', () => { assert.match(source.ipc, /@tauri-apps\/api\/core/); assert.match(source.ipc, /@tauri-apps\/api\/event/); assert.doesNotMatch(source.ipc, /window\.__TAURI__/); });

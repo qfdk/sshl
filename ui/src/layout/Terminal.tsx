@@ -1,6 +1,5 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
-import { initializeApp } from '../../../assets/js/main-entry.js';
-import { getCurrentSessionId, subscribe } from '../../../assets/js/app-state.mjs';
+import { getCurrentSessionId, subscribe } from '../lib/app-state';
 import { useTerminal } from '../features/terminal/useTerminal';
 import sessionManager from '../lib/session-manager';
 
@@ -13,17 +12,15 @@ export function Terminal() {
 
   useEffect(() => {
     (window as Window & { terminalManager?: typeof terminalManager }).terminalManager = terminalManager;
-    initializeApp(terminalManager, sessionManager);
+    (window as Window & { sessionManager?: typeof sessionManager }).sessionManager = sessionManager;
   }, [terminalManager]);
 
   return (
-    <div className="terminal-view">
-      <div className="terminal-content">
-        <div ref={containerRef} id="terminal-container" className="terminal-container" />
-        <div id="terminal-placeholder" className={`terminal-placeholder ${sessionId ? 'hidden' : ''}`}>
-          <div className="placeholder-content">
-            <p>点击左侧连接或创建新连接开始使用</p>
-          </div>
+    <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: 'var(--term-bg, #1d1d1d)' }}>
+      <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div ref={containerRef} id="terminal-container" className="h-full w-full" />
+        <div id="terminal-placeholder" className={`absolute inset-0 grid place-items-center bg-[#1d1d1d] ${sessionId ? 'hidden' : ''}`}>
+          <div className="text-sm text-slate-300">点击左侧连接或创建新连接开始使用</div>
         </div>
       </div>
     </div>

@@ -1,8 +1,8 @@
 import { Check, Folder, GripVertical, Plus, Trash2, Type, X } from 'lucide-react';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../../../assets/js/app-state.mjs';
+import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../lib/app-state';
 import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
-import { normalizeGroupName, UNGROUPED_LABEL } from '../../../assets/js/connection-groups.mjs';
+import { normalizeGroupName, UNGROUPED_LABEL } from '../lib/connection-groups';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';

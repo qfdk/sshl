@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Download, FolderPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
-import { getActiveTabId, getCurrentSessionId, subscribe } from '../../../../assets/js/app-state.mjs';
+import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { Button } from '../../components/ui/button';
 import { Checkbox } from '../../components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog';

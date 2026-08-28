@@ -3,7 +3,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { CanvasAddon } from 'xterm-addon-canvas';
 import { Unicode11Addon } from 'xterm-addon-unicode11';
-import { getActiveTabId, getCurrentSessionId, setCurrentSessionId, subscribe } from '../../../../assets/js/app-state.mjs';
+import { getActiveTabId, getCurrentSessionId, setCurrentSessionId, subscribe } from '../../lib/app-state';
 import { getTerminalSettings } from '../../lib/terminal-settings';
 
 type AppWindow = Window & {

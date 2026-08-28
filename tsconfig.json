@@ -19,5 +19,5 @@
       "@/*": ["./ui/src/*"]
     }
   },
-  "include": ["ui/src", "assets/js"]
+  "include": ["ui/src"]
 }

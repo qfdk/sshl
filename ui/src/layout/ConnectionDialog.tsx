@@ -6,7 +6,8 @@ import {
   setConnectionDialogOpen,
   setEditingConnection,
   subscribe,
-} from '../../../assets/js/app-state.mjs';
+} from '../lib/app-state';
+import type { ConnectionManager } from '../features/connections/useConnections';
 import { Button } from '../components/ui/button';
 import { Checkbox } from '../components/ui/checkbox';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
@@ -56,10 +57,6 @@ type ConnectionRecord = {
 
 type ConnectionDetails = ConnectionForm;
 
-type ConnectionManager = {
-  submitConnection: (details: ConnectionDetails) => Promise<void>;
-  saveEditedConnection: (id: string, details: ConnectionDetails) => Promise<void>;
-};
 
 type BrowserApi = {
   file?: {
@@ -99,7 +96,7 @@ const formFromConnection = (connection: ConnectionRecord): ConnectionForm => {
   };
 };
 
-export function ConnectionDialog() {
+export function ConnectionDialog({ manager }: { manager: ConnectionManager }) {
   const open = useSyncExternalStore(
     subscribeConnectionDialogOpen,
     getConnectionDialogOpen,
@@ -160,9 +157,6 @@ export function ConnectionDialog() {
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const manager = (window as Window & { connectionManager?: ConnectionManager }).connectionManager;
-    if (!manager) return;
-
     if (editingConnection) {
       await manager.saveEditedConnection(editingConnection.id, form);
     } else {
@@ -254,10 +248,6 @@ export function ConnectionDialog() {
         </DialogContent>
       </Dialog>
 
-      <div id="loading-overlay" className="loading-overlay hidden">
-        <div className="spinner" />
-        <div className="loading-text">连接中...</div>
-      </div>
     </>
   );
 }
