@@ -175,7 +175,6 @@ export function ConnectionDialog() {
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent
           id="connection-dialog"
-          forceMount
           showCloseButton
           className="max-w-2xl"
         >

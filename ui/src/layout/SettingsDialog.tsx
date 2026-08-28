@@ -143,7 +143,7 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={nextOpen => nextOpen ? setSettingsDialogOpen(true) : closeWithoutSaving()}>
-      <DialogContent id="settings-dialog" forceMount showCloseButton={false} className="max-w-3xl p-0">
+      <DialogContent id="settings-dialog" showCloseButton={false} className="max-w-3xl p-0">
         <DialogHeader className="flex-row items-center justify-between border-b border-border px-6 py-4">
           <DialogTitle className="text-xl">设置</DialogTitle>
           <DialogClose asChild>
@@ -158,7 +158,7 @@ export function SettingsDialog() {
           </TabsList>
 
           <div className="min-w-0 flex-1 p-6">
-            <TabsContent value="font" id="settings-panel-font" data-settings-panel="font" forceMount className="mt-0 data-[state=inactive]:hidden">
+            <TabsContent value="font" id="settings-panel-font" data-settings-panel="font" className="mt-0 data-[state=inactive]:hidden">
               <Card className="border-border/80 shadow-sm">
                 <CardHeader><CardTitle className="text-base">字体</CardTitle><CardDescription>调整终端字号和字体，预览会实时更新。</CardDescription></CardHeader>
                 <form id="settings-form" onSubmit={handleFontSubmit}>
@@ -202,7 +202,7 @@ export function SettingsDialog() {
               </Card>
             </TabsContent>
 
-            <TabsContent value="groups" id="settings-panel-groups" data-settings-panel="groups" forceMount className="mt-0 data-[state=inactive]:hidden">
+            <TabsContent value="groups" id="settings-panel-groups" data-settings-panel="groups" className="mt-0 data-[state=inactive]:hidden">
               <Card className="border-border/80 shadow-sm">
                 <CardHeader><CardTitle className="text-base">分组管理</CardTitle><CardDescription>整理机器分组，拖拽连接列表即可调整顺序。</CardDescription></CardHeader>
                 <form id="group-manager-form" onSubmit={saveGroups}>

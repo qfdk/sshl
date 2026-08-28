@@ -2,10 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [template, manager, groupManager, settingsDialog, icons, app, sidebar, uiManager, mainStyles] = await Promise.all([
+const [template, manager, settingsDialog, icons, app, sidebar, uiManager, mainStyles] = await Promise.all([
     readFile(new URL('../views/partials/sidebar.ejs', import.meta.url), 'utf8'),
     readFile(new URL('../assets/js/connection-manager.js', import.meta.url), 'utf8'),
-    readFile(new URL('../assets/js/group-manager.js', import.meta.url), 'utf8'),
     readFile(new URL('../ui/src/layout/SettingsDialog.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../assets/js/icons.js', import.meta.url), 'utf8'),
     readFile(new URL('../ui/src/App.tsx', import.meta.url), 'utf8'),
@@ -38,14 +37,10 @@ test('sidebar keeps the same named groups as settings and leaves ungrouped conne
     assert.doesNotMatch(uiManager, /terminalManager\.resizeTerminal/);
 });
 
-test('group manager exposes drag sorting for persisted group order', () => {
-    assert.match(groupManager, /group-manager-drag-handle/);
-    assert.match(groupManager, /groupDrag/);
-    assert.match(groupManager, /addEventListener\('pointerdown'/);
-    assert.match(groupManager, /window\.addEventListener\('pointerup'/);
-    assert.doesNotMatch(groupManager, /draggable\s*=\s*true/);
-    assert.match(groupManager, /reorderGroups/);
-    assert.match(groupManager, /getConnectionGroups/);
-    assert.match(settingsDialog, /GripVertical/);
-    assert.match(settingsDialog, /onPointerDown/);
+// 分组排序拖拽随 group-manager.js 一起搬进了 SettingsDialog（React 实现）。
+test('group sorting drag lives in the React settings dialog', async () => {
+    const settingsDialog = await readFile(new URL('../ui/src/layout/SettingsDialog.tsx', import.meta.url), 'utf8');
+    assert.match(settingsDialog, /setDraggedGroup/);
+    assert.match(settingsDialog, /onPointerCancel/);
+    assert.match(settingsDialog, /group-manager-groups/);
 });
