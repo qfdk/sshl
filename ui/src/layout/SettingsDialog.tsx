@@ -2,7 +2,7 @@ import { Check, Folder, GripVertical, Plus, Trash2, Type, X } from 'lucide-react
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../lib/app-state';
 import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
-import { normalizeGroupName, UNGROUPED_LABEL } from '../lib/connection-groups';
+import { moveConnection, normalizeGroupName } from '../lib/connection-groups';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
@@ -27,7 +27,6 @@ export function SettingsDialog() {
   const [presets, setPresets] = useState<FontPreset[]>([]);
   const [groups, setGroups] = useState<string[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
-  const [assignments, setAssignments] = useState<Map<string, string>>(new Map());
   const [newGroupName, setNewGroupName] = useState('');
   // 拖动中只记录落点，松手才提交。原先在 pointermove 里直接改数据，列表会边拖边重排，
   // 鼠标下的行不断变化，很难放准。
@@ -51,8 +50,8 @@ export function SettingsDialog() {
   }, [open]);
 
 
-  const snapshotOf = (map: Map<string, string>, list: string[]) =>
-    JSON.stringify([[...map.entries()].sort(), list]);
+  const snapshotOf = (list: Connection[], groupList: string[]) =>
+    JSON.stringify([list.map(connection => [connection.id, normalizeGroupName(connection.group)]), groupList]);
 
   const loadGroups = async () => {
     try {
@@ -63,11 +62,9 @@ export function SettingsDialog() {
       ]);
       const nextConnections = Array.isArray(connectionResult) ? connectionResult : [];
       const nextGroups = Array.isArray(groupResult) ? groupResult.map(normalizeGroupName).filter(Boolean) : [];
-      const nextAssignments = new Map<string, string>(nextConnections.map((connection: Connection) => [connection.id, normalizeGroupName(connection.group)]));
       setConnections(nextConnections);
       setGroups(nextGroups);
-      setAssignments(nextAssignments);
-      setSavedSnapshot(snapshotOf(nextAssignments, nextGroups));
+      setSavedSnapshot(snapshotOf(nextConnections, nextGroups));
     } catch (error) {
       console.error('加载分组管理失败:', error);
       alert(`加载分组管理失败: ${(error as Error).message || error}`);
@@ -123,20 +120,20 @@ export function SettingsDialog() {
     if (!newName || newName === oldName) return;
     if (groups.includes(newName)) return;
     setGroups(previous => previous.map(group => group === oldName ? newName : group));
-    setAssignments(previous => new Map([...previous].map(([id, group]) => [id, group === oldName ? newName : group])));
+    setConnections(previous => previous.map(connection => normalizeGroupName(connection.group) === oldName ? { ...connection, group: newName } : connection));
   };
 
   const removeGroup = (name: string) => {
     setGroups(previous => previous.filter(group => group !== name));
-    setAssignments(previous => new Map([...previous].map(([id, group]) => [id, group === name ? '' : group])));
+    setConnections(previous => previous.map(connection => normalizeGroupName(connection.group) === name ? { ...connection, group: '' } : connection));
   };
 
-  const groupsDirty = savedSnapshot !== '' && savedSnapshot !== snapshotOf(assignments, groups);
+  const groupsDirty = savedSnapshot !== '' && savedSnapshot !== snapshotOf(connections, groups);
 
   const saveGroups = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     try {
-      const layout = connections.map(connection => ({ id: connection.id, group: assignments.get(connection.id) || '' }));
+      const layout = connections.map(connection => ({ id: connection.id, group: normalizeGroupName(connection.group) }));
       const result = await (window as AppWindow).api.config.applyConnectionLayout(layout, groups);
       if (!result?.success && result?.success !== undefined) throw new Error(result.error || '保存失败');
       await (window as AppWindow).connectionManager.loadConnections();
@@ -223,8 +220,7 @@ export function SettingsDialog() {
                       <GroupTree
                         connections={connections}
                         groups={groups}
-                        assignments={assignments}
-                        onAssign={(id, group) => setAssignments(previous => new Map(previous).set(id, group))}
+                        onMoveConnection={(id, group, beforeId) => setConnections(previous => moveConnection(previous, groups, id, group, beforeId) as Connection[])}
                         onReorderGroups={setGroups}
                         onRenameGroup={renameGroup}
                         onRemoveGroup={removeGroup}
