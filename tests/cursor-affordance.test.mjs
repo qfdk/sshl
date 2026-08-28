@@ -16,7 +16,7 @@ test('buttons keep a pointer cursor despite the Tailwind v4 preflight change', (
 test('collapsed sidebar is wide enough for its icon buttons', async () => {
     const sidebar = await readFile(new URL('../ui/src/layout/Sidebar.tsx', import.meta.url), 'utf8');
     assert.doesNotMatch(sidebar, /collapsed \? 'w-14'/);
-    assert.match(sidebar, /collapsed \? 'w-16' : 'w-72'/);
+    assert.match(sidebar, /collapsed \? 'w-16' : 'w-6[04]'/);
     // 宽度类必须互斥，不能同时留在 class 里靠声明顺序决胜
     assert.doesNotMatch(sidebar, /\bw-72\b[^`]*\$\{collapsed \? 'w-1/);
 });
