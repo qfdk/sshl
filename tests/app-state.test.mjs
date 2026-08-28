@@ -1,9 +1,9 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 
-const source = await readFile(new URL('../ui/src/lib/app-state.ts', import.meta.url), 'utf8');
-const state = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+// 直接 import .ts —— package.json 是 "type": "module"，Node 自己剥离类型标注。
+// 曾经这里读源码、正则去掉类型、再经 data: URL 动态导入，脆且难读。
+import * as state from '../ui/src/lib/app-state.ts';
 
 beforeEach(() => state.resetState());
 
