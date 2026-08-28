@@ -1,3 +1,5 @@
+import { getSettingsDialogOpen, setSettingsDialogOpen } from './app-state.mjs';
+
 // settings.js
 // 终端字号 / 字体设置（localStorage 持久化 + 实时应用）
 
@@ -293,13 +295,13 @@ export function initSettingsUI() {
         fontSizeInput.value = snapshot.fontSize;
         selectFamily(snapshot.fontFamily);
         syncPreview(snapshot);
-        dialog.classList.add('active');
+        setSettingsDialogOpen(true);
         document.dispatchEvent(new CustomEvent('settings:opened'));
         fontSizeInput.focus();
     }
 
     function closeDialog() {
-        dialog.classList.remove('active');
+        setSettingsDialogOpen(false);
         snapshot = null;
     }
 
@@ -317,11 +319,9 @@ export function initSettingsUI() {
     openBtn.addEventListener('click', openDialog);
     closeBtn.addEventListener('click', revertAndClose);
     cancelBtn.addEventListener('click', revertAndClose);
-    dialog.addEventListener('click', (e) => {
-        if (e.target === dialog) revertAndClose();
-    });
+    document.addEventListener('settings:close-request', revertAndClose);
     document.addEventListener('keydown', (e) => {
-        if (dialog.classList.contains('active') && e.key === 'Escape') {
+        if (getSettingsDialogOpen() && e.key === 'Escape') {
             e.preventDefault();
             revertAndClose();
         }
@@ -353,6 +353,6 @@ export function initSettingsUI() {
         setTerminalSettings(readForm(), { persist: true });
         // 保存后清除 snapshot，不再 revert
         snapshot = null;
-        dialog.classList.remove('active');
+        setSettingsDialogOpen(false);
     });
 }

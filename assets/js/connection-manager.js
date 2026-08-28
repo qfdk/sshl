@@ -9,6 +9,7 @@ import {
 } from './connection-groups.mjs';
 import {
     getCurrentSessionId,
+    setConnectionDialogOpen,
     setCurrentSessionId,
 } from './app-state.mjs';
 
@@ -684,7 +685,7 @@ class ConnectionManager {
         }
         
         // 显示对话框
-        document.getElementById('connection-dialog').classList.add('active');
+        setConnectionDialogOpen(true);
         
         // 聚焦到名称字段
         setTimeout(() => {
@@ -898,7 +899,7 @@ class ConnectionManager {
                 });
 
                 // 关闭对话框
-                document.getElementById('connection-dialog').classList.remove('active');
+                setConnectionDialogOpen(false);
                 document.getElementById('connection-form').reset();
 
                 // 初始化终端 - 先创建空白终端，稍后添加内容
@@ -1001,7 +1002,7 @@ class ConnectionManager {
                 const result = await window.api.config.saveConnection(connectionDetails);
                 if (result) {
                     // 关闭对话框
-                    document.getElementById('connection-dialog').classList.remove('active');
+                    setConnectionDialogOpen(false);
                     document.getElementById('connection-form').reset();
                     
                     // 清除编辑标记

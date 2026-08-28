@@ -1,94 +1,125 @@
-export function SettingsDialog() {
-  return (
-    <div id="settings-dialog" className="dialog">
-      <div className="dialog-content settings-dialog-content">
-        <div className="settings-header">
-          <h3>设置</h3>
-          <button type="button" id="settings-close" className="icon-button" title="关闭">
-            <i data-lucide="x" data-size="16" />
-          </button>
-        </div>
+import { Check, Folder, Plus, Type, X } from 'lucide-react';
+import { useSyncExternalStore } from 'react';
+import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../../../assets/js/app-state.mjs';
+import { Button } from '../components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { Label } from '../components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 
-        <div className="settings-layout">
-          <nav className="settings-sidebar" role="tablist" aria-label="设置分类">
-            <button type="button" className="settings-tab active" data-settings-tab="font" role="tab" aria-selected="true">
-              <i data-lucide="type" data-size="15" /><span>字体</span>
-            </button>
-            <button type="button" className="settings-tab" data-settings-tab="groups" role="tab" aria-selected="false">
-              <i data-lucide="folder" data-size="15" /><span>分组管理</span>
-            </button>
-          </nav>
-          <div className="settings-panels">
-            <section id="settings-panel-font" className="settings-panel" data-settings-panel="font">
-              <div className="settings-panel-heading">
-                <h4>字体</h4>
-                <p>调整终端字号和字体，预览会实时更新。</p>
-              </div>
-              <form id="settings-form" className="settings-panel-form">
-                <div className="settings-panel-body">
-                  <div className="settings-row">
-                    <div className="settings-field">
-                      <label htmlFor="settings-font-size">字号</label>
-                      <div className="font-size-control">
-                        <button type="button" className="font-size-step" data-step="-1" aria-label="减小">−</button>
-                        <input type="number" id="settings-font-size" min="8" max="40" step="1" required autoComplete="off" />
-                        <button type="button" className="font-size-step" data-step="1" aria-label="增大">+</button>
+const inputClassName = 'h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2';
+
+export function SettingsDialog() {
+  const open = useSyncExternalStore(
+    (callback) => subscribe('settingsDialogOpen', callback),
+    getSettingsDialogOpen,
+    () => false,
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!nextOpen) document.dispatchEvent(new CustomEvent('settings:close-request'));
+      setSettingsDialogOpen(nextOpen);
+    }}>
+      <DialogContent
+        id="settings-dialog"
+        forceMount
+        showCloseButton={false}
+        className={`max-w-3xl p-0 ${open ? 'active' : ''}`}
+      >
+        <DialogHeader className="flex-row items-center justify-between border-b border-border px-6 py-4">
+          <DialogTitle className="text-xl">设置</DialogTitle>
+          <DialogClose asChild>
+            <Button type="button" id="settings-close" variant="ghost" size="icon" title="关闭">
+              <X className="h-4 w-4" />
+              <span className="sr-only">关闭</span>
+            </Button>
+          </DialogClose>
+        </DialogHeader>
+
+        <Tabs defaultValue="font" className="flex min-h-[26rem] flex-col sm:flex-row" orientation="vertical">
+          <TabsList className="h-auto w-full shrink-0 justify-start gap-1 rounded-none border-b border-border bg-muted/40 p-3 sm:w-40 sm:flex-col sm:items-stretch sm:border-b-0 sm:border-r sm:rounded-none">
+            <TabsTrigger value="font" data-settings-tab="font" className="justify-start gap-2" role="tab">
+              <Type className="h-4 w-4" />字体
+            </TabsTrigger>
+            <TabsTrigger value="groups" data-settings-tab="groups" className="justify-start gap-2" role="tab">
+              <Folder className="h-4 w-4" />分组管理
+            </TabsTrigger>
+          </TabsList>
+
+          <div className="min-w-0 flex-1 p-6">
+            <TabsContent value="font" id="settings-panel-font" data-settings-panel="font" forceMount className="mt-0 data-[state=inactive]:hidden">
+              <Card className="border-border/80 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">字体</CardTitle>
+                  <CardDescription>调整终端字号和字体，预览会实时更新。</CardDescription>
+                </CardHeader>
+                <form id="settings-form">
+                  <CardContent className="grid gap-6">
+                    <div className="grid gap-4 sm:grid-cols-[7rem_1fr]">
+                      <div className="grid gap-2">
+                        <Label htmlFor="settings-font-size">字号</Label>
+                        <div className="flex h-10 items-center overflow-hidden rounded-md border border-input bg-background">
+                          <Button type="button" variant="ghost" size="icon" className="font-size-step h-full w-8 rounded-none" data-step="-1" aria-label="减小">−</Button>
+                          <input type="number" id="settings-font-size" className="h-full min-w-0 flex-1 border-0 bg-transparent px-1 text-center text-sm text-foreground outline-none focus:ring-0" min="8" max="40" step="1" required autoComplete="off" />
+                          <Button type="button" variant="ghost" size="icon" className="font-size-step h-full w-8 rounded-none" data-step="1" aria-label="增大">+</Button>
+                        </div>
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="settings-font-family">字体</Label>
+                        <select id="settings-font-family" className={`${inputClassName} cursor-pointer`} />
                       </div>
                     </div>
-                    <div className="settings-field settings-field-grow">
-                      <label htmlFor="settings-font-family">字体</label>
-                      <select id="settings-font-family" />
+                    <div className="grid gap-2 hidden" id="settings-custom-wrap">
+                      <Label htmlFor="settings-font-family-custom">自定义 fontFamily</Label>
+                      <input type="text" id="settings-font-family-custom" className={inputClassName} placeholder='"Cascadia Code", monospace' autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
                     </div>
-                  </div>
+                    <div className="rounded-lg bg-slate-950 p-4 font-mono text-sm leading-6 text-slate-100 shadow-inner" id="settings-preview">
+                      <div className="truncate">user@host:~$ ls -la /etc</div>
+                      <div className="truncate text-slate-400">drwxr-xr-x  123 root  4096 May 24 10:42 .</div>
+                      <div className="truncate">The quick brown fox 0123456789 → ✓</div>
+                      <div className="truncate">Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文</div>
+                      <div className="truncate">Nerd Font 图标: &#xe0b0; &#xf07b; &#xf015; &#xf120; &#xe0a0; &#xf09b; &#xf135;</div>
+                    </div>
+                  </CardContent>
+                  <DialogFooter className="border-t border-border px-6 py-4">
+                    <Button type="button" id="settings-cancel" variant="outline">取消</Button>
+                    <Button type="submit" id="settings-save"><Check className="h-4 w-4" />保存</Button>
+                  </DialogFooter>
+                </form>
+              </Card>
+            </TabsContent>
 
-                  <div className="settings-field settings-custom-row hidden" id="settings-custom-wrap">
-                    <label htmlFor="settings-font-family-custom">自定义 fontFamily</label>
-                    <input type="text" id="settings-font-family-custom" placeholder='"Cascadia Code", monospace' autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
-                  </div>
-
-                  <div className="settings-preview" id="settings-preview">
-                    <div className="settings-preview-line">user@host:~$ ls -la /etc</div>
-                    <div className="settings-preview-line dim">drwxr-xr-x  123 root  4096 May 24 10:42 .</div>
-                    <div className="settings-preview-line">The quick brown fox 0123456789 → ✓</div>
-                    <div className="settings-preview-line">Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文</div>
-                    <div className="settings-preview-line">Nerd Font 图标: &#xe0b0; &#xf07b; &#xf015; &#xf120; &#xe0a0; &#xf09b; &#xf135;</div>
-                  </div>
-                </div>
-                <div className="settings-panel-footer">
-                  <button type="button" id="settings-cancel">取消</button>
-                  <button type="submit" id="settings-save"><i data-lucide="check" data-size="16" />保存</button>
-                </div>
-              </form>
-            </section>
-
-            <section id="settings-panel-groups" className="settings-panel" data-settings-panel="groups" hidden>
-              <div className="settings-panel-heading">
-                <h4>分组管理</h4>
-                <p>整理机器分组，拖拽连接列表即可调整顺序。</p>
-              </div>
-              <form id="group-manager-form" className="settings-panel-form">
-                <div className="settings-panel-body">
-                  <div className="group-manager-create">
-                    <input type="text" id="group-new-name" placeholder="新分组名称" autoComplete="off" maxLength={40} />
-                    <button type="button" id="group-add-btn"><i data-lucide="plus" data-size="15" />添加分组</button>
-                  </div>
-                  <div className="group-manager-section">
-                    <div className="group-manager-section-title">已有分组</div>
-                    <div id="group-manager-groups" />
-                  </div>
-                  <div className="group-manager-section">
-                    <div className="group-manager-section-title">快速分配机器</div>
-                    <div id="group-manager-connections" />
-                  </div>
-                </div>
-                <div className="settings-panel-footer">
-                  <button type="submit" id="group-manager-save"><i data-lucide="check" data-size="16" />保存</button>
-                </div>
-              </form>
-            </section>
+            <TabsContent value="groups" id="settings-panel-groups" data-settings-panel="groups" forceMount className="mt-0 data-[state=inactive]:hidden">
+              <Card className="border-border/80 shadow-sm">
+                <CardHeader>
+                  <CardTitle className="text-base">分组管理</CardTitle>
+                  <CardDescription>整理机器分组，拖拽连接列表即可调整顺序。</CardDescription>
+                </CardHeader>
+                <form id="group-manager-form">
+                  <CardContent className="grid gap-6">
+                    <div className="flex gap-2">
+                      <input type="text" id="group-new-name" className={inputClassName} placeholder="新分组名称" autoComplete="off" maxLength={40} />
+                      <Button type="button" id="group-add-btn" className="shrink-0"><Plus className="h-4 w-4" />添加分组</Button>
+                    </div>
+                    <div className="grid gap-2">
+                      <div className="text-sm font-medium text-foreground">已有分组</div>
+                      <div id="group-manager-groups" />
+                    </div>
+                    <div className="grid gap-2">
+                      <div className="text-sm font-medium text-foreground">快速分配机器</div>
+                      <div id="group-manager-connections" />
+                    </div>
+                  </CardContent>
+                  <DialogFooter className="border-t border-border px-6 py-4">
+                    <Button type="submit" id="group-manager-save"><Check className="h-4 w-4" />保存</Button>
+                  </DialogFooter>
+                </form>
+              </Card>
+            </TabsContent>
           </div>
-        </div>
-      </div>
-    </div>
+        </Tabs>
+      </DialogContent>
+    </Dialog>
   );
 }

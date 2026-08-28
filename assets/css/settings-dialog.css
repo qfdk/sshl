@@ -1,119 +1,6 @@
-/* 终端设置对话框 —— 紧凑、现代风 */
-
-.settings-dialog-content {
-    max-width: 680px;
-    padding: 0;
-    overflow: hidden;
-}
-
-.settings-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid #eef0f3;
-}
-
-.settings-header h3 {
-    margin: 0;
-    padding: 0;
-    font-size: 14px;
-    font-weight: 600;
-    color: #111827;
-    border: none;
-}
-
-#settings-close {
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    color: #6b7280;
-    border-radius: 4px;
-}
-
-#settings-close:hover {
-    background-color: #f3f4f6;
-    color: #111827;
-}
-
-.settings-layout {
-    display: flex;
-    min-height: 390px;
-}
-
-.settings-sidebar {
-    display: flex;
-    flex: 0 0 138px;
-    flex-direction: column;
-    gap: 4px;
-    padding: 12px 8px;
-    border-right: 1px solid #eef0f3;
-    background: #f8fafc;
-}
-
-.settings-tab {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    width: 100%;
-    padding: 10px 11px;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: #6b7280;
-    font-size: 13px;
-    font-weight: 500;
-    text-align: left;
-    cursor: pointer;
-}
-
-.settings-tab svg {
-    width: 16px;
-    height: 16px;
-    flex: 0 0 16px;
-}
-
-.settings-tab:hover {
-    background: #eef4fb;
-    color: #374151;
-}
-
-.settings-tab.active {
-    background: #e5effb;
-    color: #3176b8;
-    font-weight: 600;
-}
-
-.settings-panels {
-    min-width: 0;
-    flex: 1;
-}
-
-.settings-panel {
-    display: flex;
-    flex-direction: column;
-    min-height: 390px;
-}
-
+/* Legacy EJS layout compatibility. The React settings dialog uses shadcn/Tailwind. */
 .settings-panel[hidden] {
     display: none;
-}
-
-.settings-panel-heading {
-    padding: 18px 20px 0;
-}
-
-.settings-panel-heading h4 {
-    margin: 0;
-    color: #111827;
-    font-size: 15px;
-    font-weight: 600;
-}
-
-.settings-panel-heading p {
-    margin: 4px 0 0;
-    color: #9ca3af;
-    font-size: 12px;
 }
 
 .settings-panel-form {
@@ -121,6 +8,15 @@
     flex: 1;
     flex-direction: column;
     min-height: 0;
+}
+
+.settings-panel-form .settings-panel-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 20px 16px;
+    border-top: 1px solid var(--border, #e5e7eb);
+    background: var(--background, #fff);
 }
 
 .settings-panel-body {
@@ -133,158 +29,32 @@
     padding: 16px 20px;
 }
 
-.settings-panel-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    padding: 12px 20px 16px;
-    border-top: 1px solid #eef0f3;
-    background: #fff;
-}
-
-.settings-panel-footer button,
-.group-manager-create button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    min-width: 88px;
-    padding: 9px 14px;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    background: #fff;
-    color: #374151;
-    font-size: 14px;
-    font-weight: 500;
-    line-height: 1.2;
-    white-space: nowrap;
-    cursor: pointer;
-    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
-}
-
-.settings-panel-footer button:hover,
-.group-manager-create button:hover {
-    background: #f3f4f6;
-    border-color: #9ca3af;
-}
-
-.settings-panel-footer button[type="submit"] {
-    border-color: var(--primary-color);
-    background: var(--primary-color);
-    color: #fff;
-}
-
-.settings-panel-footer button[type="submit"]:hover {
-    border-color: var(--primary-hover);
-    background: var(--primary-hover);
-}
-
-.settings-row {
-    display: flex;
-    gap: 12px;
-    align-items: flex-end;
-}
-
-.settings-field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-}
-
-.settings-field-grow {
-    flex: 1;
-}
-
-.settings-field label {
-    font-size: 12px;
-    font-weight: 500;
-    color: #6b7280;
-    letter-spacing: 0.02em;
-    margin: 0;
-    padding: 0;
-}
-
 .settings-panel input[type="number"],
 .settings-panel input[type="text"],
 .settings-panel select {
     height: 32px;
-    padding: 0 10px;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    background-color: white;
-    font-size: 13px;
-    color: #111827;
-    box-sizing: border-box;
     width: 100%;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    box-sizing: border-box;
+    padding: 0 10px;
+    border: 1px solid var(--input, #d1d5db);
+    border-radius: 6px;
+    background-color: var(--background, white);
+    color: var(--foreground, #111827);
+    font-size: 13px;
 }
 
 .settings-panel input:focus,
 .settings-panel select:focus {
     outline: none;
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(86, 149, 215, 0.15);
+    border-color: var(--ring, var(--primary-color));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring, #5695d7) 15%, transparent);
 }
 
 .settings-panel select {
     -webkit-appearance: none;
     appearance: none;
     padding-right: 28px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 8px center;
     cursor: pointer;
-}
-
-.font-size-control {
-    display: flex;
-    align-items: center;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    height: 32px;
-    width: 110px;
-    background: white;
-    overflow: hidden;
-}
-
-.font-size-control:focus-within {
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 3px rgba(86, 149, 215, 0.15);
-}
-
-.font-size-control input {
-    border: none !important;
-    height: 100% !important;
-    width: 100% !important;
-    text-align: center;
-    font-variant-numeric: tabular-nums;
-    -moz-appearance: textfield;
-    box-shadow: none !important;
-    padding: 0 !important;
-}
-
-.font-size-control input::-webkit-outer-spin-button,
-.font-size-control input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-.font-size-step {
-    width: 28px;
-    height: 100%;
-    border: none;
-    background: transparent;
-    cursor: pointer;
-    color: #4b5563;
-    font-size: 16px;
-    line-height: 1;
-    user-select: none;
-}
-
-.font-size-step:hover {
-    background-color: #f3f4f6;
-    color: #111827;
 }
 
 .settings-custom-row.hidden {
@@ -334,7 +104,7 @@
 }
 
 .group-manager-section-title {
-    color: #6b7280;
+    color: var(--muted-foreground, #6b7280);
     font-size: 12px;
     font-weight: 600;
 }
@@ -355,9 +125,10 @@
     gap: 8px;
     min-height: 38px;
     padding: 6px 10px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border, #e5e7eb);
     border-radius: 6px;
-    background: #fff;
+    background: var(--card, #fff);
+    color: var(--card-foreground, var(--foreground, #111827));
 }
 
 .group-manager-drag-handle {
@@ -370,7 +141,7 @@
     padding: 0;
     border: 0;
     background: transparent;
-    color: #9ca3af;
+    color: var(--muted-foreground, #9ca3af);
     cursor: grab;
     touch-action: none;
 }
@@ -385,11 +156,11 @@
 }
 
 .group-manager-group-row.drag-over-before {
-    box-shadow: inset 0 2px 0 var(--primary-color);
+    box-shadow: inset 0 2px 0 var(--primary, var(--primary-color));
 }
 
 .group-manager-group-row.drag-over-after {
-    box-shadow: inset 0 -2px 0 var(--primary-color);
+    box-shadow: inset 0 -2px 0 var(--primary, var(--primary-color));
 }
 
 .group-manager-group-row input,
@@ -405,13 +176,13 @@
 
 .group-manager-group-count {
     min-width: 24px;
-    color: #9ca3af;
+    color: var(--muted-foreground, #9ca3af);
     font-size: 12px;
     text-align: right;
 }
 
 .group-manager-delete {
-    color: #ef4444;
+    color: var(--destructive, #ef4444);
 }
 
 .group-manager-connection-row {
@@ -430,7 +201,7 @@
 .group-manager-connection-detail {
     flex: 1;
     overflow: hidden;
-    color: #9ca3af;
+    color: var(--muted-foreground, #9ca3af);
     font-family: monospace;
     font-size: 11px;
     text-overflow: ellipsis;
@@ -439,7 +210,7 @@
 
 .group-manager-empty {
     padding: 12px;
-    color: #9ca3af;
+    color: var(--muted-foreground, #9ca3af);
     font-size: 12px;
     text-align: center;
 }

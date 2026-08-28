@@ -2,9 +2,13 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     getActiveTabId,
+    getConnectionDialogOpen,
+    getSettingsDialogOpen,
     getCurrentSessionId,
     resetState,
     setActiveTabId,
+    setConnectionDialogOpen,
+    setSettingsDialogOpen,
     setCurrentSessionId,
     subscribe,
 } from '../assets/js/app-state.mjs';
@@ -16,6 +20,8 @@ beforeEach(() => {
 test('starts with the default active tab and no current session', () => {
     assert.equal(getActiveTabId(), 'terminal');
     assert.equal(getCurrentSessionId(), null);
+    assert.equal(getConnectionDialogOpen(), false);
+    assert.equal(getSettingsDialogOpen(), false);
 });
 
 test('setters update the values returned by getters', () => {
@@ -80,4 +86,40 @@ test('normalizes non-null current session IDs to strings', () => {
     setCurrentSessionId(123);
 
     assert.equal(getCurrentSessionId(), '123');
+});
+
+
+test('dialog setters update values and notify their subscribers', () => {
+    const changes = [];
+    subscribe('connectionDialogOpen', (newValue, oldValue) => {
+        changes.push(['connection', newValue, oldValue]);
+    });
+    subscribe('settingsDialogOpen', (newValue, oldValue) => {
+        changes.push(['settings', newValue, oldValue]);
+    });
+
+    setConnectionDialogOpen(true);
+    setSettingsDialogOpen(true);
+
+    assert.equal(getConnectionDialogOpen(), true);
+    assert.equal(getSettingsDialogOpen(), true);
+    assert.deepEqual(changes, [
+        ['connection', true, false],
+        ['settings', true, false],
+    ]);
+});
+
+test('dialog setters do not notify when the value does not change', () => {
+    let calls = 0;
+    subscribe('connectionDialogOpen', () => {
+        calls++;
+    });
+    subscribe('settingsDialogOpen', () => {
+        calls++;
+    });
+
+    setConnectionDialogOpen(false);
+    setSettingsDialogOpen(false);
+
+    assert.equal(calls, 0);
 });

@@ -1,14 +1,20 @@
 const initialState = {
     currentSessionId: null,
     activeTabId: 'terminal',
+    connectionDialogOpen: false,
+    settingsDialogOpen: false,
 };
 
 let currentSessionId = initialState.currentSessionId;
 let activeTabId = initialState.activeTabId;
+let connectionDialogOpen = initialState.connectionDialogOpen;
+let settingsDialogOpen = initialState.settingsDialogOpen;
 
 const subscribers = {
     currentSessionId: new Set(),
     activeTabId: new Set(),
+    connectionDialogOpen: new Set(),
+    settingsDialogOpen: new Set(),
 };
 
 function notify(key, newValue, oldValue) {
@@ -46,6 +52,32 @@ export function setActiveTabId(id) {
     notify('activeTabId', id, oldValue);
 }
 
+export function getConnectionDialogOpen() {
+    return connectionDialogOpen;
+}
+
+export function setConnectionDialogOpen(open) {
+    const newValue = Boolean(open);
+    if (newValue === connectionDialogOpen) return;
+
+    const oldValue = connectionDialogOpen;
+    connectionDialogOpen = newValue;
+    notify('connectionDialogOpen', newValue, oldValue);
+}
+
+export function getSettingsDialogOpen() {
+    return settingsDialogOpen;
+}
+
+export function setSettingsDialogOpen(open) {
+    const newValue = Boolean(open);
+    if (newValue === settingsDialogOpen) return;
+
+    const oldValue = settingsDialogOpen;
+    settingsDialogOpen = newValue;
+    notify('settingsDialogOpen', newValue, oldValue);
+}
+
 export function subscribe(key, callback) {
     subscribers[key].add(callback);
     return () => subscribers[key].delete(callback);
@@ -54,6 +86,10 @@ export function subscribe(key, callback) {
 export function resetState() {
     currentSessionId = initialState.currentSessionId;
     activeTabId = initialState.activeTabId;
+    connectionDialogOpen = initialState.connectionDialogOpen;
+    settingsDialogOpen = initialState.settingsDialogOpen;
     subscribers.currentSessionId.clear();
     subscribers.activeTabId.clear();
+    subscribers.connectionDialogOpen.clear();
+    subscribers.settingsDialogOpen.clear();
 }

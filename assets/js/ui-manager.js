@@ -5,6 +5,7 @@ import {
     getActiveTabId,
     getCurrentSessionId,
     setActiveTabId,
+    setConnectionDialogOpen,
 } from './app-state.mjs';
 
 class UIManager {
@@ -531,7 +532,7 @@ class UIManager {
         const connectionDialog = document.getElementById('connection-dialog');
         if (newConnectionBtn && connectionDialog) {
             newConnectionBtn.addEventListener('click', () => {
-                connectionDialog.classList.add('active');
+                setConnectionDialogOpen(true);
                 // 重置认证方式为密码，并触发UI更新
                 document.getElementById('auth-type').value = 'password';
                 this.toggleAuthFields();
@@ -553,7 +554,7 @@ class UIManager {
         const connectionForm = document.getElementById('connection-form');
         if (cancelConnectionBtn && connectionForm && connectionDialog) {
             cancelConnectionBtn.addEventListener('click', () => {
-                connectionDialog.classList.remove('active');
+                setConnectionDialogOpen(false);
                 connectionForm.reset();
                 // 重置认证方式为密码，并触发UI更新
                 document.getElementById('auth-type').value = 'password';
