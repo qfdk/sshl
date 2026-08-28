@@ -26,7 +26,11 @@ test('terminal overrides load after xterm.css', () => {
 });
 
 // 收起后行内只剩状态点，名称要靠 hover 提示补回来。
+// 两个 Radix Trigger 必须链式 asChild 包住同一个 DOM 元素。把 <ContextMenu> 整体
+// 塞进 TooltipTrigger asChild 时，hover 事件落在 Radix Root 组件上而非真实 DOM，
+// 提示永远不会弹出。
 test('collapsed connection rows expose their name through a tooltip', () => {
-    assert.match(list, /TooltipTrigger asChild>\{row\}<\/TooltipTrigger>/);
+    assert.match(list, /<TooltipTrigger asChild>\{itemDiv\}<\/TooltipTrigger>/);
     assert.match(list, /TooltipContent side="right"/);
+    assert.doesNotMatch(list, /<TooltipTrigger asChild>\{row\}/);
 });

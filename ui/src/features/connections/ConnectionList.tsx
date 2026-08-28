@@ -35,9 +35,7 @@ function ConnectionItem({ connection, manager, collapsed = false }: { connection
   const connected = Boolean(session);
   const active = connected && session!.sessionId === getCurrentSessionId();
   const edit = async () => { const all = await window.api.config.getConnections(); const selected = all.find(item => item.id === connection.id); if (selected) { setEditingConnection(selected); setConnectionDialogOpen(true); } };
-  const row = (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
+  const itemDiv = (
         <div
           className={`group flex min-h-10 cursor-pointer select-none items-center rounded-md py-1.5 text-sm transition-colors ${collapsed ? 'justify-center px-0' : 'gap-2 px-2'} ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'} ${connected ? '' : 'text-muted-foreground'}`}
           data-connection-item
@@ -54,7 +52,25 @@ function ConnectionItem({ connection, manager, collapsed = false }: { connection
             <button type="button" className="rounded p-1 text-destructive hover:bg-background disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能删除' : '删除连接'} disabled={connected} data-delete-connection onClick={event => { event.stopPropagation(); void manager.deleteConnection(connection.id); }}><Trash2 className="h-3.5 w-3.5" /></button>
           </div>
         </div>
-      </ContextMenuTrigger>
+  );
+
+  // 两个 Trigger 都用 asChild 链式包住同一个 div，props 才会逐层合并到真实 DOM 上。
+  // 若把 <ContextMenu> 整体塞进 TooltipTrigger asChild，hover 事件会落在 Radix Root
+  // 组件上而不是 DOM，提示永远不触发。
+  const trigger = collapsed
+    ? (
+      <Tooltip>
+        <ContextMenuTrigger asChild>
+          <TooltipTrigger asChild>{itemDiv}</TooltipTrigger>
+        </ContextMenuTrigger>
+        <TooltipContent side="right" sideOffset={8}>{connection.name}</TooltipContent>
+      </Tooltip>
+    )
+    : <ContextMenuTrigger asChild>{itemDiv}</ContextMenuTrigger>;
+
+  return (
+    <ContextMenu>
+      {trigger}
       <ContextMenuContent>
         <ContextMenuItem onSelect={() => void manager.connectToSaved(connection.id)}>连接</ContextMenuItem>
         <ContextMenuItem disabled={connected} onSelect={edit}>编辑</ContextMenuItem>
@@ -63,15 +79,6 @@ function ConnectionItem({ connection, manager, collapsed = false }: { connection
         <ContextMenuItem disabled={connected} className="text-destructive" onSelect={() => void manager.deleteConnection(connection.id)}>删除</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
-  );
-
-  // 侧边栏收起时行内只剩状态点，名称靠 hover 提示补回来（复刻折叠态的原有行为）。
-  if (!collapsed) return row;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{row}</TooltipTrigger>
-      <TooltipContent side="right" sideOffset={8}>{connection.name}</TooltipContent>
-    </Tooltip>
   );
 }
 
