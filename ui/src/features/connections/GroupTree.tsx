@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, GripVertical, Trash2 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { Input } from '../../components/ui/input';
 import { Button } from '../../components/ui/button';
 import { UNGROUPED_LABEL, normalizeGroupName } from '../../lib/connection-groups';
@@ -92,18 +92,18 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
     return { kind: 'intoGroup', group: section?.dataset.treeGroup ?? '' };
   };
 
-  const beginConnectionDrag = (event: React.PointerEvent, id: string) => {
+  const beginConnectionDrag = (event: ReactPointerEvent<HTMLElement>, id: string) => {
     if (event.button !== 0) return;
     dragRef.current = { kind: 'connection', id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
   };
 
-  const beginGroupDrag = (event: React.PointerEvent, name: string) => {
+  const beginGroupDrag = (event: ReactPointerEvent<HTMLElement>, name: string) => {
     if (event.button !== 0) return;
     event.preventDefault();
     dragRef.current = { kind: 'group', name, pointerId: event.pointerId, startY: event.clientY, active: false };
   };
 
-  const handleMove = (event: React.PointerEvent) => {
+  const handleMove = (event: ReactPointerEvent<HTMLElement>) => {
     const current = dragRef.current;
     if (!current || current.pointerId !== event.pointerId) return;
     // 阈值之下算点击，否则轻碰一下就误进入拖拽
