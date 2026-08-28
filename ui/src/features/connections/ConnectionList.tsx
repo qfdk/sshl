@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Pencil, Power, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Folder, FolderOpen, Pencil, Power, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   ContextMenu,
@@ -9,7 +9,7 @@ import {
 } from '../../components/ui/context-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { getCurrentSessionId, setConnectionDialogOpen, setEditingConnection, subscribe } from '../../lib/app-state';
-import { getUngroupedConnections, groupConnections, matchesConnection } from '../../lib/connection-groups';
+import { UNGROUPED_LABEL, getConnectionInitials, getUngroupedConnections, groupConnections, matchesConnection } from '../../lib/connection-groups';
 import sessionManager from '../../lib/session-manager';
 import { cn } from '../../lib/utils';
 import type { ConnectionManager } from './useConnections';
@@ -39,6 +39,7 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
   const session = sessionManager.getSessionByConnectionId(connection.id);
   const connected = Boolean(session);
   const active = connected && session!.sessionId === getCurrentSessionId();
+  const initials = getConnectionInitials(connection);
   const edit = async () => { const all = await window.api.config.getConnections(); const selected = all.find(item => item.id === connection.id); if (selected) { setEditingConnection(selected); setConnectionDialogOpen(true); } };
   const itemDiv = (
         <div
@@ -58,8 +59,26 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
           data-connected={connected ? 'true' : 'false'}
           onDoubleClick={() => void manager.connectToSaved(connection.id)}
         >
-          <span className={`shrink-0 rounded-full ${collapsed ? 'h-2.5 w-2.5 ring-2 ring-border' : 'h-2 w-2'} ${connected ? 'bg-success' : 'bg-muted-foreground/40'}`} data-connection-status />
-          {!collapsed && <span className="min-w-0 flex-1 truncate" title={connection.name}>{connection.name}</span>}
+          {collapsed
+            ? (
+              // 收起后一排相同的小圆点分不出哪台机器，改成名称缩写徽章，状态点退到角上
+              <span
+                className={cn(
+                  'relative flex h-8 w-8 items-center justify-center rounded-md text-sm font-semibold leading-none',
+                  active ? 'bg-primary text-primary-foreground' : connected ? 'bg-success/20 text-foreground' : 'bg-muted text-muted-foreground',
+                )}
+                data-connection-initials
+              >
+                {initials}
+                {connected && <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-success ring-2 ring-card" data-connection-status />}
+              </span>
+            )
+            : (
+              <>
+                <span className={`h-2 w-2 shrink-0 rounded-full ${connected ? 'bg-success' : 'bg-muted-foreground/40'}`} data-connection-status />
+                <span className="min-w-0 flex-1 truncate" title={connection.name}>{connection.name}</span>
+              </>
+            )}
           <div className={`shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${collapsed ? 'hidden' : 'flex'}`} data-connection-actions>
             {connected && <button type="button" className="rounded p-1 hover:bg-background" title="断开连接" data-disconnect-connection onClick={event => { event.stopPropagation(); void manager.disconnect(session!.sessionId); }}><Power className="h-3.5 w-3.5" /></button>}
             <button type="button" className="rounded p-1 hover:bg-background disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能编辑' : '编辑连接'} disabled={connected} data-edit-connection onClick={event => { event.stopPropagation(); edit(); }}><Pencil className="h-3.5 w-3.5" /></button>
@@ -77,7 +96,12 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
         <ContextMenuTrigger asChild>
           <TooltipTrigger asChild>{itemDiv}</TooltipTrigger>
         </ContextMenuTrigger>
-        <TooltipContent side="right" sideOffset={8}>{connection.name}</TooltipContent>
+        <TooltipContent side="right" sideOffset={8}>
+          <div className="grid gap-0.5">
+            <div className="font-medium">{connection.name}</div>
+            <div className="text-[11px] opacity-80">{connection.group?.trim() || UNGROUPED_LABEL} · {connected ? '已连接' : '未连接'}</div>
+          </div>
+        </TooltipContent>
       </Tooltip>
     )
     : <ContextMenuTrigger asChild>{itemDiv}</ContextMenuTrigger>;
@@ -220,13 +244,29 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
       {groups.map(group => {
         const groupCollapsed = manager.isGroupCollapsed(group.name);
         const dropHere = drop?.kind === 'group' && drop.group === group.name;
-        return <section key={group.name} data-connection-group data-group={group.name} className={cn('grid gap-1 rounded-md transition-colors', dropHere && 'bg-primary/10 ring-1 ring-primary')}>
-          <button type="button" className={cn('flex cursor-pointer select-none items-center rounded py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted', collapsed ? 'justify-center px-0' : 'gap-1 px-2', dropHere && 'text-primary')} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} title={collapsed ? group.name : undefined} onClick={() => manager.toggleGroup(group.name)}>
+        // 收起后裸数字看不出是什么，换成文件夹图标（形态即展开状态）+ 右上角数量角标
+        const header = (
+          <button type="button" className={cn('flex cursor-pointer select-none items-center rounded py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted', collapsed ? 'justify-center px-0' : 'gap-1 px-2', dropHere && 'text-primary')} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} aria-label={collapsed ? `${group.name}，${group.connections.length} 个连接` : undefined} onClick={() => manager.toggleGroup(group.name)}>
             {collapsed
-              ? <span className="text-[10px] tabular-nums">{group.connections.length}</span>
+              ? (
+                <span className="relative flex h-7 w-7 items-center justify-center">
+                  {groupCollapsed ? <Folder className="h-4 w-4" strokeWidth={2.5} /> : <FolderOpen className="h-4 w-4" strokeWidth={2.5} />}
+                  <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-muted-foreground/20 px-1 text-[9px] font-semibold tabular-nums text-foreground">{group.connections.length}</span>
+                </span>
+              )
               : <>{groupCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}<span className="min-w-0 flex-1 truncate">{group.name}</span><span>{group.connections.length}</span></>}
           </button>
-          {!groupCollapsed && <div className={`grid gap-1 ${collapsed ? '' : 'pl-2'}`}>{renderItems(group.connections)}</div>}
+        );
+        return <section key={group.name} data-connection-group data-group={group.name} className={cn('grid gap-1 rounded-md transition-colors', dropHere && 'bg-primary/10 ring-1 ring-primary')}>
+          {collapsed
+            ? (
+              <Tooltip>
+                <TooltipTrigger asChild>{header}</TooltipTrigger>
+                <TooltipContent side="right" sideOffset={8}>{group.name} · {group.connections.length} 个连接</TooltipContent>
+              </Tooltip>
+            )
+            : header}
+          {!groupCollapsed && <div className={`grid gap-1 ${collapsed ? 'ml-1.5 border-l border-border pl-1' : 'pl-2'}`}>{renderItems(group.connections)}</div>}
         </section>;
       })}
     </div>

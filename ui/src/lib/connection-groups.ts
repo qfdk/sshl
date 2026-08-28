@@ -91,3 +91,16 @@ export function reorderConnections(connections: Connection[], draggedId: string,
   reordered.splice(insertIndex, 0, dragged);
   return reordered;
 }
+
+// emoji 常由多个码点组成（ZWJ 序列、肤色修饰），按码点切会切碎，所以按字形簇取首字符
+const GRAPHEME_SEGMENTER = typeof Intl !== 'undefined' && 'Segmenter' in Intl ? new Intl.Segmenter() : null;
+
+// 侧边栏收起后只剩一个方块，直接显示名称的第一个字符：emoji 开头就是那个 emoji，其余取首字（字母大写）
+export function getConnectionInitials(connection: Connection) {
+  const source = String(connection.name || connection.host || '').trim();
+  if (!source) return '?';
+  const first = GRAPHEME_SEGMENTER
+    ? GRAPHEME_SEGMENTER.segment(source)[Symbol.iterator]().next().value!.segment
+    : Array.from(source)[0];
+  return first.toLocaleUpperCase();
+}
