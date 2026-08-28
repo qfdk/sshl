@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 @font-face {
   font-family: 'JetBrainsMono Nerd Font Mono';
   font-style: normal;
@@ -5,7 +7,6 @@
   font-display: block;
   src: url('./assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf') format('truetype');
 }
-
 @font-face {
   font-family: 'JetBrainsMono Nerd Font Mono';
   font-style: normal;
@@ -13,8 +14,6 @@
   font-display: block;
   src: url('./assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf') format('truetype');
 }
-
-@import "tailwindcss";
 
 @custom-variant dark (&:is(.dark *));
 

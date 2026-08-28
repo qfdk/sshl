@@ -1,25 +1,26 @@
-// @ts-nocheck
+export type Connection = { id: string; name?: string; host?: string; username?: string; group?: string; [key: string]: unknown };
+export type ConnectionGroup = { name: string; connections: Connection[] };
+
 export const UNGROUPED_LABEL = '未分组';
 
-export function normalizeGroupName(group) {
+export function normalizeGroupName(group: unknown) {
   return typeof group === 'string' ? group.trim() : '';
 }
 
-export function getUngroupedConnections(connections) {
+export function getUngroupedConnections(connections: Connection[]) {
   return connections.filter(connection => !normalizeGroupName(connection.group));
 }
 
-/** @param {any[]} connections @param {string[]} [groupOrder] */
-export function groupConnections(connections, groupOrder = []) {
-  const groups = new Map();
+export function groupConnections(connections: Connection[], groupOrder: string[] = []): ConnectionGroup[] {
+  const groups = new Map<string, Connection[]>();
   for (const connection of connections) {
     const name = normalizeGroupName(connection.group);
     if (!name) continue;
     if (!groups.has(name)) groups.set(name, []);
-    groups.get(name).push(connection);
+    groups.get(name)!.push(connection);
   }
-  const orderedNames = [];
-  const seen = new Set();
+  const orderedNames: string[] = [];
+  const seen = new Set<string>();
   for (const value of groupOrder) {
     const name = normalizeGroupName(value);
     if (!name || seen.has(name)) continue;
@@ -34,14 +35,13 @@ export function groupConnections(connections, groupOrder = []) {
   return orderedNames.map(name => ({ name, connections: groups.get(name) || [] }));
 }
 
-/** @param {any[]} connections @param {string[]} groupOrder @param {string} connectionId @param {string} targetGroup @param {string|null} [beforeId] */
-export function moveConnection(connections, groupOrder, connectionId, targetGroup, beforeId = null) {
+export function moveConnection(connections: Connection[], groupOrder: string[], connectionId: string, targetGroup: string, beforeId: string | null = null) {
   const source = connections.find(connection => connection.id === connectionId);
   if (!source) return [...connections];
   const remaining = connections.filter(connection => connection.id !== connectionId);
   const updated = { ...source, group: normalizeGroupName(targetGroup) };
-  const buckets = new Map();
-  const defaultConnections = [];
+  const buckets = new Map<string, Connection[]>();
+  const defaultConnections: Connection[] = [];
   for (const connection of remaining) {
     const group = normalizeGroupName(connection.group);
     if (!group) {
@@ -49,7 +49,7 @@ export function moveConnection(connections, groupOrder, connectionId, targetGrou
       continue;
     }
     if (!buckets.has(group)) buckets.set(group, []);
-    buckets.get(group).push(connection);
+    buckets.get(group)!.push(connection);
   }
   const targetConnections = updated.group ? (buckets.get(updated.group) || []) : defaultConnections;
   const insertAt = beforeId ? targetConnections.findIndex(connection => connection.id === beforeId) : -1;
@@ -63,7 +63,7 @@ export function moveConnection(connections, groupOrder, connectionId, targetGrou
   return ordered;
 }
 
-export function reorderGroups(groups, draggedName, targetName, placeAfter = false) {
+export function reorderGroups(groups: string[], draggedName: string, targetName: string, placeAfter = false) {
   const fromIndex = groups.indexOf(draggedName);
   const targetIndex = groups.indexOf(targetName);
   if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) return [...groups];
@@ -74,14 +74,14 @@ export function reorderGroups(groups, draggedName, targetName, placeAfter = fals
   return reordered;
 }
 
-export function matchesConnection(connection, query) {
+export function matchesConnection(connection: Connection, query: unknown) {
   const needle = String(query || '').trim().toLocaleLowerCase();
   if (!needle) return true;
   return [connection.name, connection.host, connection.username, connection.group]
     .some(value => String(value || '').toLocaleLowerCase().includes(needle));
 }
 
-export function reorderConnections(connections, draggedId, targetId) {
+export function reorderConnections(connections: Connection[], draggedId: string, targetId: string) {
   const fromIndex = connections.findIndex(connection => connection.id === draggedId);
   const targetIndex = connections.findIndex(connection => connection.id === targetId);
   if (fromIndex < 0 || targetIndex < 0 || fromIndex === targetIndex) return [...connections];

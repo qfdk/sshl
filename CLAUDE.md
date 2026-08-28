@@ -32,7 +32,7 @@ pnpm build             # Tauri application build
 - **IPC contract** lives in `ui/src/lib/ipc.ts`. Tauri raw invokes are wrapped to match
   `{success, ...payload}`; `getHomeDir` and other explicitly raw list calls retain their
   raw return values. The bridge imports `invoke`/`listen` directly and does not read
-  `window.__TAURI__`.
+  the Tauri global bridge.
 - **First-paint protocol (atomic activation)** — `ssh_connect` returns a sessionId;
   shell output stays buffered server-side until the renderer calls `ssh_activate_session`.
   The backend then emits the buffered snapshot as the first `ssh:data` event, so the

@@ -38,7 +38,7 @@ function ConnectionItem({ connection, manager }: { connection: Connection; manag
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-          className={`group flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'} ${connected ? '' : 'text-muted-foreground'}`}
+          className={`group flex min-h-10 cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'} ${connected ? '' : 'text-muted-foreground'}`}
           data-connection-item
           data-id={connection.id}
           data-active={active ? 'true' : 'false'}
@@ -81,6 +81,7 @@ export function ConnectionList({ manager, query }: ConnectionListProps) {
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
     drag.item.classList.remove('opacity-50');
+    drag.item.style.pointerEvents = '';
     listRef.current?.classList.remove('select-none');
     clearHover();
     if (!drag.active || event.type === 'pointercancel' || drag.targetGroup === null) return;
@@ -118,6 +119,7 @@ export function ConnectionList({ manager, query }: ConnectionListProps) {
       drag.hoverTarget = targetItem;
     } else if (targetHeader) {
       drag.targetGroup = targetHeader.dataset.group || '';
+      if (drag.targetGroup && manager.isGroupCollapsed(drag.targetGroup)) manager.toggleGroup(drag.targetGroup);
       targetHeader.classList.add('bg-primary/15', 'ring-1', 'ring-primary');
       drag.hoverTarget = targetHeader;
     } else if (targetDefault) {
@@ -142,6 +144,7 @@ export function ConnectionList({ manager, query }: ConnectionListProps) {
     if (!drag.active) {
       drag.active = true;
       drag.item.classList.add('opacity-50');
+      drag.item.style.pointerEvents = 'none';
       listRef.current?.classList.add('select-none');
       listRef.current?.setPointerCapture?.(event.pointerId);
     }
@@ -154,12 +157,12 @@ export function ConnectionList({ manager, query }: ConnectionListProps) {
   const groups = groupConnections(visible, manager.groupOrder as never[]);
   const renderItems = (items: Connection[]) => items.map(connection => <ConnectionItem key={connection.id} connection={connection} manager={manager} />);
   return (
-    <div ref={listRef} className="grid gap-1 overflow-y-auto p-2" data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>
+    <div ref={listRef} className="grid select-none gap-1 overflow-y-auto p-2" data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>
       <div className="grid gap-1" data-connection-default-items>{renderItems(getUngroupedConnections(visible))}</div>
       {groups.map(group => {
         const collapsed = manager.isGroupCollapsed(group.name);
         return <section key={group.name} data-connection-group data-group={group.name} className="grid gap-1">
-          <button type="button" className="flex items-center gap-1 rounded px-2 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted" data-connection-group-header data-group={group.name} aria-expanded={!collapsed} onClick={() => manager.toggleGroup(group.name)}>
+          <button type="button" className="flex cursor-pointer select-none items-center gap-1 rounded px-2 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted" data-connection-group-header data-group={group.name} aria-expanded={!collapsed} onClick={() => manager.toggleGroup(group.name)}>
             {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}<span className="min-w-0 flex-1 truncate">{group.name}</span><span>{group.connections.length}</span>
           </button>
           {!collapsed && <div className="grid gap-1 pl-2">{renderItems(group.connections)}</div>}

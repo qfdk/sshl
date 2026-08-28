@@ -10,7 +10,7 @@ export function Sidebar({ manager }: { manager: ConnectionManager }) {
   const [collapsed, setCollapsed] = useState(false);
   const [query, setQuery] = useState('');
   return (
-    <aside className={`flex h-full min-h-0 w-72 shrink-0 flex-col border-r border-border bg-card transition-[width] ${collapsed ? 'w-14' : ''}`} id="sidebar" data-collapsed={collapsed}>
+    <aside className={`flex h-full min-h-0 shrink-0 select-none flex-col border-r border-border bg-card transition-[width] ${collapsed ? 'w-14' : 'w-72'}`} id="sidebar" data-collapsed={collapsed}>
       <div className="flex h-14 items-center justify-between border-b border-border px-3">
         {!collapsed && <div className="font-semibold tracking-wide">SSHL</div>}
         <Button id="toggle-sidebar" variant="ghost" size="icon" className="ml-auto" onClick={() => setCollapsed(value => !value)}>{collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}</Button>
