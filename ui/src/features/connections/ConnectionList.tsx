@@ -7,6 +7,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from '../../components/ui/context-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { getCurrentSessionId, setConnectionDialogOpen, setEditingConnection, subscribe } from '../../lib/app-state';
 import { getUngroupedConnections, groupConnections, matchesConnection } from '../../lib/connection-groups';
 import sessionManager from '../../lib/session-manager';
@@ -34,12 +35,11 @@ function ConnectionItem({ connection, manager, collapsed = false }: { connection
   const connected = Boolean(session);
   const active = connected && session!.sessionId === getCurrentSessionId();
   const edit = async () => { const all = await window.api.config.getConnections(); const selected = all.find(item => item.id === connection.id); if (selected) { setEditingConnection(selected); setConnectionDialogOpen(true); } };
-  return (
+  const row = (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
           className={`group flex min-h-10 cursor-pointer select-none items-center rounded-md py-1.5 text-sm transition-colors ${collapsed ? 'justify-center px-0' : 'gap-2 px-2'} ${active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted'} ${connected ? '' : 'text-muted-foreground'}`}
-          title={collapsed ? connection.name : undefined}
           data-connection-item
           data-id={connection.id}
           data-active={active ? 'true' : 'false'}
@@ -63,6 +63,15 @@ function ConnectionItem({ connection, manager, collapsed = false }: { connection
         <ContextMenuItem disabled={connected} className="text-destructive" onSelect={() => void manager.deleteConnection(connection.id)}>删除</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
+  );
+
+  // 侧边栏收起时行内只剩状态点，名称靠 hover 提示补回来（复刻折叠态的原有行为）。
+  if (!collapsed) return row;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{row}</TooltipTrigger>
+      <TooltipContent side="right" sideOffset={8}>{connection.name}</TooltipContent>
+    </Tooltip>
   );
 }
 

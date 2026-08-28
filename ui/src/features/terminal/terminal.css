@@ -1,0 +1,56 @@
+/* 终端基本样式 —— font-family/font-size/line-height 交给 xterm options 控制 */
+/* 适度内边距：文字与窗口边框之间留呼吸感 */
+.terminal-container .xterm {
+    padding: 8px !important;
+    background-color: transparent !important;
+}
+
+/* 唯一的颜色源：.terminal-container 的 --term-bg（由 JS 根据 OSC 11 / cell 采样动态更新） */
+.terminal-container {
+    background-color: var(--term-bg, #1d1d1d) !important;
+}
+
+/* 修复终端容器尺寸 */
+.terminal-container,
+.terminal-container .xterm,
+.terminal-container .xterm-viewport,
+.terminal-container .xterm-screen {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* 关键：xterm 内部所有层全部透明，让 .terminal-container 的 --term-bg 自然透出
+   —— cells 右侧 sub-cell 间隙、scrollbar gutter、viewport 默认 #000，统统消失 */
+.terminal-container .xterm-viewport,
+.terminal-container .xterm-screen,
+.terminal-container .xterm-rows,
+.terminal-container .xterm-rows > div {
+    background-color: transparent !important;
+}
+
+/* 终端主机层（JS 创建的 .term-host）也透明 */
+.terminal-container .term-host {
+    background-color: transparent !important;
+}
+
+/* 去除其他样式干扰 */
+.terminal-container * {
+    font-variant-ligatures: none !important;
+    font-feature-settings: normal !important;
+}
+
+/* 彻底隐藏滚动条占位：xterm/FitAddon 会为滚动条预留宽度（macOS 上 8~15px），
+   导致 canvas 没用满、右侧空出一条未渲染的缝（含最右 1px 亮线）。
+   配合 JS 端强制 term._core.viewport.scrollBarWidth=0，列数按全宽计算，canvas 铺满。
+   滚轮回滚由 xterm 自身处理，无需可见滚动条。 */
+.terminal-container .xterm-viewport {
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    scrollbar-width: none !important;
+}
+
+.terminal-container .xterm-viewport::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+}

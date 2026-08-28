@@ -4,6 +4,7 @@ import { getActiveTabId, getCurrentSessionId, setActiveTabId, subscribe } from '
 import sessionManager from './lib/session-manager';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Input } from './components/ui/input';
+import { TooltipProvider } from './components/ui/tooltip';
 import { Sidebar } from './layout/Sidebar';
 import { Terminal } from './layout/Terminal';
 import { FileManager } from './features/files/FileManager';
@@ -75,6 +76,7 @@ export function App() {
   }, [currentConnectionId, currentSessionId]);
 
   return (
+    <TooltipProvider delayDuration={300}>
     <div className="flex h-screen min-h-0 flex-col bg-background text-foreground">
       <div className="flex min-h-0 flex-1">
         <Sidebar manager={connections} />
@@ -96,5 +98,6 @@ export function App() {
       <ConnectionDialog manager={connections} />
       <SettingsDialog />
     </div>
+    </TooltipProvider>
   );
 }
