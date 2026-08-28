@@ -7,6 +7,8 @@ const STORAGE_KEY = 'sshl.terminalSettings';
 const GROUP_NERD = '图标字体（Nerd Font）';
 const GROUP_MONO = '等宽字体';
 
+const DEFAULT_FONT_FAMILY = '"JetBrainsMono Nerd Font Mono", "Apple Color Emoji", Menlo, Monaco, monospace';
+
 // 内置（打包进 app）的 Nerd Font。@font-face 见 assets/css/fonts.css。
 // 永远可用，不依赖系统安装，是「图标字体」分组的稳定锚点，也是 canvas 能可靠渲染图标的字体。
 // "Apple Color Emoji" 必须排在任何系统等宽字体（含 monospace 泛型）之前：
@@ -14,7 +16,7 @@ const GROUP_MONO = '等宽字体';
 // 内置 NFM 已剔除 U+26A1 cmap 映射（见 fonts/ 构建说明），emoji 码点可正常落到彩色字体。
 const BUNDLED_NERD = {
     label: 'JetBrainsMono Nerd Font (内置·含图标)',
-    value: '"JetBrainsMono Nerd Font Mono", "Apple Color Emoji", monospace',
+    value: DEFAULT_FONT_FAMILY,
     group: GROUP_NERD
 };
 
@@ -88,7 +90,7 @@ function buildNerdStack(installedNerd) {
 const DEFAULTS = {
     fontSize: 16,
     // 默认即内置 Nerd Font —— 新装用户开箱即有图标，无需手动选字体。
-    fontFamily: '"JetBrainsMono Nerd Font Mono", "Apple Color Emoji", Menlo, Monaco, monospace'
+    fontFamily: DEFAULT_FONT_FAMILY
 };
 
 // 旧版默认栈（无 emoji 字体）→ 自动迁移到新栈，老用户无需重选字体。
@@ -250,58 +252,6 @@ export function initSettingsUI() {
     }
     renderOptions();
 
-    /** 分片跑 canvas 验证：系统字体常有几百个名字，一次性验证会阻塞主线程几百 ms，
-     *  首次打开设置后点"取消"的卡顿就来自这里。每批之间让出事件循环，点击先响应。 */
-    async function detectInstalledFontsChunked(candidates, chunkSize = 12) {
-        const out = [];
-        for (let i = 0; i < candidates.length; i += chunkSize) {
-            out.push(...detectInstalledFonts(candidates.slice(i, i + chunkSize)));
-            await new Promise(r => setTimeout(r, 0));
-        }
-        return out;
-    }
-
-    /** 调用 Rust 端枚举系统字体目录，再用 canvas 验证可渲染性后填充（Rust 文件名启发式可能含无效名）。 */
-    async function refreshFontListFromSystem() {
-        try {
-            const raw = await window.api.file.listSystemFonts();
-            if (!Array.isArray(raw) || !raw.length) return;
-            // canvas 验证：只保留真正能被 canvas/浏览器渲染的 family 名。
-            // Rust 文件名启发式会吐出系统不存在的拆分名（如 "Jet Brains Mono Nerd Font Mono"），
-            // 直接信任会让用户选中后 fallback、图标显示为 □。canvas 渲染不出的名字一律剔除。
-            const families = await detectInstalledFontsChunked(raw.filter(n => typeof n === 'string' && n.trim()));
-            const nerd = families.filter(n => /nerd/i.test(n));
-            // 内置字体永远在前；系统 Nerd Font 用内置 Mono 作兜底（系统名渲染不出时仍有图标）。
-            const nerdFallback = '"JetBrainsMono Nerd Font Mono", monospace';
-            const fresh = [BUNDLED_NERD];
-            // 系统 Nerd Font（图标字体分组）
-            for (const name of nerd) {
-                if (name === 'JetBrainsMono Nerd Font Mono') continue; // 与内置同名，避免重复
-                fresh.push({ label: `${name} (含图标)`, value: `"${name}", monospace`, group: GROUP_NERD });
-            }
-            // 其他等宽字体（带内置 Nerd Font 兜底，保证图标不丢）
-            for (const name of families) {
-                if (nerd.includes(name)) continue;
-                fresh.push({ label: name, value: `"${name}", ${nerdFallback}`, group: GROUP_MONO });
-            }
-            fresh.push({ label: 'monospace', value: 'monospace', group: GROUP_MONO });
-            // 重建下拉框后保留当前选中项（异步补全期间用户可能已在操作）
-            const keep = dialog.classList.contains('active') ? readForm().fontFamily : null;
-            presets = fresh;
-            renderOptions();
-            if (keep) selectFamily(keep);
-        } catch (e) {
-            console.warn('系统字体枚举失败，回退静态列表:', e);
-        }
-    }
-
-    // 系统字体枚举较慢（Rust 枚举字体目录 + 逐个 canvas 验证），只跑一次并缓存。
-    let fontListPromise = null;
-    function ensureFontList() {
-        if (!fontListPromise) fontListPromise = refreshFontListFromSystem();
-        return fontListPromise;
-    }
-
     let snapshot = null;
 
     /** 把下拉框选中到给定 fontFamily；命中预设则选中，否则切到自定义。 */
@@ -345,7 +295,6 @@ export function initSettingsUI() {
         syncPreview(snapshot);
         dialog.classList.add('active');
         fontSizeInput.focus();
-        ensureFontList();
     }
 
     function closeDialog() {
@@ -405,12 +354,4 @@ export function initSettingsUI() {
         snapshot = null;
         dialog.classList.remove('active');
     });
-
-    // 启动空闲期预热字体列表：首次打开设置时列表已就绪，
-    // 点击路径上不再有 Rust 枚举 + canvas 验证的任何工作。
-    if ('requestIdleCallback' in window) {
-        requestIdleCallback(() => ensureFontList(), { timeout: 5000 });
-    } else {
-        setTimeout(ensureFontList, 3000);
-    }
 }
