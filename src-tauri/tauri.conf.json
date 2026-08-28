@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "pnpm vite",
-    "beforeBuildCommand": "pnpm vite build"
+    "beforeDevCommand": "bun run vite:dev",
+    "beforeBuildCommand": "bun run vite:build"
   },
   "app": {
     "withGlobalTauri": true,

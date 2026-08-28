@@ -7,10 +7,13 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
-    "test": "node --test tests/*.test.mjs",
+    "vite:dev": "vite",
+    "vite:build": "vite build",
+    "test": "bun test tests/",
+    "typecheck": "tsc --noEmit",
+    "dev": "tauri dev",
     "build": "tauri build --bundles app",
-    "deploy:app": "bash scripts/deploy.sh",
-    "dev": "tauri dev"
+    "deploy:app": "bash scripts/deploy.sh"
   },
   "dependencies": {
     "@radix-ui/react-checkbox": "^1.3.11",
@@ -45,5 +48,6 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
-  }
+  },
+  "packageManager": "bun@1.4.0"
 }
