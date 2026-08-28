@@ -1,5 +1,5 @@
 import { ArrowRight, FolderOpen, KeyRound, Save, X } from 'lucide-react';
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
 import {
   getConnectionDialogOpen,
   getEditingConnection,
@@ -155,7 +155,7 @@ export function ConnectionDialog({ manager }: { manager: ConnectionManager }) {
     }
   };
 
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (editingConnection) {
       await manager.saveEditedConnection(editingConnection.id, form);

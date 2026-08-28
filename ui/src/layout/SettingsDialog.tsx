@@ -1,5 +1,5 @@
 import { Check, Folder, GripVertical, Plus, RotateCcw, Trash2, Type, X } from 'lucide-react';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../lib/app-state';
 import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, DEFAULTS, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
 import { moveConnection, normalizeGroupName } from '../lib/connection-groups';
@@ -101,7 +101,7 @@ export function SettingsDialog() {
     applyFontChange(DEFAULTS.fontSize, DEFAULTS.fontFamily);
   };
 
-  const handleFontSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleFontSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const family = selectedPreset === CUSTOM_SENTINEL ? (customFontFamily.trim() || DEFAULT_FONT_FAMILY) : selectedPreset;
     setTerminalSettings({ fontSize, fontFamily: family }, { persist: true });
@@ -137,7 +137,7 @@ export function SettingsDialog() {
 
   const groupsDirty = savedSnapshot !== '' && savedSnapshot !== snapshotOf(connections, groups);
 
-  const saveGroups = async (event: React.FormEvent<HTMLFormElement>) => {
+  const saveGroups = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     try {
       const layout = connections.map(connection => ({ id: connection.id, group: normalizeGroupName(connection.group) }));

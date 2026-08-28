@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type RefObject } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { CanvasAddon } from 'xterm-addon-canvas';
@@ -244,7 +244,7 @@ function attachResizeHandler(term: Terminal, fitAddon: FitAddon, sessionId: stri
   (term as any)._cleanup = () => window.removeEventListener('resize', resizeHandler);
 }
 
-export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>) {
+export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
   const terminalsRef = useRef(new Map<string, TerminalEntry>());
   const activeTerminalRef = useRef<Terminal | null>(null);
   const terminalFitAddonRef = useRef<FitAddon | null>(null);

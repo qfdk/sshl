@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, Pencil, Power, Trash2 } from 'lucide-react';
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -141,14 +141,14 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
     return { kind: 'ungrouped' };
   };
 
-  const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
     const item = (event.target as HTMLElement).closest<HTMLElement>('[data-connection-item]');
     if (!item?.dataset.id) return;
     pointerRef.current = { connectionId: item.dataset.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
   };
 
-  const moveDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const pointer = pointerRef.current;
     if (!pointer || pointer.pointerId !== event.pointerId) return;
     // 6px 阈值：低于它算点击，不能一碰就进入拖拽

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
 import { Download, FolderPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { Button } from '../../components/ui/button';
@@ -76,7 +76,7 @@ export function FileManager() {
     setSelected(current => ({ ...current, [pane]: new Set() }));
   }, []);
 
-  const selectRow = useCallback((pane: PaneName, entry: FileEntry, index: number, event: React.MouseEvent<HTMLTableRowElement>) => {
+  const selectRow = useCallback((pane: PaneName, entry: FileEntry, index: number, event: ReactMouseEvent<HTMLTableRowElement>) => {
     setSelected(current => {
       const next = new Set<string>();
       const otherPane: PaneName = pane === 'local' ? 'remote' : 'local';
