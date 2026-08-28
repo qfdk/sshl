@@ -2,10 +2,9 @@
    原本运行时 JS 注入，现改为 <link> 静态加载（须在 xterm.css 之后，保留最高层叠优先级）。
    menuCSS 因含 Icons.dataUri() 运行时插值，仍由 JS 注入，不在此文件。 */
 
-/* 初始化时隐藏终端选项卡内容 */
-#terminal-tab:not(.active) {
-  display: none;
-}
+/* 终端 tab 的显隐由 shadcn Tabs 的 data-state 控制（见 App.tsx 的
+   data-[state=inactive]:hidden）。这里曾有一条按 .active 类隐藏终端面板的规则；
+   .active 随 vanilla tab 一起消失后，它会把终端永久隐藏，已删除。 */
 /* 确保终端容器和终端背景颜色一致 */
 .terminal-container, .terminal-container .terminal {
   background-color: var(--term-bg, #1d1d1d) !important;

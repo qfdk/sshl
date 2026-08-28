@@ -64,3 +64,11 @@ test('connect paths activate atomically instead of pulling the buffer over invok
     );
     assert.match(source, /terminalResult\.isNew[\s\S]{0,240}getSessionBuffer/);
 });
+
+// #terminal-tab 的显隐由 shadcn Tabs 的 data-state 控制。旧规则
+// `#terminal-tab:not(.active){display:none}` 依赖 vanilla tab 写上的 .active 类，
+// 那个类随 tab 迁移消失后，这条规则会把整个终端区永久隐藏（表现为白屏）。
+test('terminal visibility is not gated on the removed .active class', async () => {
+    const runtime = await readFile(new URL('../assets/css/app-runtime.css', import.meta.url), 'utf8');
+    assert.doesNotMatch(runtime, /#terminal-tab:not\(\.active\)/);
+});
