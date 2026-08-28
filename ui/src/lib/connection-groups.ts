@@ -51,7 +51,10 @@ export function moveConnection(connections: Connection[], groupOrder: string[], 
     if (!buckets.has(group)) buckets.set(group, []);
     buckets.get(group)!.push(connection);
   }
-  const targetConnections = updated.group ? (buckets.get(updated.group) || []) : defaultConnections;
+  // 目标分组当前为空（比如刚新建的分组）时桶里没有它，必须先建桶再放进去，
+  // 否则下面按分组回填 ordered 时读不到这个桶，被拖动的机器会整条消失。
+  if (updated.group && !buckets.has(updated.group)) buckets.set(updated.group, []);
+  const targetConnections = updated.group ? buckets.get(updated.group)! : defaultConnections;
   const insertAt = beforeId ? targetConnections.findIndex(connection => connection.id === beforeId) : -1;
   if (insertAt >= 0) targetConnections.splice(insertAt, 0, updated);
   else targetConnections.push(updated);
