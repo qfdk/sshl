@@ -34,3 +34,10 @@ test('collapsed connection rows expose their name through a tooltip', () => {
     assert.match(list, /TooltipContent side="right"/);
     assert.doesNotMatch(list, /<TooltipTrigger asChild>\{row\}/);
 });
+
+// terminal.css 的所有覆盖都以 .terminal-container 为选择器。挂载点只带 id 时
+// 一条都匹配不上——内边距、层透明、滚动条抑制全部失效。
+test('terminal mount point carries the class the overrides target', async () => {
+    const terminal = await readFile(new URL('../ui/src/layout/Terminal.tsx', import.meta.url), 'utf8');
+    assert.match(terminal, /id="terminal-container"[^>]*className="terminal-container/);
+});

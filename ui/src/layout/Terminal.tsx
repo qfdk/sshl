@@ -18,7 +18,7 @@ export function Terminal() {
   return (
     <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: 'var(--term-bg, #1d1d1d)' }}>
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <div ref={containerRef} id="terminal-container" className="h-full w-full" />
+        <div ref={containerRef} id="terminal-container" className="terminal-container h-full w-full" />
         <div id="terminal-placeholder" className={`absolute inset-0 grid place-items-center bg-[#1d1d1d] ${sessionId ? 'hidden' : ''}`}>
           <div className="text-sm text-slate-300">点击左侧连接或创建新连接开始使用</div>
         </div>
