@@ -1,6 +1,12 @@
 // ui-manager.js
 // 处理UI相关功能
 
+import {
+    getActiveTabId,
+    getCurrentSessionId,
+    setActiveTabId,
+} from './app-state.mjs';
+
 class UIManager {
     constructor() {
         this.loadingOverlay = null; // 加载遮罩元素
@@ -133,7 +139,7 @@ class UIManager {
     // 判定按钮可用性并据当前终端内容刷新一次。在连接/切换会话（updateServerInfo）时调用。
     // 只要有保存连接即可用 —— su/sudo 在私钥登录的服务器上同样需要密码，账号密码存在该连接名下。
     syncFillPasswordState() {
-        const sessionId = window.currentSessionId;
+        const sessionId = getCurrentSessionId();
         const connectionId = sessionId
             ? window.sessionManager?.getSession(sessionId)?.connectionId
             : null;
@@ -166,7 +172,7 @@ class UIManager {
 
     // 填充指定密码（kind: 省略/'password' = 连接主密码；'acct:<账号>' = 账号密码），自动回车
     async doFillPassword(kind) {
-        const sessionId = window.currentSessionId;
+        const sessionId = getCurrentSessionId();
         if (!sessionId) return;
         try {
             const r = await window.api.ssh.fillPassword(sessionId, kind);
@@ -185,7 +191,7 @@ class UIManager {
 
     // 主键点击：只有一个候选直接填（sudo 常见），多个候选则打开菜单让用户选
     async fillPasswordPrimary() {
-        const connectionId = window.sessionManager?.getSession(window.currentSessionId)?.connectionId;
+        const connectionId = window.sessionManager?.getSession(getCurrentSessionId())?.connectionId;
         if (!connectionId) return;
         let info = null;
         try { info = await window.api.cred.list(connectionId); } catch (_) {}
@@ -218,7 +224,7 @@ class UIManager {
 
     async openFillPasswordMenu() {
         const menu = document.getElementById('fill-password-menu');
-        const connectionId = window.sessionManager?.getSession(window.currentSessionId)?.connectionId;
+        const connectionId = window.sessionManager?.getSession(getCurrentSessionId())?.connectionId;
         if (!menu || !connectionId) return;
         await this.buildFillPasswordMenu(menu, connectionId);
         menu.hidden = false;
@@ -465,7 +471,7 @@ class UIManager {
                 const tabId = tab.getAttribute('data-tab');
 
                 // 避免切换到相同标签
-                if (tabId === window.activeTabId) {
+                if (tabId === getActiveTabId()) {
                     return;
                 }
 
@@ -481,22 +487,7 @@ class UIManager {
                 document.getElementById(`${tabId}-tab`).classList.add('active');
 
                 // 更新当前活动标签
-                window.activeTabId = tabId;
-
-                // 如果切换到文件管理器，总是重新初始化文件列表（未连接时仅本地）
-                if (tabId === 'file-manager') {
-                    // 显示文件管理器加载状态
-                    window.uiManager.showFileManagerLoading(true);
-                    // 清除文件管理器缓存
-                    window.fileManager.clearFileManagerCache();
-
-                    // 延迟初始化以确保UI已更新（currentSessionId 为 null 时只加载本地面板）
-                    setTimeout(() => {
-                        // 确保使用最新的会话ID
-                        window.fileManager.initFileManager(window.currentSessionId);
-                        window.fileManager.fileManagerInitialized = true;
-                    }, 100);
-                }
+                setActiveTabId(tabId);
 
                 // 如果切换到终端标签，调整终端大小，但不要刷新终端内容
                 if (tabId === 'terminal' && window.terminalManager.activeTerminal) {
@@ -677,10 +668,10 @@ class UIManager {
         const remoteHomeBtn = document.getElementById('remote-home');
         if (remoteHomeBtn) {
             remoteHomeBtn.addEventListener('click', async function () {
-                if (!window.currentSessionId) return;
+                if (!getCurrentSessionId()) return;
                 this.disabled = true;
                 try {
-                    const sessionId = String(window.currentSessionId);
+                    const sessionId = String(getCurrentSessionId());
                     const result = await window.api.ssh.execute(sessionId, 'echo "$HOME"');
                     const home = (result && (result.output ?? result.data ?? result))?.toString().trim();
                     if (home) await window.fileManager.loadRemoteFiles(home);

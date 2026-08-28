@@ -1,6 +1,11 @@
 // file-manager.js
 // 文件管理器相关功能
 
+import {
+    getCurrentSessionId,
+    subscribe,
+} from './app-state.mjs';
+
 // LRU缓存实现
 class LRUCache {
     constructor(maxSize = 50) {
@@ -70,6 +75,17 @@ class FileManager {
                 }
             },
         };
+
+        subscribe('activeTabId', (tabId) => {
+            if (tabId !== 'file-manager') return;
+
+            window.uiManager.showFileManagerLoading(true);
+            this.clearFileManagerCache();
+            setTimeout(() => {
+                this.initFileManager(getCurrentSessionId());
+                this.fileManagerInitialized = true;
+            }, 100);
+        });
     }
     
     // 获取缓存的 DOM 元素
@@ -149,7 +165,7 @@ class FileManager {
     
     // 加载远程文件
     async loadRemoteFiles(path) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             console.error('无法加载远程文件：未连接到服务器');
             window.uiManager.showFileManagerLoading(false);
             return;
@@ -174,7 +190,7 @@ class FileManager {
             }
 
             // 确保传递字符串类型的sessionId
-            const sessionId = String(window.currentSessionId);
+            const sessionId = String(getCurrentSessionId());
 
             // 更新会话的远程工作目录
             window.sessionManager.updateRemotePath(sessionId, path);
@@ -560,7 +576,7 @@ class FileManager {
     
     // 上传文件
     async uploadFile(localFilePath, remotePath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -577,7 +593,7 @@ class FileManager {
             progressBar.style.width = '0%';
             transferInfo.textContent = `正在上传: ${this.path.basename(localFilePath)}`;
 
-            const result = await window.api.file.upload(window.currentSessionId, localFilePath, remotePath);
+            const result = await window.api.file.upload(getCurrentSessionId(), localFilePath, remotePath);
 
             if (result.success) {
                 // 上传成功，更新远程文件列表
@@ -586,8 +602,8 @@ class FileManager {
 
                 // 清除当前目录的缓存
                 const remotePathInput = document.getElementById('remote-path');
-                if (remotePathInput && window.currentSessionId) {
-                    const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
+                if (remotePathInput && getCurrentSessionId()) {
+                    const cacheKey = `${getCurrentSessionId()}:${remotePathInput.value}`;
                     this.remoteFileCache.delete(cacheKey);
                 }
 
@@ -619,7 +635,7 @@ class FileManager {
 
     // 下载文件
     async downloadFile(remotePath, localFilePath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -642,7 +658,7 @@ class FileManager {
             progressBar.style.width = '0%';
             transferInfo.textContent = `正在下载: ${this.path.basename(remotePath)}`;
 
-            const result = await window.api.file.download(window.currentSessionId, remotePath, localFilePath);
+            const result = await window.api.file.download(getCurrentSessionId(), remotePath, localFilePath);
 
             if (result.success) {
                 // 下载成功
@@ -715,7 +731,7 @@ class FileManager {
     }
 
     async deleteMultipleRemote(items) {
-        if (!window.currentSessionId || !items.length) return;
+        if (!getCurrentSessionId() || !items.length) return;
 
         const names = items.map(i => this.path.basename(i.path)).join(', ');
         if (!(await window.api.dialog.confirm(
@@ -724,7 +740,7 @@ class FileManager {
 
         for (const item of items) {
             const cmd = item.isDir ? `rm -rf "${item.path}"` : `rm -f "${item.path}"`;
-            const result = await window.api.ssh.execute(window.currentSessionId, cmd);
+            const result = await window.api.ssh.execute(getCurrentSessionId(), cmd);
             if (result.success) {
                 this._removeRowAndUpdateCache(item.path);
             }
@@ -732,7 +748,7 @@ class FileManager {
     }
 
     async downloadMultipleRemote(items) {
-        if (!window.currentSessionId || !items.length) return;
+        if (!getCurrentSessionId() || !items.length) return;
 
         const localDir = document.getElementById('local-path')?.value;
         if (!localDir) return;
@@ -748,7 +764,7 @@ class FileManager {
     }
 
     async uploadMultipleLocal(items) {
-        if (!window.currentSessionId || !items.length) return;
+        if (!getCurrentSessionId() || !items.length) return;
 
         const remotePath = document.getElementById('remote-path').value || '/';
         for (const item of items) {
@@ -786,8 +802,8 @@ class FileManager {
             if (row) row.remove();
         }
         const remotePathInput = document.getElementById('remote-path');
-        if (remotePathInput && window.currentSessionId) {
-            const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
+        if (remotePathInput && getCurrentSessionId()) {
+            const cacheKey = `${getCurrentSessionId()}:${remotePathInput.value}`;
             const cached = this.remoteFileCache.get(cacheKey);
             if (cached) {
                 const name = this.path.basename(filePath);
@@ -798,7 +814,7 @@ class FileManager {
 
     // 删除远程文件
     async deleteRemoteFile(filePath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -808,7 +824,7 @@ class FileManager {
         }
 
         try {
-            const result = await window.api.ssh.execute(window.currentSessionId, `rm -f "${filePath}"`);
+            const result = await window.api.ssh.execute(getCurrentSessionId(), `rm -f "${filePath}"`);
 
             if (result.success) {
                 this._removeRowAndUpdateCache(filePath);
@@ -823,7 +839,7 @@ class FileManager {
     
     // 删除远程目录
     async deleteRemoteDirectory(dirPath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -833,7 +849,7 @@ class FileManager {
         }
 
         try {
-            const result = await window.api.ssh.execute(window.currentSessionId, `rm -rf "${dirPath}"`);
+            const result = await window.api.ssh.execute(getCurrentSessionId(), `rm -rf "${dirPath}"`);
 
             if (result.success) {
                 this._removeRowAndUpdateCache(dirPath);
@@ -848,7 +864,7 @@ class FileManager {
     
     // 创建远程目录
     async createRemoteDirectory(parentPath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -868,13 +884,13 @@ class FileManager {
         try {
             window.uiManager.showFileManagerLoading(true);
 
-            const result = await window.api.file.createRemoteDirectory(window.currentSessionId, fullPath);
+            const result = await window.api.file.createRemoteDirectory(getCurrentSessionId(), fullPath);
 
             if (result.success) {
                 // 刷新远程文件列表
                 const remotePathInput = document.getElementById('remote-path');
-                if (remotePathInput && window.currentSessionId) {
-                    const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
+                if (remotePathInput && getCurrentSessionId()) {
+                    const cacheKey = `${getCurrentSessionId()}:${remotePathInput.value}`;
                     this.remoteFileCache.delete(cacheKey);
 
                     await this.loadRemoteFiles(remotePathInput.value);
@@ -892,7 +908,7 @@ class FileManager {
     
     // 上传目录
     async uploadDirectory(localDirPath, remoteDirPath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -909,7 +925,7 @@ class FileManager {
             progressBar.style.width = '0%';
             transferInfo.textContent = `正在上传文件夹: ${this.path.basename(localDirPath)}`;
 
-            const result = await window.api.file.uploadDirectory(window.currentSessionId, localDirPath, remoteDirPath);
+            const result = await window.api.file.uploadDirectory(getCurrentSessionId(), localDirPath, remoteDirPath);
 
             // 无论结果如何都更新进度
             progressBar.style.width = '100%';
@@ -919,8 +935,8 @@ class FileManager {
 
                 // 刷新远程文件列表
                 const remotePathInput = document.getElementById('remote-path');
-                if (remotePathInput && window.currentSessionId) {
-                    const cacheKey = `${window.currentSessionId}:${remotePathInput.value}`;
+                if (remotePathInput && getCurrentSessionId()) {
+                    const cacheKey = `${getCurrentSessionId()}:${remotePathInput.value}`;
                     this.remoteFileCache.delete(cacheKey);
 
                     await this.loadRemoteFiles(remotePathInput.value);
@@ -949,7 +965,7 @@ class FileManager {
 
     // 选择并上传目录
     async selectAndUploadDirectory(remotePath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -973,7 +989,7 @@ class FileManager {
     
     // 下载目录
     async downloadDirectory(remoteDirPath, localBasePath) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -997,7 +1013,7 @@ class FileManager {
             progressBar.style.width = '0%';
             transferInfo.textContent = `正在下载文件夹: ${dirName}`;
 
-            const downloadResult = await window.api.file.downloadDirectory(window.currentSessionId, remoteDirPath, localDirPath);
+            const downloadResult = await window.api.file.downloadDirectory(getCurrentSessionId(), remoteDirPath, localDirPath);
 
             if (downloadResult.success) {
                 // 下载成功
@@ -1471,7 +1487,7 @@ class FileManager {
 
     // 应用权限修改
     async applyPermissions(filePath, permissions) {
-        if (!window.currentSessionId) {
+        if (!getCurrentSessionId()) {
             alert('请先连接到服务器');
             return;
         }
@@ -1486,7 +1502,7 @@ class FileManager {
 
         try {
             // 确保传递字符串类型的sessionId
-            const sessionId = String(window.currentSessionId);
+            const sessionId = String(getCurrentSessionId());
             const result = await window.api.file.changePermissions(
                 sessionId,
                 filePath,
@@ -1499,8 +1515,8 @@ class FileManager {
 
                 // 刷新文件列表
                 const currentPath = document.getElementById('remote-path').value || '/';
-                if (window.currentSessionId) {
-                    const cacheKey = `${window.currentSessionId}:${currentPath}`;
+                if (getCurrentSessionId()) {
+                    const cacheKey = `${getCurrentSessionId()}:${currentPath}`;
                     this.remoteFileCache.delete(cacheKey);
                 }
                 await this.loadRemoteFiles(currentPath);

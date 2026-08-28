@@ -2,6 +2,11 @@
 // 专门处理终端相关功能
 
 import { getTerminalSettings } from './settings.js';
+import {
+    getActiveTabId,
+    getCurrentSessionId,
+    setCurrentSessionId,
+} from './app-state.mjs';
 
 // 终端主题：与用户 Ghostty 配置（Carbonfox 改）对齐 —— 背景/前景/光标/选区 + 16 色调色板。
 // 两条终端创建路径（createXtermInstance 默认 + initTerminal 的 termOptions）共用，
@@ -252,13 +257,13 @@ class TerminalManager {
         
         // 防抖的resize函数
         this.resizeTerminal = debounce(() => {
-            if (this.terminalFitAddon && this.activeTerminal && window.currentSessionId) {
+            if (this.terminalFitAddon && this.activeTerminal && getCurrentSessionId()) {
                 try {
                     this.terminalFitAddon.fit();
                     
                     const dimensions = this.terminalFitAddon.proposeDimensions();
                     if (dimensions && dimensions.cols && dimensions.rows) {
-                        window.api.ssh.resize(window.currentSessionId, dimensions.cols, dimensions.rows)
+                        window.api.ssh.resize(getCurrentSessionId(), dimensions.cols, dimensions.rows)
                             .catch(err => {
                                 // 只记录非会话相关的错误，避免切换会话时的噪音
                                 if (!err.message || !err.message.includes('会话未找到')) {
@@ -374,7 +379,6 @@ class TerminalManager {
         this.activeTerminal = entry.term;
         this.terminalFitAddon = entry.fitAddon;
         this.activeSessionId = sessionId;
-        window.terminalFitAddon = entry.fitAddon;
 
         const placeholder = document.getElementById('terminal-placeholder');
         if (placeholder) placeholder.classList.add('hidden');
@@ -539,7 +543,6 @@ class TerminalManager {
             this.activeTerminal = term;
             this.terminalFitAddon = fitAddon;
             this.activeSessionId = sessionId;
-            window.terminalFitAddon = fitAddon;
 
             const placeholder = document.getElementById('terminal-placeholder');
             if (placeholder) placeholder.classList.add('hidden');
@@ -582,7 +585,6 @@ class TerminalManager {
             this.activeTerminal = null;
             this.terminalFitAddon = null;
             this.activeSessionId = null;
-            window.terminalFitAddon = null;
         }
     }
     
@@ -592,14 +594,14 @@ class TerminalManager {
      */
     async disconnectSession(sessionId) {
         if (!sessionId) return;
-        const isActive = window.currentSessionId === sessionId;
+        const isActive = getCurrentSessionId() === sessionId;
         // 断开前记录所属连接，供远程面板"重新连接"按钮使用（removeSession 后就取不到了）。
         const connectionId = window.sessionManager.getSession(sessionId)?.connectionId || null;
 
         // 当前在文件管理标签或正在传输文件时，断开前需确认（Tauri 原生 confirm 不可靠，走 plugin dialog）
         const fm = window.fileManager;
         const transferring = fm && fm.activeTransfers > 0;
-        const onFileTab = window.activeTabId === 'file-manager';
+        const onFileTab = getActiveTabId() === 'file-manager';
         if (transferring || onFileTab) {
             const msg = transferring
                 ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？'
@@ -627,7 +629,7 @@ class TerminalManager {
         this.disposeTerminalInstance(sessionId);
 
         if (isActive) {
-            window.currentSessionId = null;
+            setCurrentSessionId(null);
 
             const placeholder = document.getElementById('terminal-placeholder');
             if (placeholder) placeholder.classList.remove('hidden');
@@ -676,13 +678,13 @@ class TerminalManager {
     
     // 调整终端大小
     resizeTerminal() {
-        if (this.terminalFitAddon && this.activeTerminal && window.currentSessionId) {
+        if (this.terminalFitAddon && this.activeTerminal && getCurrentSessionId()) {
             this.terminalFitAddon.fit();
     
             // 获取并发送更新的终端尺寸
             const dimensions = this.terminalFitAddon.proposeDimensions();
             if (dimensions && window.api && window.api.ssh) {
-                window.api.ssh.resize(window.currentSessionId, dimensions.cols, dimensions.rows)
+                window.api.ssh.resize(getCurrentSessionId(), dimensions.cols, dimensions.rows)
                     .catch(err => {
                         // 只记录非会话相关的错误，避免切换会话时的噪音
                         if (!err.message || !err.message.includes('会话未找到')) {

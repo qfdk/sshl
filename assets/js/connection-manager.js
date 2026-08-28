@@ -7,6 +7,10 @@ import {
     matchesConnection,
     moveConnection,
 } from './connection-groups.mjs';
+import {
+    getCurrentSessionId,
+    setCurrentSessionId,
+} from './app-state.mjs';
 
 const COLLAPSED_GROUPS_KEY = 'sshl.collapsedConnectionGroups';
 
@@ -280,8 +284,8 @@ class ConnectionManager {
         window.sessionManager.removeSession(sessionId);
         window.terminalManager.disposeTerminalInstance(sessionId);
 
-        if (window.currentSessionId === sessionId) {
-            window.currentSessionId = null;
+        if (getCurrentSessionId() === sessionId) {
+            setCurrentSessionId(null);
 
             const placeholder = document.getElementById('terminal-placeholder');
             if (placeholder) placeholder.classList.remove('hidden');
@@ -296,8 +300,8 @@ class ConnectionManager {
             );
         }
 
-        const activeConnectionId = window.currentSessionId
-            ? window.sessionManager.getSession(window.currentSessionId)?.connectionId || null
+        const activeConnectionId = getCurrentSessionId()
+            ? window.sessionManager.getSession(getCurrentSessionId())?.connectionId || null
             : null;
         this.updateActiveConnectionItem(activeConnectionId);
     }
@@ -370,7 +374,7 @@ class ConnectionManager {
     createConnectionItem(connection) {
         const existingSessionInfo = window.sessionManager.getSessionByConnectionId(connection.id);
         const isConnected = existingSessionInfo !== null;
-        const isActive = isConnected && existingSessionInfo.sessionId === window.currentSessionId;
+        const isActive = isConnected && existingSessionInfo.sessionId === getCurrentSessionId();
         const statusClass = isConnected ? 'online' : 'offline';
         const item = document.createElement('div');
         item.className = 'connection-item';
@@ -469,7 +473,7 @@ class ConnectionManager {
             return false;
         }
 
-        if (window.currentSessionId === sessionInfo.sessionId) {
+        if (getCurrentSessionId() === sessionInfo.sessionId) {
             return true;
         }
 
@@ -505,7 +509,7 @@ class ConnectionManager {
                     const result = await window.api.ssh.connect(connection);
                     if (result.success) {
                         // 更新会话ID
-                        window.currentSessionId = result.sessionId;
+                        setCurrentSessionId(result.sessionId);
 
                         // 创建该 session 的 xterm 实例（其他后台 session 的 host 会被隐藏，但不销毁）
                         const terminalInfo = await window.terminalManager.initTerminal(result.sessionId, null, false);
@@ -559,11 +563,11 @@ class ConnectionManager {
             }
 
             // 标记上一个会话为非活跃（数据仍会写入其 xterm，便于切回时即时可见）
-            if (window.currentSessionId && window.currentSessionId !== sessionInfo.sessionId) {
-                window.sessionManager.setSessionActive(window.currentSessionId, false);
+            if (getCurrentSessionId() && getCurrentSessionId() !== sessionInfo.sessionId) {
+                window.sessionManager.setSessionActive(getCurrentSessionId(), false);
             }
 
-            window.currentSessionId = sessionInfo.sessionId;
+            setCurrentSessionId(sessionInfo.sessionId);
             window.sessionManager.setSessionActive(sessionInfo.sessionId, true);
 
             // 全局 ssh:data / ssh:closed 监听器只注册一次（按 sessionId 路由）
@@ -619,7 +623,7 @@ class ConnectionManager {
                 // 等待终端初始化完成后，再初始化文件管理器
                 setTimeout(() => {
                     // 确保使用最新的会话ID
-                    const currentSessionId = window.currentSessionId;
+                    const currentSessionId = getCurrentSessionId();
                     window.fileManager.initFileManager(currentSessionId);
                     window.fileManager.fileManagerInitialized = true;
                 }, 100);
@@ -740,7 +744,7 @@ class ConnectionManager {
             if (!result) return;
 
             if (result && result.success) {
-                window.currentSessionId = result.sessionId;
+                setCurrentSessionId(result.sessionId);
 
                 // 不再 re-save 连接：后端 StoredConnection 不持久化 sessionId，这次回存毫无用处，
                 // 反而会因传入对象缺少 password 字段把 has_password 标志冲成 false（密码仍在 secrets 库）。
@@ -867,7 +871,7 @@ class ConnectionManager {
             if (result.success) {
                 // 生成ID并保存会话
                 const generatedId = Date.now().toString();
-                window.currentSessionId = result.sessionId;
+                setCurrentSessionId(result.sessionId);
 
                 // 如果不保存密码，则从保存的连接信息中清除密码
                 const savedConnectionDetails = {...connectionDetails};
@@ -1094,8 +1098,8 @@ class ConnectionManager {
             window.terminalManager.disposeTerminalInstance(sessionId);
 
             // 如果是当前活跃会话，清理 UI
-            if (sessionId === window.currentSessionId) {
-                window.currentSessionId = null;
+            if (sessionId === getCurrentSessionId()) {
+                setCurrentSessionId(null);
 
                 const placeholder = document.getElementById('terminal-placeholder');
                 if (placeholder) placeholder.classList.remove('hidden');

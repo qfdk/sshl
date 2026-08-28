@@ -94,8 +94,6 @@ function initializeApp() {
     window.fileManager = fileManager;
     window.connectionManager = connectionManager;
     window.uiManager = uiManager;
-    window.activeTabId = 'terminal';  // 默认活动标签
-    window.currentSessionId = null;   // 当前会话ID
 
     connectionManager.setupConnectionCancellation();
 
