@@ -7,7 +7,7 @@
     <% if (typeof cssBundle !== 'undefined' && cssBundle) { %>
         <link rel="stylesheet" href="<%= cssBundle %>">
     <% } else { %>
-        <% ['assets/css/fonts.css','assets/css/main.css','assets/css/file-manager.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
+        <% ['assets/css/fonts.css','assets/css/main.css','assets/css/terminal.css','assets/css/buttons.css'].forEach(function(cssPath) { %>
             <link rel="stylesheet" href="app://<%= cssPath %>">
         <% }); %>
     <% } %>

@@ -8,7 +8,6 @@ import {
     moveConnection,
 } from './connection-groups.mjs';
 import {
-    getActiveTabId,
     getCurrentSessionId,
     setConnectionDialogOpen,
     setEditingConnection,
@@ -295,9 +294,8 @@ class ConnectionManager {
 
             window.uiManager.updateConnectionStatus(false);
             window.uiManager.updateServerInfo(false);
-            window.fileManager.clearFileManagerCache();
-            window.fileManager.fileManagerInitialized = false;
-            window.fileManager.renderRemoteEmptyState(
+            window.fileManager?.clearCache?.();
+            window.fileManager?.showRemoteEmptyState(
                 '连接已失效，正在重新连接...',
                 session?.connectionId || null
             );
@@ -481,7 +479,7 @@ class ConnectionManager {
         }
 
         try {
-            window.fileManager.clearFileManagerCache();
+            window.fileManager?.clearCache?.();
 
             sessionInfo = window.sessionManager.getSessionByConnectionId(connectionId);
             if (!sessionInfo) {
@@ -538,20 +536,6 @@ class ConnectionManager {
                             host: connection.host
                         });
                         this.updateActiveConnectionItem(connectionId);
-
-                        // 重置文件管理器状态
-                        window.fileManager.fileManagerInitialized = false;
-                        
-                        // 如果当前活动标签是文件管理器，立即初始化它
-                        if (getActiveTabId() === 'file-manager') {
-                            // 显示文件管理器加载状态
-                            window.uiManager.showFileManagerLoading(true);
-                            // 延迟初始化以确保UI已更新
-                            setTimeout(() => {
-                                window.fileManager.initFileManager(result.sessionId);
-                                window.fileManager.fileManagerInitialized = true;
-                            }, 100);
-                        }
 
                         return true;
                     } else {
@@ -612,23 +596,6 @@ class ConnectionManager {
             }).catch(err => {
                 console.error('获取连接信息失败:', err);
             });
-
-            // 重置文件管理器状态，确保使用新连接重新初始化
-            window.fileManager.fileManagerInitialized = false;
-
-            // 如果当前活动标签是文件管理器，立即初始化它
-            if (getActiveTabId() === 'file-manager') {
-                // 显示文件管理器加载状态
-                window.uiManager.showFileManagerLoading(true);
-
-                // 等待终端初始化完成后，再初始化文件管理器
-                setTimeout(() => {
-                    // 确保使用最新的会话ID
-                    const currentSessionId = getCurrentSessionId();
-                    window.fileManager.initFileManager(currentSessionId);
-                    window.fileManager.fileManagerInitialized = true;
-                }, 100);
-            }
 
             // 确保终端大小正确，但使用延迟调整避免高CPU使用
             setTimeout(() => window.terminalManager.resizeTerminal(), 150);
@@ -740,21 +707,6 @@ class ConnectionManager {
 
                 // 更新连接列表（已包含活跃状态更新）
                 await this.loadConnections();
-
-                // 重置文件管理器状态
-                window.fileManager.fileManagerInitialized = false;
-
-                // 如果文件管理器标签处于活动状态，现在初始化它
-                if (getActiveTabId() === 'file-manager') {
-                    // 显示加载状态
-                    window.uiManager.showFileManagerLoading(true);
-
-                    // 短暂延迟以确保会话准备就绪
-                    setTimeout(() => {
-                        window.fileManager.initFileManager(result.sessionId);
-                        window.fileManager.fileManagerInitialized = true;
-                    }, 100);
-                }
 
             } else {
                 alert(`连接失败: ${result ? result.error || 'unknown error' : 'unknown error'}`);
@@ -868,20 +820,6 @@ class ConnectionManager {
                 // 更新连接列表
                 await this.loadConnections();
 
-                // 重置文件管理器状态
-                window.fileManager.fileManagerInitialized = false;
-
-                // 如果当前活动标签是文件管理器，初始化它
-                if (getActiveTabId() === 'file-manager') {
-                        // 显示加载状态
-                        window.uiManager.showFileManagerLoading(true);
-                        
-                        // 短暂延迟确保会话准备就绪
-                        setTimeout(() => {
-                            window.fileManager.initFileManager(result.sessionId);
-                            window.fileManager.fileManagerInitialized = true;
-                        }, 100);
-                }
             } else {
                 alert(`连接失败: ${result.error}`);
             }
@@ -1027,11 +965,10 @@ class ConnectionManager {
                 window.uiManager.updateConnectionStatus(false);
                 window.uiManager.updateServerInfo(false);
 
-                window.fileManager.clearFileManagerCache();
-                window.fileManager.fileManagerInitialized = false;
+                window.fileManager?.clearCache?.();
 
                 // 不跳回终端：远程面板提示重新连接，本地面板仍可浏览。
-                window.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器', connectionId);
+                window.fileManager?.showRemoteEmptyState('连接已断开，请重新连接到服务器', connectionId);
             }
 
             // 更新连接列表

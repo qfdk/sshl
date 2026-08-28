@@ -46,7 +46,7 @@ fs.copyFileSync(path.join(NODE_MODULES, 'xterm-addon-unicode11/lib/xterm-addon-u
 //     app-runtime.css 不入 bundle：它必须在 xterm.css 之后单独加载（见 index.ejs）。
 const CSS_ORDER = [
   'fonts.css', 'main.css',
-  'file-manager.css', 'terminal.css', 'buttons.css',
+  'terminal.css', 'buttons.css',
 ];
 const bundleCss = CSS_ORDER
   .map((name) => `/* === ${name} === */\n${fs.readFileSync(path.join(OUT_DIR, 'assets/css', name), 'utf8')}`)

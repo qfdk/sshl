@@ -55,30 +55,6 @@ class UIManager {
         }
     }
 
-    // 显示/隐藏文件管理器加载状态
-    showFileManagerLoading(show) {
-        const loadingOverlay = document.getElementById('file-manager-loading');
-        if (loadingOverlay) {
-            if (show) {
-                loadingOverlay.classList.remove('hidden');
-            } else {
-                loadingOverlay.classList.add('hidden');
-            }
-        }
-    }
-
-    // 显示/隐藏传输状态栏
-    showTransferStatus(show) {
-        const transferStatus = document.querySelector('.transfer-status');
-        if (transferStatus) {
-            if (show) {
-                transferStatus.classList.add('active');
-            } else {
-                transferStatus.classList.remove('active');
-            }
-        }
-    }
-    
     // 更新连接状态
     updateConnectionStatus(connected, name = '') {
         const statusIndicator = document.querySelector('.status-indicator');
@@ -476,75 +452,6 @@ class UIManager {
             });
         }
 
-        // 本地文件浏览按钮
-        const browseLocalBtn = document.getElementById('browse-local');
-        if (browseLocalBtn) {
-            browseLocalBtn.addEventListener('click', async () => {
-                await window.fileManager.loadLocalFiles(null); // 传递 null 会触发目录选择对话框
-            });
-        }
-
-        // 远程路径导航按钮
-        const goRemotePathBtn = document.getElementById('go-remote-path');
-        if (goRemotePathBtn) {
-            goRemotePathBtn.addEventListener('click', function () {
-                const path = document.getElementById('remote-path').value;
-                if (path) {
-                    // 防止重复点击
-                    this.disabled = true;
-                    window.fileManager.loadRemoteFiles(path).finally(() => {
-                        this.disabled = false;
-                    });
-                }
-            });
-        }
-
-        // 本地刷新按钮
-        const localRefreshBtn = document.getElementById('local-refresh');
-        if (localRefreshBtn) {
-            localRefreshBtn.addEventListener('click', function () {
-                const path = document.getElementById('local-path').value;
-                if (path) {
-                    // 防止重复点击
-                    this.disabled = true;
-                    window.fileManager.loadLocalFiles(path).finally(() => {
-                        this.disabled = false;
-                    });
-                }
-            });
-        }
-
-        // 远程刷新按钮
-        const remoteRefreshBtn = document.getElementById('remote-refresh');
-        if (remoteRefreshBtn) {
-            remoteRefreshBtn.addEventListener('click', function () {
-                const path = document.getElementById('remote-path').value;
-                if (path) {
-                    // 防止重复点击
-                    this.disabled = true;
-                    window.fileManager.loadRemoteFiles(path).finally(() => {
-                        this.disabled = false;
-                    });
-                }
-            });
-        }
-
-        // 本地主目录按钮
-        const localHomeBtn = document.getElementById('local-home');
-        if (localHomeBtn) {
-            localHomeBtn.addEventListener('click', async function () {
-                this.disabled = true;
-                try {
-                    const home = await window.api.file.getHomeDir();
-                    if (home) await window.fileManager.loadLocalFiles(home);
-                } catch (e) {
-                    console.error('获取本地主目录失败:', e);
-                } finally {
-                    this.disabled = false;
-                }
-            });
-        }
-
         // 填充密码：分体按钮（主键智能填充 + 下拉选择账号/管理），自动回车，常用于 sudo / su
         const fillPwGroup = document.getElementById('fill-password-group');
         const fillPwBtn = document.getElementById('fill-password-btn');
@@ -564,43 +471,6 @@ class UIManager {
             // 点击按钮组以外区域关闭菜单
             document.addEventListener('click', (e) => {
                 if (fillPwGroup && !fillPwGroup.contains(e.target)) fillPwMenu.hidden = true;
-            });
-        }
-
-        // 远程主目录按钮
-        const remoteHomeBtn = document.getElementById('remote-home');
-        if (remoteHomeBtn) {
-            remoteHomeBtn.addEventListener('click', async function () {
-                if (!getCurrentSessionId()) return;
-                this.disabled = true;
-                try {
-                    const sessionId = String(getCurrentSessionId());
-                    const result = await window.api.ssh.execute(sessionId, 'echo "$HOME"');
-                    const home = (result && (result.output ?? result.data ?? result))?.toString().trim();
-                    if (home) await window.fileManager.loadRemoteFiles(home);
-                } catch (e) {
-                    console.error('获取远程主目录失败:', e);
-                } finally {
-                    this.disabled = false;
-                }
-            });
-        }
-    }
-    
-    // 设置回调函数，用于输入框回车键处理
-    setupEnterKeyHandler(elementId, loadFunction) {
-        const inputElement = document.getElementById(elementId);
-
-        if (inputElement) {
-            inputElement.addEventListener('keydown', async (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const path = inputElement.value;
-
-                    if (path) {
-                        await loadFunction(path);
-                    }
-                }
             });
         }
     }

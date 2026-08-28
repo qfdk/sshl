@@ -2,92 +2,14 @@
 // 应用程序入口文件，导入所有模块并初始化应用
 
 // 导入所有管理器模块
-import fileManager from './file-manager.js';
 import connectionManager from './connection-manager.js';
 import uiManager from './ui-manager.js';
 
-// 添加自定义样式（仅注入依赖 Icons.dataUri 的右键菜单图标样式；其余已静态化到 app-runtime.css）
-function addCustomStyles() {
-    // 右键菜单样式
-    const menuCSS = `
-    #context-menu {
-        position: fixed;
-        background-color: white;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        padding: 5px 0;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-        z-index: 1000;
-    }
-
-    #context-menu div {
-        padding: 8px 12px;
-        cursor: pointer;
-        color: #333;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-
-    #context-menu div:hover {
-        background-color: #f3f4f6;
-    }
-
-    #context-menu div.download::before {
-        content: "";
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        background-image: url("${window.Icons.dataUri('download', '#333333')}");
-        background-repeat: no-repeat;
-        background-position: center;
-    }
-
-    #context-menu div.upload::before {
-        content: "";
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        background-image: url("${window.Icons.dataUri('upload', '#333333')}");
-        background-repeat: no-repeat;
-        background-position: center;
-    }
-
-    #context-menu div.delete::before {
-        content: "";
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        background-image: url("${window.Icons.dataUri('trash-2', '#333333')}");
-        background-repeat: no-repeat;
-        background-position: center;
-    }
-    #context-menu div.create-directory::before {
-        content: "";
-        display: inline-block;
-        width: 16px;
-        height: 16px;
-        background-image: url("${window.Icons.dataUri('folder-plus', '#374151')}");
-        background-repeat: no-repeat;
-        background-position: center;
-    }
-    `;
-
-    // 仅注入依赖 Icons.dataUri 的右键菜单图标样式；其余已静态化到 app-runtime.css
-    const customStyle = document.createElement('style');
-    customStyle.textContent = menuCSS;
-    document.head.appendChild(customStyle);
-}
-
 // 初始化应用程序
 export function initializeApp(terminalManager, sessionManager) {
-    // 添加自定义样式
-    addCustomStyles();
-
     // 设置全局变量和引用，使模块能够相互访问
     window.sessionManager = sessionManager;
     window.terminalManager = terminalManager;
-    window.fileManager = fileManager;
     window.connectionManager = connectionManager;
     window.uiManager = uiManager;
 
@@ -95,14 +17,6 @@ export function initializeApp(terminalManager, sessionManager) {
 
     // 初始化UI事件监听
     uiManager.initUIEvents();
-
-
-    // 设置路径输入框的回车键处理
-    uiManager.setupEnterKeyHandler('remote-path', path => fileManager.loadRemoteFiles(path));
-    uiManager.setupEnterKeyHandler('local-path', path => fileManager.loadLocalFiles(path));
-
-    // 设置文件传输监听
-    fileManager.setupFileTransferListeners();
 
     // 设置SSH数据处理和连接关闭处理
     connectionManager.setupSSHHandlers();
@@ -115,37 +29,6 @@ export function initializeApp(terminalManager, sessionManager) {
         window.api.config.onConnectionsUpdated(() => {
             connectionManager.loadConnections();
         });
-    }
-
-    // 传输进度监听（下载 + 上传）
-    if (window.api && window.api.file) {
-        // 后端进度事件统一为 { remotePath, transferred, total }，前端据此算百分比。
-        const renderTransfer = (verb, d) => {
-            const progressBar = document.getElementById('transfer-progress-bar');
-            const transferInfo = document.getElementById('transfer-info');
-            if (!progressBar || !transferInfo) return;
-
-            uiManager.showTransferStatus(true);
-            const total = d.total || 0;
-            const pct = total > 0 ? Math.min(100, Math.round((d.transferred / total) * 100)) : 0;
-            progressBar.style.width = `${pct}%`;
-
-            const fileName = fileManager.path.basename(d.remotePath);
-            const done = fileManager.formatFileSize(d.transferred || 0);
-            const all = fileManager.formatFileSize(total);
-            transferInfo.textContent = `正在${verb}: ${fileName} (${pct}% - ${done}/${all})`;
-
-            if (pct >= 100) {
-                transferInfo.textContent = `${verb}完成`;
-                setTimeout(() => {
-                    progressBar.style.width = '0%';
-                    uiManager.showTransferStatus(false);
-                }, 3000);
-            }
-        };
-
-        window.api.file.onDownloadProgress((_event, d) => renderTransfer('下载', d));
-        window.api.file.onUploadProgress((_event, d) => renderTransfer('上传', d));
     }
 
     // 添加连接项点击事件委托
@@ -206,67 +89,9 @@ export function initializeApp(terminalManager, sessionManager) {
             return;
         }
     });
-
-    // 初始化终端占位符
-    setupPaneDivider();
-}
-
-function setupPaneDivider() {
-    const divider = document.getElementById('pane-divider');
-    if (!divider) return;
-    const split = divider.parentElement;
-    const localPane = split.querySelector('.local-pane');
-    if (!split || !localPane) return;
-
-    const STORAGE_KEY = 'sshl.localPaneFlex';
-    const saved = parseFloat(localStorage.getItem(STORAGE_KEY));
-    if (saved && saved > 0) {
-        localPane.style.flexGrow = String(saved);
-    }
-
-    let startX = 0;
-    let startLocalW = 0;
-    let startRemoteW = 0;
-    let totalFlex = 0;
-
-    const onMove = (e) => {
-        const dx = e.clientX - startX;
-        const newLocalW = Math.max(220, Math.min(startLocalW + dx, startLocalW + startRemoteW - 220));
-        const ratio = newLocalW / (startLocalW + startRemoteW);
-        const localFlex = ratio * totalFlex;
-        const remoteFlex = totalFlex - localFlex;
-        localPane.style.flexGrow = String(localFlex);
-        split.querySelector('.remote-pane').style.flexGrow = String(remoteFlex);
-    };
-
-    const onUp = () => {
-        divider.classList.remove('dragging');
-        document.body.style.cursor = '';
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        localStorage.setItem(STORAGE_KEY, localPane.style.flexGrow || '1');
-    };
-
-    divider.addEventListener('mousedown', (e) => {
-        e.preventDefault();
-        const localRect = localPane.getBoundingClientRect();
-        const remotePane = split.querySelector('.remote-pane');
-        const remoteRect = remotePane.getBoundingClientRect();
-        startX = e.clientX;
-        startLocalW = localRect.width;
-        startRemoteW = remoteRect.width;
-        const localFlex = parseFloat(localPane.style.flexGrow) || 1;
-        const remoteFlex = parseFloat(remotePane.style.flexGrow) || 1;
-        totalFlex = localFlex + remoteFlex;
-        divider.classList.add('dragging');
-        document.body.style.cursor = 'col-resize';
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-    });
 }
 
 export {
-    fileManager,
     connectionManager,
     uiManager
 };

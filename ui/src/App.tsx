@@ -3,7 +3,7 @@ import { getActiveTabId, setActiveTabId, subscribe } from '../../assets/js/app-s
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Sidebar } from './layout/Sidebar';
 import { Terminal } from './layout/Terminal';
-import { FileManager } from './layout/FileManager';
+import { FileManager } from './features/files/FileManager';
 import { ConnectionDialog } from './layout/ConnectionDialog';
 import { SettingsDialog } from './layout/SettingsDialog';
 
