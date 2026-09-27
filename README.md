@@ -48,4 +48,8 @@ bun test         # 测试
 
 ## 赞助
 
-本项目由 [Voilà Pro](https://voilapro.app/) 赞助支持。
+<a href="https://voilapro.app/"><img src="docs/voilapro.png" width="64" alt="VoilaPro" align="left"></a>
+
+本项目由 **[VoilaPro](https://voilapro.app/)** 赞助支持。
+<br clear="left">
+
