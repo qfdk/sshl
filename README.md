@@ -65,6 +65,10 @@ bun test         # 测试
 - 主机密钥按 TOFU 校验：首次连接信任并写入 `known_hosts`，之后密钥变更直接拒绝连接（防中间人）
 - 自动填密码全程在后端完成，明文不经过渲染层；只有终端出现密码提示时才显示填充按钮
 
+## 许可证
+
+[GNU General Public License v3.0](LICENSE)（GPL-3.0）——衍生作品须以相同许可证开源。
+
 ## 赞助
 
 <a href="https://voilapro.app/?ref=github-sshl"><img src="https://voilapro.app/images/icon.png" alt="Voilà Pro" width="160"/></a>
