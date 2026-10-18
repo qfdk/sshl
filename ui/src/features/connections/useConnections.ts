@@ -42,7 +42,7 @@ export type ConnectionManager = {
   switchToSession: (connectionId: string) => Promise<boolean>;
   submitConnection: (details: ConnectionDetails) => Promise<void>;
   saveEditedConnection: (id: string, details: ConnectionDetails) => Promise<void>;
-  disconnect: (sessionId: string) => Promise<void>;
+  disconnect: (sessionId: string, options?: { confirm?: boolean }) => Promise<void>;
   deleteConnection: (id: string) => Promise<void>;
   move: (connectionId: string, targetGroup: string, beforeId?: string | null) => void;
   toggleGroup: (groupName: string) => void;
@@ -352,15 +352,17 @@ export function useConnections(): ConnectionManager {
     }
   }, [loadConnections]);
 
-  const disconnect = useCallback(async (sessionId: string) => {
+  // options.confirm：调用方（如会话标签的 ×）要求无论如何先确认；传输中/文件管理页仍用更具体的提示，只弹一次。
+  const disconnect = useCallback(async (sessionId: string, options: { confirm?: boolean } = {}) => {
     if (!sessionId) return;
     const isActive = getCurrentSessionId() === sessionId;
     const connectionId = sessionManager.getSession(sessionId)?.connectionId || null;
     const fileManager = appWindow().fileManager;
     const transferring = fileManager && fileManager.activeTransfers > 0;
     const onFileTab = getActiveTabId() === 'file-manager';
-    if (transferring || onFileTab) {
-      const message = transferring ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？' : '当前正在使用文件管理，断开连接会关闭文件传输。\n确定要断开吗？';
+    if (transferring || onFileTab || options.confirm) {
+      const name = String(sessionManager.getSession(sessionId)?.name || '') || '这个会话';
+      const message = transferring ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？' : onFileTab ? '当前正在使用文件管理，断开连接会关闭文件传输。\n确定要断开吗？' : `确定要断开「${name}」吗？`;
       if (!await appWindow().api.dialog.confirm(message, '断开连接')) return;
     }
     // 用户主动断开：探活结果回来时不能把它当成「连接失效」去自动重连。

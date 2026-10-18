@@ -34,3 +34,24 @@ test('takes the current name from the saved connection, falling back to the sess
 test('no sessions means no tabs', () => {
   assert.deepEqual(toSessionTabs([], connections, null), []);
 });
+
+const tab = id => ({ sessionId: id });
+
+test('dragged order wins; tabs opened since keep their opening order at the end', async () => {
+  const { applyTabOrder } = await import('../ui/src/lib/session-tabs.ts');
+  const tabs = ['s1', 's2', 's3', 's4'].map(tab);
+  // s3 已被拖到最前；s4 是之后新开的；order 里的 s9 已关闭
+  const ordered = applyTabOrder(tabs, ['s3', 's1', 's9', 's2']);
+  assert.deepEqual(ordered.map(item => item.sessionId), ['s3', 's1', 's2', 's4']);
+  assert.deepEqual(applyTabOrder(tabs, []).map(item => item.sessionId), ['s1', 's2', 's3', 's4']);
+});
+
+test('moves a dragged tab before or after the drop target', async () => {
+  const { moveTabId } = await import('../ui/src/lib/session-tabs.ts');
+  const ids = ['a', 'b', 'c', 'd'];
+  assert.deepEqual(moveTabId(ids, 'd', 'b', 'before'), ['a', 'd', 'b', 'c']);
+  assert.deepEqual(moveTabId(ids, 'a', 'c', 'after'), ['b', 'c', 'a', 'd']);
+  assert.deepEqual(moveTabId(ids, 'a', 'd', 'after'), ['b', 'c', 'd', 'a']);
+  assert.deepEqual(moveTabId(ids, 'b', 'b', 'before'), ids);
+  assert.deepEqual(moveTabId(ids, 'x', 'b', 'before'), ids);
+});
