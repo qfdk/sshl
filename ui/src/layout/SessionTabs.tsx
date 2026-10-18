@@ -28,9 +28,10 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
         </div>
       ))}
       {!tabs.length && <span data-tauri-drag-region className="px-1 text-sm text-muted-foreground">未连接</span>}
-      <button type="button" className="grid h-[34px] w-[34px] place-items-center rounded-[10px] border border-dashed border-foreground/20 text-muted-foreground hover:border-foreground/35 hover:text-foreground" title="新建连接" aria-label="新建连接" onClick={() => { setEditingConnection(null); setConnectionDialogOpen(true); }}>
+      {/* 没有会话时侧边栏的「新建连接」就够了，这里只在已有标签时提供 + */}
+      {tabs.length > 0 && <button type="button" className="grid h-[34px] w-[34px] place-items-center rounded-[10px] border border-dashed border-foreground/20 text-muted-foreground hover:border-foreground/35 hover:text-foreground" title="新建连接" aria-label="新建连接" onClick={() => { setEditingConnection(null); setConnectionDialogOpen(true); }}>
         <Plus className="h-3.5 w-3.5" />
-      </button>
+      </button>}
     </div>
   );
 }
