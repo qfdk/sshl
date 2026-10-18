@@ -82,9 +82,10 @@ export function App() {
     <div className="flex h-screen min-h-0 flex-col bg-shell text-foreground">
       <div className="flex min-h-0 flex-1">
         <Sidebar manager={connections} />
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col pb-1 pl-1 pr-3 pt-3">
+        {/* 顶栏这一行与透明标题栏重叠：空白处（含 main 的上边距）都是窗口拖动区，双击最大化 */}
+        <main data-tauri-drag-region className="flex min-h-0 min-w-0 flex-1 flex-col pb-1 pl-1 pr-3 pt-3">
           <Tabs value={activeTabId} onValueChange={setActiveTabId} className="flex min-h-0 flex-1 flex-col gap-2.5">
-            <div className="flex shrink-0 flex-wrap items-center gap-2.5">
+            <div data-tauri-drag-region className="flex shrink-0 flex-wrap items-center gap-2.5">
               <SessionTabs manager={connections} />
               <div className="relative ml-auto flex items-center gap-2" id="main-server-info">
                 <TabsList className="h-[34px] gap-0.5 rounded-[10px] bg-secondary p-[3px]"><TabsTrigger value="terminal" data-tab="terminal" className="h-7 rounded-[7px] px-3">终端</TabsTrigger><TabsTrigger value="file-manager" data-tab="file-manager" className="h-7 rounded-[7px] px-3">文件管理</TabsTrigger></TabsList>

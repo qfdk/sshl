@@ -20,8 +20,11 @@
         "minWidth": 900,
         "minHeight": 600,
         "maximized": true,
-        "backgroundColor": "#1e1e2e",
+        "backgroundColor": "#f3f4f6",
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 23 },
         "resizable": true
       }
     ],
