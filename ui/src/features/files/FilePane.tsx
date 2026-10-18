@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type UIEvent } from 'react';
 import { ChevronRight, FileText, Folder, FolderOpen, House, LoaderCircle, RefreshCw } from 'lucide-react';
 import {
   ContextMenu,
@@ -11,6 +11,17 @@ import { Input } from '../../components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
 import { cn } from '../../lib/utils';
 import { formatDate, formatFileSize, formatPermissions, type FileEntry, type FileKind, isRootPath } from './useFileList';
+import { visibleRowWindow } from './virtual-rows';
+
+// 不超过这个行数就全量渲染：几屏以内的行渲染只需几毫秒，虚拟化没有可感知的收益，
+// 反而引入 spacer 与滚动区间的边界情况。/usr/bin、日志目录这类上千条目才是要解决的。
+const VIRTUALIZE_MIN_ROWS = 200;
+// 可视区上下各多渲染的行数，快速滚动时不露白。
+const OVERSCAN_ROWS = 10;
+// 行高固定为整数像素：内容自然高度约 33.84px（py-2 + 图标撑开的行框 + border-b），
+// 表格布局会把紧跟小数高度 spacer 的行贴到像素网格上，实测行高在 33.34/33.84 间跳，
+// 测量第一行得到的值不可靠。显式 34px 让 spacer 与行高都是整数，几何关系精确。
+const ROW_HEIGHT = 34;
 
 export type FileContextMenuItem = {
   label: string;
@@ -62,6 +73,54 @@ export function FilePane({
   const rows: FileEntry[] = isRemote || !isRootPath(path, kind)
     ? (isRootPath(path, kind) ? files : [{ name: '..', path: '', isDirectory: true, isParent: true }, ...files])
     : files;
+  const columnCount = isRemote ? 5 : 3;
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLTableSectionElement>(null);
+  const listedPathRef = useRef(path);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const virtual = rows.length > VIRTUALIZE_MIN_ROWS;
+  // 量化到行边界：同一行内的滚动不改变渲染区间，React 对相同的 state 直接跳过重渲。
+  const quantize = (value: number) => Math.floor(value / ROW_HEIGHT) * ROW_HEIGHT;
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    // 文件管理标签页隐藏时视口为 0，切回来由 ResizeObserver 补上真实高度。
+    const measure = () => {
+      setViewportHeight(element.clientHeight);
+      setHeaderHeight(headerRef.current?.getBoundingClientRect().height ?? 0);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  // 不跟踪滚动的小列表刷新成大列表时，从真实 scrollTop 起算区间，不露白。
+  useLayoutEffect(() => {
+    if (virtual && scrollRef.current) setScrollTop(quantize(scrollRef.current.scrollTop));
+  }, [virtual]);
+
+  // 进入新目录时回到顶部；同目录刷新保留滚动位置。不能直接依赖 path：
+  // 地址栏输入时 path 每敲一个键都会变。
+  useEffect(() => {
+    if (listedPathRef.current === path) return;
+    listedPathRef.current = path;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }, [files]);
+
+  const onScroll = (event: UIEvent<HTMLDivElement>) => {
+    if (virtual) setScrollTop(quantize(event.currentTarget.scrollTop));
+  };
+
+  const range = virtual
+    ? visibleRowWindow(rows.length, ROW_HEIGHT, scrollTop - headerHeight, viewportHeight, OVERSCAN_ROWS)
+    : { start: 0, end: rows.length, padTop: 0, padBottom: 0 };
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-border bg-background">
@@ -99,12 +158,12 @@ export function FilePane({
         </Button>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-auto select-none">
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto select-none" onScroll={onScroll}>
         <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>
           <ContextMenuTrigger asChild>
             <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
               <Table className="table-fixed text-xs">
-                <TableHeader className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
+                <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
                   <TableRow>
                     <TableHead className="h-9 px-3">名称</TableHead>
                     <TableHead className="h-9 w-20 px-3 text-right">大小</TableHead>
@@ -116,23 +175,28 @@ export function FilePane({
                 <TableBody>
                   {emptyMessage && !loading && (
                     <TableRow>
-                      <TableCell colSpan={isRemote ? 5 : 3} className="h-32 whitespace-pre-wrap text-center text-muted-foreground">
+                      <TableCell colSpan={columnCount} className="h-32 whitespace-pre-wrap text-center text-muted-foreground">
                         {emptyMessage}
                       </TableCell>
                     </TableRow>
                   )}
                   {!emptyMessage && !loading && rows.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={isRemote ? 5 : 3} className="h-32 text-center text-muted-foreground">目录为空</TableCell>
+                      <TableCell colSpan={columnCount} className="h-32 text-center text-muted-foreground">目录为空</TableCell>
                     </TableRow>
                   )}
-                  {rows.map((entry, index) => {
+                  {/* spacer 只在高度 > 0 时渲染：滚到底时最后一条数据行仍是 last-child，沿用 TableBody 去掉末行边框的样式。 */}
+                  {range.padTop > 0 && (
+                    <tr aria-hidden="true"><td colSpan={columnCount} className="p-0" style={{ height: range.padTop }} /></tr>
+                  )}
+                  {rows.slice(range.start, range.end).map(entry => {
                     const selected = selectedPaths.has(entry.path);
                     const parent = entry.name === '..';
                     return (
                       <TableRow
                         key={parent ? '..' : entry.path}
                         data-state={selected ? 'selected' : undefined}
+                        style={{ height: ROW_HEIGHT }}
                         className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent')}
                         onMouseDown={event => event.preventDefault()}
                         onClick={event => {
@@ -169,6 +233,9 @@ export function FilePane({
                       </TableRow>
                     );
                   })}
+                  {range.padBottom > 0 && (
+                    <tr aria-hidden="true"><td colSpan={columnCount} className="p-0" style={{ height: range.padBottom }} /></tr>
+                  )}
                 </TableBody>
               </Table>
             </div>
