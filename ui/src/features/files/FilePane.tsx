@@ -123,24 +123,13 @@ export function FilePane({
     : { start: 0, end: rows.length, padTop: 0, padBottom: 0 };
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border border-border bg-background">
-      <header className="flex items-center justify-between border-b border-border bg-muted/40 px-3 py-2 text-sm font-medium">
-        <span>{isRemote ? '远程文件' : '本地文件'}</span>
-        <div className="flex items-center gap-1">
-          <Button type="button" variant="ghost" size="icon" className="h-7 w-7" title="主目录" disabled={disabled} onClick={onHome}>
-            <House className="h-4 w-4" />
-          </Button>
-          <Button type="button" variant="ghost" size="icon" className="h-7 w-7" title="刷新" disabled={disabled} onClick={onRefresh}>
-            <RefreshCw className="h-4 w-4" />
-          </Button>
-        </div>
-      </header>
-
-      <div className="flex gap-1 border-b border-border p-2">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-border bg-card shadow-[0_1px_2px_rgba(22,24,29,0.06),0_8px_24px_rgba(22,24,29,0.06)]">
+      <header className="flex items-center gap-1.5 px-3.5 pb-2.5 pt-3">
+        <span className="mr-1 shrink-0 text-sm font-semibold">{isRemote ? '远程文件' : '本地文件'}</span>
         <Input
           value={path}
           disabled={disabled}
-          className="h-8 min-w-0 text-xs"
+          className="h-8 min-w-0 flex-1 rounded-[9px] bg-muted font-mono text-xs"
           autoComplete="off"
           autoCapitalize="off"
           autoCorrect="off"
@@ -153,23 +142,29 @@ export function FilePane({
             }
           }}
         />
-        <Button type="button" variant="outline" size="icon" className="h-8 w-8 shrink-0" title={isRemote ? '转到路径' : '选择目录'} disabled={disabled} onClick={onBrowse || onPathSubmit}>
+        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" title={isRemote ? '转到路径' : '选择目录'} disabled={disabled} onClick={onBrowse || onPathSubmit}>
           {onBrowse ? <FolderOpen className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         </Button>
-      </div>
+        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" title="主目录" disabled={disabled} onClick={onHome}>
+          <House className="h-4 w-4" />
+        </Button>
+        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" title="刷新" disabled={disabled} onClick={onRefresh}>
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </header>
 
       <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto select-none" onScroll={onScroll}>
         <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>
           <ContextMenuTrigger asChild>
             <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
               <Table className="table-fixed text-xs">
-                <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
+                <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-card">
                   <TableRow>
-                    <TableHead className="h-9 px-3">名称</TableHead>
-                    <TableHead className="h-9 w-20 px-3 text-right">大小</TableHead>
-                    <TableHead className="h-9 w-36 px-3">修改日期</TableHead>
-                    {isRemote && <TableHead className="h-9 w-24 px-3">所有者</TableHead>}
-                    {isRemote && <TableHead className="h-9 w-16 px-3">权限</TableHead>}
+                    <TableHead className="h-8 px-3.5 font-medium">名称</TableHead>
+                    <TableHead className="h-8 w-20 px-3 text-right font-medium">大小</TableHead>
+                    <TableHead className="h-8 w-36 px-3 font-medium">修改日期</TableHead>
+                    {isRemote && <TableHead className="h-8 w-24 px-3 font-medium">所有者</TableHead>}
+                    {isRemote && <TableHead className="h-8 w-16 px-3 font-medium">权限</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -197,7 +192,7 @@ export function FilePane({
                         key={parent ? '..' : entry.path}
                         data-state={selected ? 'selected' : undefined}
                         style={{ height: ROW_HEIGHT }}
-                        className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent')}
+                        className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
                         onMouseDown={event => event.preventDefault()}
                         onClick={event => {
                           if (!parent) onRowSelect(entry, files.indexOf(entry), event);
@@ -209,9 +204,9 @@ export function FilePane({
                           if (!parent) onContextTarget(entry);
                         }}
                       >
-                        <TableCell className={cn('truncate px-3 py-2', entry.isDirectory && 'text-primary')} title={entry.name}>
+                        <TableCell className={cn('truncate px-3.5 py-2', selected && 'font-medium')} title={entry.name}>
                           <span className="mr-2 inline-flex align-middle">
-                            {entry.isDirectory ? <Folder className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
+                            {entry.isDirectory ? <Folder className="h-4 w-4 text-primary" /> : <FileText className="h-4 w-4 text-muted-foreground" />}
                           </span>
                           {entry.name}
                         </TableCell>

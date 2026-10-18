@@ -163,14 +163,14 @@ export function SettingsDialog() {
         </DialogHeader>
 
         <Tabs defaultValue="font" onValueChange={handleTabChange} className="flex min-h-[26rem] flex-col sm:flex-row" orientation="vertical">
-          <TabsList className="h-auto w-full shrink-0 justify-start gap-1 rounded-none border-b border-border bg-muted/40 p-3 sm:w-40 sm:flex-col sm:items-stretch sm:border-b-0 sm:border-r">
-            <TabsTrigger value="font" data-settings-tab="font" className="justify-start gap-2"><Type className="h-4 w-4" />字体</TabsTrigger>
-            <TabsTrigger value="groups" data-settings-tab="groups" className="justify-start gap-2"><Folder className="h-4 w-4" />分组管理</TabsTrigger>
+          <TabsList className="h-auto w-full shrink-0 justify-start gap-1 rounded-none border-b border-border bg-shell p-3 sm:w-40 sm:flex-col sm:items-stretch sm:border-b-0 sm:border-r">
+            <TabsTrigger value="font" data-settings-tab="font" className="h-9 justify-start gap-2 rounded-[10px] border border-transparent data-[state=active]:border-border"><Type className="h-4 w-4" />字体</TabsTrigger>
+            <TabsTrigger value="groups" data-settings-tab="groups" className="h-9 justify-start gap-2 rounded-[10px] border border-transparent data-[state=active]:border-border"><Folder className="h-4 w-4" />分组管理</TabsTrigger>
           </TabsList>
 
           <div className="min-w-0 flex-1 p-6">
             <TabsContent value="font" id="settings-panel-font" data-settings-panel="font" className="mt-0 data-[state=inactive]:hidden">
-              <Card className="border-border/80 shadow-sm">
+              <Card className="border-0 shadow-none">
                 <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
                   <div className="grid gap-1.5">
                     <CardTitle className="text-base">字体</CardTitle>
@@ -212,8 +212,8 @@ export function SettingsDialog() {
                       <Label htmlFor="settings-font-family-custom">自定义 fontFamily</Label>
                       <Input id="settings-font-family-custom" className={inputClassName} value={customFontFamily} onChange={event => { setCustomFontFamily(event.target.value); applyFontChange(fontSize, event.target.value || DEFAULT_FONT_FAMILY); }} placeholder='"Cascadia Code", monospace' autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
                     </div>}
-                    <div className="overflow-hidden rounded-lg bg-slate-950 p-4 font-mono text-sm leading-6 text-slate-100 shadow-inner" id="settings-preview" style={{ fontFamily: fontFamily, fontSize: `${fontSize}px` }}>
-                      <div className="truncate">user@host:~$ ls -la /etc</div><div className="truncate text-slate-400">drwxr-xr-x  123 root  4096 May 24 10:42 .</div><div className="truncate">The quick brown fox 0123456789 → ✓</div><div className="truncate">Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文</div><div className="truncate">Nerd Font 图标: &#xe0b0; &#xf07b; &#xf015; &#xf120; &#xe0a0; &#xf09b; &#xf135;</div>
+                    <div className="overflow-hidden rounded-[14px] bg-[#1d1d1d] p-4 font-mono text-sm leading-6 text-[#f6f825] shadow-[0_1px_2px_rgba(22,24,29,0.10),0_8px_24px_rgba(22,24,29,0.10)]" id="settings-preview" style={{ fontFamily: fontFamily, fontSize: `${fontSize}px` }}>
+                      <div className="truncate">user@host:~$ ls -la /etc</div><div className="truncate text-[#dfdfe0]">drwxr-xr-x  123 root  4096 May 24 10:42 .</div><div className="truncate">The quick brown fox 0123456789 → ✓</div><div className="truncate">Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文</div><div className="truncate">Nerd Font 图标: &#xe0b0; &#xf07b; &#xf015; &#xf120; &#xe0a0; &#xf09b; &#xf135;</div>
                     </div>
                   </CardContent>
                   <DialogFooter className="border-t border-border px-6 py-4"><Button type="submit" id="settings-save"><Check className="h-4 w-4" />保存</Button></DialogFooter>
@@ -222,7 +222,7 @@ export function SettingsDialog() {
             </TabsContent>
 
             <TabsContent value="groups" id="settings-panel-groups" data-settings-panel="groups" className="mt-0 data-[state=inactive]:hidden">
-              <Card className="border-border/80 shadow-sm">
+              <Card className="border-0 shadow-none">
                 <CardHeader><CardTitle className="text-base">分组管理</CardTitle><CardDescription>整理机器分组，拖拽连接列表即可调整顺序。</CardDescription></CardHeader>
                 <form id="group-manager-form" onSubmit={saveGroups}>
                   <CardContent className="grid gap-6">

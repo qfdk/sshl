@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
-import { Download, FolderPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { ArrowDownUp, Download, FolderPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { Button } from '../../components/ui/button';
 import { Checkbox } from '../../components/ui/checkbox';
@@ -309,7 +309,7 @@ export function FileManager() {
 
   const permissionGroupLabels = ['所有者', '组', '其他用户'];
   return (
-    <div className="relative flex h-full min-h-0 flex-col" data-file-manager>
+    <div className="relative flex h-full min-h-0 flex-col gap-2.5" data-file-manager>
       <div className="flex min-h-0 flex-1 overflow-hidden" id="file-manager-split-pane">
         <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="local">
           <FilePane
@@ -330,7 +330,7 @@ export function FileManager() {
             onContextTarget={entry => ensureContextSelection('local', entry)}
           />
         </div>
-        <div id="pane-divider" className="w-1 shrink-0 cursor-col-resize bg-border" title="拖动调整面板宽度" />
+        <div id="pane-divider" className="w-2.5 shrink-0 cursor-col-resize rounded-full transition-colors hover:bg-primary/15" title="拖动调整面板宽度" />
         <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="remote">
           <FilePane
             kind="remote"
@@ -366,9 +366,10 @@ export function FileManager() {
       </div>
 
       {transfer.status.active && (
-        <div className="flex h-8 shrink-0 items-center gap-3 border-t border-border bg-muted/40 px-3 text-xs">
-          <Progress value={transfer.status.progress} className="h-1.5 w-48" />
+        <div className="flex h-11 shrink-0 items-center gap-3 rounded-xl border border-border bg-card px-3.5 text-xs">
+          <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg bg-accent text-primary" aria-hidden="true"><ArrowDownUp className="h-3.5 w-3.5" /></span>
           <span className="min-w-0 flex-1 truncate">{transfer.status.info}</span>
+          <Progress value={transfer.status.progress} className="h-1.5 w-48 shrink-0" />
         </div>
       )}
 

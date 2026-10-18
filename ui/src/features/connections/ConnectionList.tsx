@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Folder, FolderOpen, Pencil, Power, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Folder, FolderOpen, Pencil, Power, Server, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   ContextMenu,
@@ -44,10 +44,9 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
   const itemDiv = (
         <div
           className={cn(
-            'group relative flex min-h-10 cursor-pointer select-none items-center rounded-md py-1.5 text-sm transition-colors',
-            collapsed ? 'justify-center px-0' : 'gap-2 px-2',
-            active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted',
-            connected || 'text-muted-foreground',
+            'group relative flex min-h-11 cursor-pointer select-none items-center rounded-[10px] border py-1.5 text-sm transition-colors',
+            collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5',
+            active ? 'border-border bg-card shadow-sm' : 'border-transparent hover:bg-foreground/[0.04]',
             dragging && 'opacity-40',
             // 插入线：看得出会落在这一项的上边还是下边
             dropEdge === 'top' && 'before:absolute before:inset-x-1 before:-top-0.5 before:h-0.5 before:rounded-full before:bg-primary',
@@ -75,14 +74,23 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
             )
             : (
               <>
-                <span className={`h-2 w-2 shrink-0 rounded-full ${connected ? 'bg-success' : 'bg-muted-foreground/40'}`} data-connection-status />
-                <span className="min-w-0 flex-1 truncate" title={connection.name}>{connection.name}</span>
+                <Server className={cn('h-4 w-4 shrink-0', connected ? 'text-foreground' : 'text-muted-foreground')} aria-hidden="true" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate font-medium leading-5" title={connection.name}>{connection.name}</span>
+                  {connection.host && <span className="truncate font-mono text-[11px] leading-4 text-muted-foreground">{connection.username ? `${connection.username}@` : ''}{connection.host}</span>}
+                </span>
+                {connected && (
+                  <span className="flex shrink-0 items-center gap-1 text-[11px] text-[#0b6b3a] transition-opacity group-hover:opacity-0 group-focus-within:opacity-0" data-connection-status>
+                    <span className="h-1.5 w-1.5 rounded-full bg-success" />在线
+                  </span>
+                )}
               </>
             )}
-          <div className={`shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${collapsed ? 'hidden' : 'flex'}`} data-connection-actions>
-            {connected && <button type="button" className="rounded p-1 hover:bg-background" title="断开连接" data-disconnect-connection onClick={event => { event.stopPropagation(); void manager.disconnect(session!.sessionId); }}><Power className="h-3.5 w-3.5" /></button>}
-            <button type="button" className="rounded p-1 hover:bg-background disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能编辑' : '编辑连接'} disabled={connected} data-edit-connection onClick={event => { event.stopPropagation(); edit(); }}><Pencil className="h-3.5 w-3.5" /></button>
-            <button type="button" className="rounded p-1 text-destructive hover:bg-background disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能删除' : '删除连接'} disabled={connected} data-delete-connection onClick={event => { event.stopPropagation(); void manager.deleteConnection(connection.id); }}><Trash2 className="h-3.5 w-3.5" /></button>
+          {/* 悬停时浮在行右侧、盖住「在线」标记；用透明度而非 display 切换，键盘仍能 Tab 进来 */}
+          <div className={`absolute right-1.5 top-1/2 -translate-y-1/2 items-center gap-0.5 rounded-lg bg-card opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${collapsed ? 'hidden' : 'flex'}`} data-connection-actions>
+            {connected && <button type="button" className="rounded-md p-1 hover:bg-muted" title="断开连接" data-disconnect-connection onClick={event => { event.stopPropagation(); void manager.disconnect(session!.sessionId); }}><Power className="h-3.5 w-3.5" /></button>}
+            <button type="button" className="rounded-md p-1 hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能编辑' : '编辑连接'} disabled={connected} data-edit-connection onClick={event => { event.stopPropagation(); edit(); }}><Pencil className="h-3.5 w-3.5" /></button>
+            <button type="button" className="rounded-md p-1 text-destructive hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40" title={connected ? '断开后才能删除' : '删除连接'} disabled={connected} data-delete-connection onClick={event => { event.stopPropagation(); void manager.deleteConnection(connection.id); }}><Trash2 className="h-3.5 w-3.5" /></button>
           </div>
         </div>
   );
@@ -246,7 +254,7 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
         const dropHere = drop?.kind === 'group' && drop.group === group.name;
         // 收起后裸数字看不出是什么，换成文件夹图标（形态即展开状态）+ 右上角数量角标
         const header = (
-          <button type="button" className={cn('flex cursor-pointer select-none items-center rounded py-1 text-left text-xs font-medium text-muted-foreground hover:bg-muted', collapsed ? 'justify-center px-0' : 'gap-1 px-2', dropHere && 'text-primary')} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} aria-label={collapsed ? `${group.name}，${group.connections.length} 个连接` : undefined} onClick={() => manager.toggleGroup(group.name)}>
+          <button type="button" className={cn('flex cursor-pointer select-none items-center rounded-md py-1 text-left text-xs font-semibold text-muted-foreground hover:bg-foreground/[0.04]', collapsed ? 'justify-center px-0' : 'gap-1 px-2', dropHere && 'text-primary')} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} aria-label={collapsed ? `${group.name}，${group.connections.length} 个连接` : undefined} onClick={() => manager.toggleGroup(group.name)}>
             {collapsed
               ? (
                 <span className="relative flex h-7 w-7 items-center justify-center">
@@ -266,7 +274,7 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
               </Tooltip>
             )
             : header}
-          {!groupCollapsed && <div className={`grid gap-1 ${collapsed ? 'ml-1.5 border-l border-border pl-1' : 'pl-2'}`}>{renderItems(group.connections)}</div>}
+          {!groupCollapsed && <div className={`grid gap-1 ${collapsed ? 'ml-1.5 border-l border-border pl-1' : ''}`}>{renderItems(group.connections)}</div>}
         </section>;
       })}
     </div>

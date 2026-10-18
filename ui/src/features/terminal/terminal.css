@@ -1,7 +1,7 @@
 /* 终端基本样式 —— font-family/font-size/line-height 交给 xterm options 控制 */
-/* 适度内边距：文字与窗口边框之间留呼吸感 */
+/* 适度内边距：文字与卡片边缘之间留呼吸感，也避开 14px 圆角，首尾字符不会被切到 */
 .terminal-container .xterm {
-    padding: 8px !important;
+    padding: 12px 14px !important;
     background-color: transparent !important;
 }
 

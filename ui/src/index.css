@@ -18,6 +18,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  --color-shell: var(--shell);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -43,19 +44,22 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* 设计稿 B「纸页」：浅灰窗口底（shell）上放白色卡片（background / card），主色为原有
+   的蓝（色相 251°）加深到白字可读（4.66:1）。暗色主题以后从这套亮色派生。 */
 :root {
+  --shell: oklch(0.967 0.003 264.542);
   --background: oklch(1 0 0);
   --foreground: oklch(0.129 0.042 264.695);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.129 0.042 264.695);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.129 0.042 264.695);
-  --primary: oklch(0.656 0.119 251.076);
+  --primary: oklch(0.560 0.140 251.061);
   --primary-foreground: oklch(0.985 0.002 247.839);
-  --secondary: oklch(0.968 0.007 247.896);
+  --secondary: oklch(0.931 0.006 264.531);
   --secondary-foreground: oklch(0.208 0.042 265.755);
   --muted: oklch(0.968 0.007 247.896);
-  --muted-foreground: oklch(0.554 0.046 257.417);
+  --muted-foreground: oklch(0.495 0.024 264.328);
   --accent: oklch(0.951 0.021 251.076);
   --accent-foreground: oklch(0.398 0.089 251.076);
   --destructive: oklch(0.577 0.245 27.325);
@@ -102,5 +106,9 @@
   summary,
   label[for] {
     cursor: pointer;
+  }
+  /* 图标统一 2.5 线宽：Lucide 默认 2 在小尺寸下太细。CSS 属性优先于 SVG 的 stroke-width 属性。 */
+  svg.lucide {
+    stroke-width: 2.5;
   }
 }

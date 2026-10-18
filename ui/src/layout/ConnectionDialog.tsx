@@ -1,4 +1,4 @@
-import { ArrowRight, FolderOpen, KeyRound, Save, X } from 'lucide-react';
+import { ArrowRight, FolderOpen, KeyRound, Lock, Save, X } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore, type FormEvent } from 'react';
 import {
   getConnectionDialogOpen,
@@ -10,16 +10,15 @@ import {
 import type { ConnectionManager } from '../features/connections/useConnections';
 import { Button } from '../components/ui/button';
 import { Checkbox } from '../components/ui/checkbox';
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../components/ui/select';
+import { cn } from '../lib/utils';
+
+const AUTH_OPTIONS = [
+  { value: 'password', label: '密码', Icon: Lock },
+  { value: 'privateKey', label: '私钥', Icon: KeyRound },
+] as const;
 
 // useSyncExternalStore 要求 subscribe 引用稳定：内联箭头函数会让 React 每次渲染都
 // 重新订阅，通知会在 unsubscribe/subscribe 的间隙丢失。丢一次之后 store 已是新值，
@@ -170,16 +169,13 @@ export function ConnectionDialog({ manager }: { manager: ConnectionManager }) {
         <DialogContent
           id="connection-dialog"
           showCloseButton
-          className="max-w-2xl"
+          className="max-w-[520px]"
         >
-          <DialogHeader className="border-b border-border pb-4">
-            <DialogTitle className="flex items-center gap-2 text-xl">
-              <KeyRound className="h-5 w-5 text-primary" />
-              {editingConnection ? '编辑 SSH 连接' : '新建 SSH 连接'}
-            </DialogTitle>
+          <DialogHeader className="gap-1">
+            <DialogTitle className="text-lg">{editingConnection ? '编辑连接' : '新建连接'}</DialogTitle>
+            <DialogDescription>{editingConnection ? '修改服务器信息后点保存。' : '填写服务器信息，连接成功后自动保存到列表。'}</DialogDescription>
           </DialogHeader>
 
-          {/* Select stays outside the form so Radix does not add its hidden native select fallback. */}
           <form id="connection-form" onSubmit={handleSubmit} />
           <div className="grid gap-5">
             <div className="grid gap-2">
@@ -205,16 +201,21 @@ export function ConnectionDialog({ manager }: { manager: ConnectionManager }) {
               <Input id="conn-username" form="connection-form" value={form.username} onChange={event => updateField('username', event.target.value)} placeholder="root" required autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="auth-type">认证方式</Label>
-              <Select value={form.authType} onValueChange={value => handleAuthTypeChange(value as AuthType)}>
-                <SelectTrigger id="auth-type">
-                  <SelectValue placeholder="选择认证方式" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="password">密码</SelectItem>
-                  <SelectItem value="privateKey">私钥</SelectItem>
-                </SelectContent>
-              </Select>
+              <Label id="auth-type-label">认证方式</Label>
+              <div id="auth-type" role="radiogroup" aria-labelledby="auth-type-label" className="grid grid-cols-2 gap-0.5 rounded-[10px] bg-secondary p-[3px]">
+                {AUTH_OPTIONS.map(({ value, label, Icon }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={form.authType === value}
+                    className={cn('flex h-8 items-center justify-center gap-1.5 rounded-[7px] text-sm transition-colors', form.authType === value ? 'bg-card font-medium shadow-sm' : 'text-muted-foreground hover:text-foreground')}
+                    onClick={() => { if (form.authType !== value) handleAuthTypeChange(value); }}
+                  >
+                    <Icon className="h-3.5 w-3.5" />{label}
+                  </button>
+                ))}
+              </div>
             </div>
             {form.authType === 'password' ? (
               <div className="grid gap-2">
@@ -239,8 +240,9 @@ export function ConnectionDialog({ manager }: { manager: ConnectionManager }) {
             <div className="flex items-center gap-2">
               <Checkbox id="conn-save-password" checked={form.savePassword} onCheckedChange={checked => updateField('savePassword', checked === true)} />
               <Label htmlFor="conn-save-password" className="font-normal">保存密码</Label>
+              <span className="text-sm text-muted-foreground">· AES 加密保存在本机</span>
             </div>
-            <DialogFooter className="border-t border-border pt-5">
+            <DialogFooter className="-mx-6 -mb-6 rounded-b-2xl border-t border-border bg-muted px-6 py-4">
               <Button type="button" id="cancel-connection" variant="outline" onClick={() => handleOpenChange(false)}><X className="h-4 w-4" />取消</Button>
               <Button type="submit" form="connection-form" id="connection-submit-btn">{editingConnection ? <Save className="h-4 w-4" /> : <ArrowRight className="h-4 w-4" />}{editingConnection ? '保存' : '连接'}</Button>
             </DialogFooter>
