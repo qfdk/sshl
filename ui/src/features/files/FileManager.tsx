@@ -321,7 +321,8 @@ export function FileManager() {
             selectedPaths={selected.local}
             contextMenuItems={menuItems('local')}
             onPathChange={local.setPath}
-            onPathSubmit={() => void local.load(local.path, true)}
+            onPathSubmit={path => void local.load(path || local.path, true)}
+            onListDirectory={local.listDirectory}
             onHome={async () => { const home = await (window as AppWindow).api.file.getHomeDir(); if (home) void local.load(home, true); }}
             onRefresh={refreshLocal}
             onBrowse={() => void local.browse()}
@@ -349,7 +350,8 @@ export function FileManager() {
             selectedPaths={selected.remote}
             contextMenuItems={menuItems('remote')}
             onPathChange={remote.setPath}
-            onPathSubmit={() => void remote.load(remote.path, true)}
+            onPathSubmit={path => void remote.load(path || remote.path, true)}
+            onListDirectory={remote.listDirectory}
             onHome={async () => {
               if (!sessionId) return;
               const result = await (window as AppWindow).api.ssh.execute(sessionId, 'echo "$HOME"');

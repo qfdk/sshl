@@ -209,6 +209,14 @@ export function useFileList({ kind, sessionId, enabled }: { kind: FileKind; sess
     }
   }, [kind, sessionId, setPath]);
 
+  // 地址栏补全用：只读不改——不切换当前路径，也不写会话记录的远程路径。
+  const listDirectory = useCallback(async (directory: string): Promise<FileEntry[] | null> => {
+    const api = (window as AppWindow).api?.file;
+    if (kind === 'remote' && !sessionId) return null;
+    const result = kind === 'remote' ? await api?.list(sessionId, directory) : await api?.listLocal(directory);
+    return result?.success ? result.files || [] : null;
+  }, [kind, sessionId]);
+
   const browse = useCallback(async () => {
     if (kind !== 'local') return;
     const result = await (window as AppWindow).api?.dialog?.selectDirectory();
@@ -244,6 +252,7 @@ export function useFileList({ kind, sessionId, enabled }: { kind: FileKind; sess
     emptyMessage,
     setEmptyMessage,
     load,
+    listDirectory,
     browse,
     clearCache,
     invalidate,

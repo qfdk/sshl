@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type UIEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type UIEvent } from 'react';
 import { ChevronRight, FileText, Folder, FolderOpen, House, LoaderCircle, RefreshCw } from 'lucide-react';
 import {
   ContextMenu,
@@ -11,6 +11,7 @@ import { Input } from '../../components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
 import { cn } from '../../lib/utils';
 import { formatDate, formatFileSize, formatPermissions, type FileEntry, type FileKind, isRootPath } from './useFileList';
+import { matchDirectories, splitCompletionPath, tabCompletion } from './path-completion';
 import { visibleRowWindow } from './virtual-rows';
 
 // 不超过这个行数就全量渲染：几屏以内的行渲染只需几毫秒，虚拟化没有可感知的收益，
@@ -40,7 +41,8 @@ export type FilePaneProps = {
   selectedPaths: Set<string>;
   contextMenuItems: FileContextMenuItem[];
   onPathChange: (path: string) => void;
-  onPathSubmit: () => void;
+  onPathSubmit: (path?: string) => void;
+  onListDirectory?: (directory: string) => Promise<FileEntry[] | null>;
   onHome: () => void;
   onRefresh: () => void;
   onBrowse?: () => void;
@@ -61,6 +63,7 @@ export function FilePane({
   contextMenuItems,
   onPathChange,
   onPathSubmit,
+  onListDirectory,
   onHome,
   onRefresh,
   onBrowse,
@@ -69,6 +72,36 @@ export function FilePane({
   onContextTarget,
   onPermission,
 }: FilePaneProps) {
+  const suggestionListId = useId();
+  const suggestionListRef = useRef<HTMLDivElement>(null);
+  // 补全只在用户在地址栏里敲字后出现；双击进目录这类从外部改路径不弹。
+  const [suggesting, setSuggesting] = useState(false);
+  const [highlight, setHighlight] = useState(-1);
+  const [listing, setListing] = useState<{ directory: string; entries: FileEntry[] } | null>(null);
+  const query = suggesting && !disabled && onListDirectory ? splitCompletionPath(path, kind) : null;
+  const completionDirectory = query?.directory ?? null;
+  const suggestions = query && listing?.directory === query.directory ? matchDirectories(listing.entries, query.prefix) : [];
+
+  // 只在目录部分变了（敲了分隔符或 Tab 补全）才取列表；同一层里继续输入只在本地过滤。
+  useEffect(() => {
+    if (!completionDirectory || !onListDirectory) return;
+    let current = true;
+    void onListDirectory(completionDirectory).then(entries => {
+      if (current && entries) setListing({ directory: completionDirectory, entries });
+    });
+    return () => { current = false; };
+  }, [completionDirectory, onListDirectory]);
+
+  useEffect(() => {
+    if (highlight >= 0) suggestionListRef.current?.children[highlight]?.scrollIntoView({ block: 'nearest' });
+  }, [highlight]);
+
+  const openSuggestion = (entry: FileEntry) => {
+    if (!query) return;
+    setSuggesting(false);
+    onPathSubmit(`${query.base}${entry.name}`);
+  };
+
   const isRemote = kind === 'remote';
   const rows: FileEntry[] = isRemote || !isRootPath(path, kind)
     ? (isRootPath(path, kind) ? files : [{ name: '..', path: '', isDirectory: true, isParent: true }, ...files])
@@ -126,23 +159,79 @@ export function FilePane({
     <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-border bg-card shadow-[0_1px_2px_rgba(22,24,29,0.06),0_8px_24px_rgba(22,24,29,0.06)]">
       <header className="flex items-center gap-1.5 px-3.5 pb-2.5 pt-3">
         <span className="mr-1 shrink-0 text-sm font-semibold">{isRemote ? '远程文件' : '本地文件'}</span>
-        <Input
-          value={path}
-          disabled={disabled}
-          className="h-8 min-w-0 flex-1 rounded-[9px] bg-muted font-mono text-xs"
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          onChange={event => onPathChange(event.target.value)}
-          onKeyDown={event => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              onPathSubmit();
-            }
-          }}
-        />
-        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" title={isRemote ? '转到路径' : '选择目录'} disabled={disabled} onClick={onBrowse || onPathSubmit}>
+        <div className="relative min-w-0 flex-1">
+          <Input
+            value={path}
+            disabled={disabled}
+            className="h-8 rounded-[9px] bg-muted font-mono text-xs"
+            role="combobox"
+            aria-expanded={suggestions.length > 0}
+            aria-controls={suggestionListId}
+            aria-autocomplete="list"
+            aria-activedescendant={suggestions[highlight] ? `${suggestionListId}-${highlight}` : undefined}
+            autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={event => {
+              onPathChange(event.target.value);
+              setSuggesting(true);
+              setHighlight(-1);
+            }}
+            onBlur={() => setSuggesting(false)}
+            onKeyDown={event => {
+              // 输入法选词时的方向键、回车属于输入法
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === 'ArrowDown' && !suggesting) {
+                event.preventDefault();
+                setSuggesting(true);
+              } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && suggestions.length) {
+                event.preventDefault();
+                const last = suggestions.length - 1;
+                setHighlight(index => event.key === 'ArrowDown' ? (index >= last ? 0 : index + 1) : (index <= 0 ? last : index - 1));
+              } else if (event.key === 'Tab' && query && suggestions.length) {
+                event.preventDefault();
+                const completed = tabCompletion(query, suggestions, highlight);
+                if (completed) {
+                  onPathChange(completed);
+                  setHighlight(-1);
+                }
+              } else if (event.key === 'Escape' && suggestions.length) {
+                event.preventDefault();
+                setSuggesting(false);
+              } else if (event.key === 'Enter') {
+                event.preventDefault();
+                if (suggestions[highlight]) {
+                  openSuggestion(suggestions[highlight]);
+                } else {
+                  setSuggesting(false);
+                  onPathSubmit();
+                }
+              }
+            }}
+          />
+          {suggestions.length > 0 && (
+            <div ref={suggestionListRef} id={suggestionListId} role="listbox" aria-label="子目录" className="absolute inset-x-0 top-full z-20 mt-1 max-h-64 overflow-auto rounded-[10px] border border-border bg-popover p-1 text-popover-foreground shadow-md">
+              {suggestions.map((entry, index) => (
+                <div
+                  key={entry.name}
+                  id={`${suggestionListId}-${index}`}
+                  role="option"
+                  aria-selected={index === highlight}
+                  className={cn('flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 font-mono text-xs', index === highlight && 'bg-accent text-accent-foreground')}
+                  // 不让输入框失焦，否则 blur 先把下拉收掉，click 落空
+                  onMouseDown={event => event.preventDefault()}
+                  onMouseEnter={() => setHighlight(index)}
+                  onClick={() => openSuggestion(entry)}
+                >
+                  <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <span className="truncate">{entry.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" title={isRemote ? '转到路径' : '选择目录'} disabled={disabled} onClick={onBrowse || (() => onPathSubmit())}>
           {onBrowse ? <FolderOpen className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         </Button>
         <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" title="主目录" disabled={disabled} onClick={onHome}>
