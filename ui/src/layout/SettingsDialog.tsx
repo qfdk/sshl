@@ -4,7 +4,7 @@ import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../lib/
 import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, DEFAULTS, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
 import { moveConnection, normalizeGroupName } from '../lib/connection-groups';
 import { Button } from '../components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader } from '../components/ui/card';
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -154,40 +154,37 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={nextOpen => nextOpen ? setSettingsDialogOpen(true) : closeWithoutSaving()}>
-      <DialogContent id="settings-dialog" showCloseButton={false} className="max-w-3xl p-0">
-        <DialogHeader className="flex-row items-center justify-between border-b border-border px-6 py-4">
-          <DialogTitle className="text-xl">设置</DialogTitle>
+      <DialogContent id="settings-dialog" showCloseButton={false} className="max-w-3xl gap-0 p-0">
+        <DialogHeader className="flex-row items-center justify-between space-y-0 border-b border-border py-2.5 pl-5 pr-3">
+          <DialogTitle className="text-base">设置</DialogTitle>
           <DialogClose asChild>
-            <Button type="button" id="settings-close" variant="ghost" size="icon" title="关闭"><X className="h-4 w-4" /><span className="sr-only">关闭</span></Button>
+            <Button type="button" id="settings-close" variant="ghost" size="icon" className="h-8 w-8" title="关闭"><X className="h-4 w-4" /><span className="sr-only">关闭</span></Button>
           </DialogClose>
         </DialogHeader>
 
-        <Tabs defaultValue="font" onValueChange={handleTabChange} className="flex min-h-[26rem] flex-col sm:flex-row" orientation="vertical">
-          <TabsList className="h-auto w-full shrink-0 justify-start gap-1 rounded-none border-b border-border bg-shell p-3 sm:w-40 sm:flex-col sm:items-stretch sm:border-b-0 sm:border-r">
-            <TabsTrigger value="font" data-settings-tab="font" className="h-9 justify-start gap-2 rounded-[10px] border border-transparent data-[state=active]:border-border"><Type className="h-4 w-4" />字体</TabsTrigger>
-            <TabsTrigger value="groups" data-settings-tab="groups" className="h-9 justify-start gap-2 rounded-[10px] border border-transparent data-[state=active]:border-border"><Folder className="h-4 w-4" />分组管理</TabsTrigger>
+        <Tabs defaultValue="font" onValueChange={handleTabChange} className="flex min-h-[22rem] flex-col sm:flex-row" orientation="vertical">
+          <TabsList className="h-auto w-full shrink-0 justify-start gap-1 rounded-none border-b border-border bg-shell p-2 sm:w-36 sm:flex-col sm:items-stretch sm:border-b-0 sm:border-r">
+            <TabsTrigger value="font" data-settings-tab="font" className="h-8 justify-start gap-2 rounded-lg border border-transparent px-2.5 data-[state=active]:border-border"><Type className="h-4 w-4" />字体</TabsTrigger>
+            <TabsTrigger value="groups" data-settings-tab="groups" className="h-8 justify-start gap-2 rounded-lg border border-transparent px-2.5 data-[state=active]:border-border"><Folder className="h-4 w-4" />分组管理</TabsTrigger>
           </TabsList>
 
-          <div className="min-w-0 flex-1 p-6">
+          <div className="min-w-0 flex-1 p-5">
             <TabsContent value="font" id="settings-panel-font" data-settings-panel="font" className="mt-0 data-[state=inactive]:hidden">
-              <Card className="border-0 shadow-none">
-                <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
-                  <div className="grid gap-1.5">
-                    <CardTitle className="text-base">字体</CardTitle>
-                    <CardDescription>调整终端字号和字体，预览会实时更新。</CardDescription>
-                  </div>
-                  <Button type="button" id="settings-reset" variant="outline" size="sm" className="shrink-0" onClick={resetFontDefaults}>
+              <Card className="border-0 bg-transparent shadow-none">
+                <CardHeader className="flex-row items-center justify-between gap-4 space-y-0 p-0 pb-4">
+                  <CardDescription>调整终端字号和字体，预览会实时更新。</CardDescription>
+                  <Button type="button" id="settings-reset" variant="outline" size="sm" className="h-8 shrink-0" onClick={resetFontDefaults}>
                     <RotateCcw className="h-3.5 w-3.5" />还原默认
                   </Button>
                 </CardHeader>
                 <form id="settings-form" onSubmit={handleFontSubmit}>
-                  <CardContent className="grid gap-6">
+                  <CardContent className="grid gap-4 p-0">
                     <div className="grid gap-4 sm:grid-cols-[7rem_1fr]">
                       <div className="grid gap-2">
                         <Label htmlFor="settings-font-size">字号</Label>
                         <div className="flex h-10 items-center overflow-hidden rounded-md border border-input bg-background">
                           <Button type="button" variant="ghost" size="icon" className="h-full w-8 rounded-none" data-step="-1" aria-label="减小" onClick={() => applyFontChange(clampTerminalFontSize(fontSize - 1), fontFamily)}>−</Button>
-                          <Input type="number" id="settings-font-size" className="h-full min-w-0 flex-1 border-0 px-1 text-center shadow-none focus-visible:ring-0" min={8} max={40} step={1} required value={fontSize} onChange={event => applyFontChange(Number(event.target.value), fontFamily)} />
+                          <Input type="number" id="settings-font-size" className="h-full min-w-0 flex-1 border-0 px-1 text-center shadow-none [appearance:textfield] focus-visible:ring-0 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" min={8} max={40} step={1} required value={fontSize} onChange={event => applyFontChange(Number(event.target.value), fontFamily)} />
                           <Button type="button" variant="ghost" size="icon" className="h-full w-8 rounded-none" data-step="1" aria-label="增大" onClick={() => applyFontChange(clampTerminalFontSize(fontSize + 1), fontFamily)}>+</Button>
                         </div>
                       </div>
@@ -212,20 +209,20 @@ export function SettingsDialog() {
                       <Label htmlFor="settings-font-family-custom">自定义 fontFamily</Label>
                       <Input id="settings-font-family-custom" className={inputClassName} value={customFontFamily} onChange={event => { setCustomFontFamily(event.target.value); applyFontChange(fontSize, event.target.value || DEFAULT_FONT_FAMILY); }} placeholder='"Cascadia Code", monospace' autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
                     </div>}
-                    <div className="overflow-hidden rounded-[14px] bg-[#1d1d1d] p-4 font-mono text-sm leading-6 text-[#f6f825] shadow-[0_1px_2px_rgba(22,24,29,0.10),0_8px_24px_rgba(22,24,29,0.10)]" id="settings-preview" style={{ fontFamily: fontFamily, fontSize: `${fontSize}px` }}>
+                    <div className="overflow-hidden rounded-xl bg-[#1d1d1d] px-4 py-3 font-mono text-sm leading-6 text-[#f6f825] shadow-[0_1px_2px_rgba(22,24,29,0.10),0_8px_24px_rgba(22,24,29,0.10)]" id="settings-preview" style={{ fontFamily: fontFamily, fontSize: `${fontSize}px` }}>
                       <div className="truncate">user@host:~$ ls -la /etc</div><div className="truncate text-[#dfdfe0]">drwxr-xr-x  123 root  4096 May 24 10:42 .</div><div className="truncate">The quick brown fox 0123456789 → ✓</div><div className="truncate">Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文</div><div className="truncate">Nerd Font 图标: &#xe0b0; &#xf07b; &#xf015; &#xf120; &#xe0a0; &#xf09b; &#xf135;</div>
                     </div>
                   </CardContent>
-                  <DialogFooter className="border-t border-border px-6 py-4"><Button type="submit" id="settings-save"><Check className="h-4 w-4" />保存</Button></DialogFooter>
+                  <DialogFooter className="mt-4 border-t border-border pt-3"><Button type="submit" id="settings-save" className="h-9"><Check className="h-4 w-4" />保存</Button></DialogFooter>
                 </form>
               </Card>
             </TabsContent>
 
             <TabsContent value="groups" id="settings-panel-groups" data-settings-panel="groups" className="mt-0 data-[state=inactive]:hidden">
-              <Card className="border-0 shadow-none">
-                <CardHeader><CardTitle className="text-base">分组管理</CardTitle><CardDescription>整理机器分组，拖拽连接列表即可调整顺序。</CardDescription></CardHeader>
+              <Card className="border-0 bg-transparent shadow-none">
+                <CardHeader className="p-0 pb-4"><CardDescription>整理机器分组，拖拽连接列表即可调整顺序。</CardDescription></CardHeader>
                 <form id="group-manager-form" onSubmit={saveGroups}>
-                  <CardContent className="grid gap-6">
+                  <CardContent className="grid gap-4 p-0">
                     <div className="flex gap-2"><Input id="group-new-name" className="flex-1" placeholder="新分组名称" autoComplete="off" maxLength={40} value={newGroupName} onChange={event => setNewGroupName(event.target.value)} /><Button type="button" id="group-add-btn" onClick={addGroup} className="shrink-0"><Plus className="h-4 w-4" />添加分组</Button></div>
                     <div className="grid gap-2">
                       <div className="flex items-baseline justify-between">
@@ -242,9 +239,9 @@ export function SettingsDialog() {
                       />
                     </div>
                   </CardContent>
-                  <DialogFooter className="items-center gap-3 border-t border-border px-6 py-4 sm:justify-between">
+                  <DialogFooter className="mt-4 items-center gap-3 border-t border-border pt-3 sm:justify-between">
                     <span className="text-xs text-muted-foreground">{groupsDirty ? '有未保存的改动' : '改动已保存'}</span>
-                    <Button type="submit" id="group-manager-save" disabled={!groupsDirty}><Check className="h-4 w-4" />保存</Button>
+                    <Button type="submit" id="group-manager-save" className="h-9" disabled={!groupsDirty}><Check className="h-4 w-4" />保存</Button>
                   </DialogFooter>
                 </form>
               </Card>
