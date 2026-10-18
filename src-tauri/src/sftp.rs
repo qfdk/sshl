@@ -30,6 +30,17 @@ const TRANSFER_CHUNK: usize = 255 * 1024;
 /// 串行时 /usr/lib 这类几百个 .so 链接的目录要几百个 RTT。
 const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
+/// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），
+/// 开 N 个句柄读不相交区间，在途 READ 就是 N 个。
+const DOWNLOAD_SEGMENTS: usize = 4;
+
+/// 小于此大小走单句柄流式下载：多开句柄的 open/close 往返抵不过并发收益。
+const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
+
+/// 目录传输时同一层文件的并发数。小文件的耗时主要是 open/close 各一个 RTT，
+/// 串行时几百个小文件就是几百轮往返。子目录仍逐个递归，避免并发数随深度相乘。
+const DIR_FILE_CONCURRENCY: usize = 4;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteEntry {
@@ -317,6 +328,93 @@ where
     Ok(transferred)
 }
 
+/// 把 [0, total) 切成至多 `segments` 段，段长按 TRANSFER_CHUNK 对齐，让每个 READ 都是整块。
+fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
+    let chunk = TRANSFER_CHUNK as u64;
+    let per = total.div_ceil(segments.max(1) as u64).div_ceil(chunk).max(1) * chunk;
+    (0..segments as u64)
+        .map(|i| (i * per, ((i + 1) * per).min(total)))
+        .filter(|(start, end)| start < end)
+        .collect()
+}
+
+/// 分段并发下载：每段用 `open_remote` / `open_local` 各开一个独立句柄，seek 到段首后
+/// 顺序读写，返回累计字节数。本地文件不预分配长度——各段写到自己的偏移，最终长度
+/// 自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，直接报错，
+/// 不留下零填充的空洞；最后一段不设上界读到 EOF。
+async fn download_segmented<R, W, OR, ORF, OL, OLF>(
+    total: u64,
+    segments: usize,
+    open_remote: OR,
+    open_local: OL,
+    remote_path: &str,
+    on_progress: impl Fn(u64),
+) -> AppResult<u64>
+where
+    R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+    W: AsyncWriteExt + tokio::io::AsyncSeek + Unpin,
+    OR: Fn() -> ORF,
+    ORF: Future<Output = AppResult<R>>,
+    OL: Fn() -> OLF,
+    OLF: Future<Output = AppResult<W>>,
+{
+    use std::io::SeekFrom;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let ranges = segment_ranges(total, segments);
+    let last = ranges.len().saturating_sub(1);
+    let transferred = AtomicU64::new(0);
+    let (open_remote, open_local, transferred_ref, on_progress) =
+        (&open_remote, &open_local, &transferred, &on_progress);
+    let workers = ranges.into_iter().enumerate().map(|(i, (start, end))| async move {
+        let mut remote = open_remote().await?;
+        let mut local = open_local().await?;
+        remote.seek(SeekFrom::Start(start)).await
+            .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
+        local.seek(SeekFrom::Start(start)).await?;
+        let mut buf = vec![0u8; TRANSFER_CHUNK];
+        let mut pos = start;
+        loop {
+            let want = if i == last {
+                TRANSFER_CHUNK
+            } else {
+                (end - pos).min(TRANSFER_CHUNK as u64) as usize
+            };
+            if want == 0 { break; }
+            let n = remote.read(&mut buf[..want]).await
+                .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
+            if n == 0 {
+                if i != last {
+                    return Err(AppError::Sftp(format!(
+                        "{remote_path} shrank during download (EOF at {pos}, expected {end})"
+                    )));
+                }
+                break;
+            }
+            local.write_all(&buf[..n]).await?;
+            pos += n as u64;
+            on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
+        }
+        local.flush().await?;
+        Ok::<(), AppError>(())
+    });
+    futures::future::try_join_all(workers).await?;
+    Ok(transferred.into_inner())
+}
+
+/// 按 DIR_FILE_CONCURRENCY 并发处理同一层的一批文件，遇到第一个错误即返回。
+async fn transfer_files_concurrently<T, F, Fut>(items: Vec<T>, transfer: F) -> AppResult<()>
+where
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = AppResult<()>>,
+{
+    use futures::TryStreamExt;
+    stream::iter(items.into_iter().map(Ok))
+        .try_for_each_concurrent(DIR_FILE_CONCURRENCY, transfer)
+        .await
+}
+
 #[tauri::command]
 pub async fn file_download(
     app: AppHandle,
@@ -332,26 +430,48 @@ pub async fn file_download(
         .map_err(|e| AppError::Sftp(format!("stat {remote_path}: {e}")))?;
     let total = meta.size.unwrap_or(0);
 
-    let mut remote = sftp.open(&remote_path).await
-        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
     if let Some(parent) = Path::new(&local_path).parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    let mut local = tokio::fs::File::create(&local_path).await?;
     // 进度事件按 100ms 节流：每块一次 emit 会让 1GB 文件产生上万次 IPC + 字符串 clone，
     // 淹没 webview 事件队列。只在间隔过去或传输完成时才 emit。
-    let mut last_emit = std::time::Instant::now();
-    let transferred = stream_to_local(&mut remote, &mut local, &remote_path, |transferred| {
-        if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+    // 分段下载时各段并发回调，节流时间戳放 Mutex 里共享。
+    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
+    let on_progress = |transferred: u64| {
+        let mut last = last_emit.lock().unwrap();
+        if last.elapsed() >= std::time::Duration::from_millis(100) {
             emit_download_progress(&app, DownloadProgress {
                 session_id: session_id.clone(),
                 remote_path: remote_path.clone(),
                 transferred,
                 total,
             });
-            last_emit = std::time::Instant::now();
+            *last = std::time::Instant::now();
         }
-    }).await?;
+    };
+    let transferred = if total >= SEGMENTED_DOWNLOAD_MIN {
+        // 先创建/截断本地文件；各段再各自以写模式打开。
+        tokio::fs::File::create(&local_path).await?;
+        let (sftp_ref, remote_ref, local_ref) = (&sftp, remote_path.as_str(), local_path.as_str());
+        download_segmented(
+            total,
+            DOWNLOAD_SEGMENTS,
+            move || async move {
+                sftp_ref.open(remote_ref).await
+                    .map_err(|e| AppError::Sftp(format!("open remote {remote_ref}: {e}")))
+            },
+            move || async move {
+                Ok(tokio::fs::OpenOptions::new().write(true).open(local_ref).await?)
+            },
+            &remote_path,
+            &on_progress,
+        ).await?
+    } else {
+        let mut remote = sftp.open(&remote_path).await
+            .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
+        let mut local = tokio::fs::File::create(&local_path).await?;
+        stream_to_local(&mut remote, &mut local, &remote_path, &on_progress).await?
+    };
     // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
     emit_download_progress(&app, DownloadProgress {
         session_id,
@@ -391,23 +511,27 @@ fn upload_dir<'a>(
     Box::pin(async move {
         let _ = sftp.create_dir(&remote).await;
         let mut rd = tokio::fs::read_dir(&local).await?;
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
         while let Some(entry) = rd.next_entry().await? {
             let name = entry.file_name().to_string_lossy().to_string();
-            let child_local = entry.path();
-            let child_remote = join_remote(&remote, &name);
-            let meta = entry.metadata().await?;
-            if meta.is_dir() {
-                upload_dir(sftp.clone(), child_local, child_remote).await?;
-            } else {
-                let mut f = sftp.open_with_flags(
-                    &child_remote,
-                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-                ).await.map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
-                let child_local_str = child_local.to_string_lossy().to_string();
-                stream_to_remote(&child_local_str, &mut f, &child_remote, |_| {}).await?;
-                f.shutdown().await
-                    .map_err(|e| AppError::Sftp(format!("close {child_remote}: {e}")))?;
-            }
+            let child = (entry.path(), join_remote(&remote, &name));
+            if entry.metadata().await?.is_dir() { dirs.push(child); } else { files.push(child); }
+        }
+        let sftp_ref = &sftp;
+        transfer_files_concurrently(files, |(child_local, child_remote): (PathBuf, String)| async move {
+            let mut f = sftp_ref.open_with_flags(
+                &child_remote,
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            ).await.map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
+            let child_local_str = child_local.to_string_lossy().to_string();
+            stream_to_remote(&child_local_str, &mut f, &child_remote, |_| {}).await?;
+            f.shutdown().await
+                .map_err(|e| AppError::Sftp(format!("close {child_remote}: {e}")))?;
+            Ok(())
+        }).await?;
+        for (child_local, child_remote) in dirs {
+            upload_dir(sftp.clone(), child_local, child_remote).await?;
         }
         Ok(())
     })
@@ -436,20 +560,24 @@ fn download_dir<'a>(
         tokio::fs::create_dir_all(&local).await?;
         let entries = sftp.read_dir(&remote).await
             .map_err(|e| AppError::Sftp(format!("read_dir {remote}: {e}")))?;
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
         for e in entries {
             let name = e.file_name();
             if name == "." || name == ".." { continue; }
-            let child_remote = join_remote(&remote, &name);
-            let child_local = local.join(&name);
-            let meta = e.metadata();
-            if meta.is_dir() {
-                download_dir(sftp.clone(), child_remote, child_local).await?;
-            } else {
-                let mut rf = sftp.open(&child_remote).await
-                    .map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
-                let mut lf = tokio::fs::File::create(&child_local).await?;
-                stream_to_local(&mut rf, &mut lf, &child_remote, |_| {}).await?;
-            }
+            let child = (join_remote(&remote, &name), local.join(&name));
+            if e.metadata().is_dir() { dirs.push(child); } else { files.push(child); }
+        }
+        let sftp_ref = &sftp;
+        transfer_files_concurrently(files, |(child_remote, child_local): (String, PathBuf)| async move {
+            let mut rf = sftp_ref.open(&child_remote).await
+                .map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
+            let mut lf = tokio::fs::File::create(&child_local).await?;
+            stream_to_local(&mut rf, &mut lf, &child_remote, |_| {}).await?;
+            Ok(())
+        }).await?;
+        for (child_remote, child_local) in dirs {
+            download_dir(sftp.clone(), child_remote, child_local).await?;
         }
         Ok(())
     })
@@ -552,18 +680,203 @@ pub fn emit_upload_progress(app: &AppHandle, payload: UploadProgress) {
 #[cfg(test)]
 mod tests {
     use super::{
-        follow_symlinks, join_remote, parse_id_map, shell_quote, stream_to_local, stream_to_remote,
+        download_segmented, follow_symlinks, join_remote, parse_id_map, segment_ranges,
+        shell_quote, stream_to_local, stream_to_remote, transfer_files_concurrently,
+        DOWNLOAD_SEGMENTS, TRANSFER_CHUNK,
     };
+    use crate::error::{AppError, AppResult};
     use russh_sftp::client::fs::Metadata;
-    use std::io;
+    use std::io::{self, SeekFrom};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
-    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 
     /// OpenSSH sftp-server 的 max-read-length / max-write-length（256KiB − 1KiB）。
     const OPENSSH_MAX_RW_LEN: usize = 261_120;
+
+    /// 模拟远端文件句柄：每个 READ 先挂起一轮（像真实往返一样让出执行权，借此统计在途峰值），
+    /// 再返回 [pos, pos + len) 的数据。
+    struct MockRemote {
+        data: Arc<Vec<u8>>,
+        pos: u64,
+        waiting: bool,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for MockRemote {
+        fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if !this.waiting {
+                this.waiting = true;
+                let now = this.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                this.peak.fetch_max(now, Ordering::SeqCst);
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.waiting = false;
+            this.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let start = (this.pos as usize).min(this.data.len());
+            let n = buf.remaining().min(this.data.len() - start);
+            buf.put_slice(&this.data[start..start + n]);
+            this.pos += n as u64;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncSeek for MockRemote {
+        fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+            let SeekFrom::Start(pos) = position else { return Err(io::Error::other("unsupported seek")) };
+            self.get_mut().pos = pos;
+            Ok(())
+        }
+        fn poll_complete(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<u64>> {
+            Poll::Ready(Ok(self.pos))
+        }
+    }
+
+    /// 模拟本地文件：多个句柄共享同一块缓冲，各自按 seek 到的偏移写入。
+    struct MockLocal {
+        buf: Arc<Mutex<Vec<u8>>>,
+        pos: u64,
+    }
+
+    impl AsyncWrite for MockLocal {
+        fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            let start = this.pos as usize;
+            let mut buf = this.buf.lock().unwrap();
+            if buf.len() < start + data.len() {
+                buf.resize(start + data.len(), 0);
+            }
+            buf[start..start + data.len()].copy_from_slice(data);
+            this.pos += data.len() as u64;
+            Poll::Ready(Ok(data.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncSeek for MockLocal {
+        fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+            let SeekFrom::Start(pos) = position else { return Err(io::Error::other("unsupported seek")) };
+            self.get_mut().pos = pos;
+            Ok(())
+        }
+        fn poll_complete(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<u64>> {
+            Poll::Ready(Ok(self.pos))
+        }
+    }
+
+    /// 用 DOWNLOAD_SEGMENTS 跑一次分段下载：远端内容是 `remote`，按 `total` 切段。
+    async fn run_segmented(remote: Vec<u8>, total: u64) -> (AppResult<u64>, Vec<u8>, usize, u64) {
+        let data = Arc::new(remote);
+        let local = Arc::new(Mutex::new(Vec::new()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let last_progress = AtomicU64::new(0);
+        let result = download_segmented(
+            total,
+            DOWNLOAD_SEGMENTS,
+            || {
+                let remote = MockRemote {
+                    data: data.clone(),
+                    pos: 0,
+                    waiting: false,
+                    in_flight: in_flight.clone(),
+                    peak: peak.clone(),
+                };
+                async move { Ok(remote) }
+            },
+            || {
+                let file = MockLocal { buf: local.clone(), pos: 0 };
+                async move { Ok(file) }
+            },
+            "/r",
+            |t| last_progress.store(t, Ordering::SeqCst),
+        ).await;
+        let bytes = local.lock().unwrap().clone();
+        (result, bytes, peak.load(Ordering::SeqCst), last_progress.load(Ordering::SeqCst))
+    }
+
+    /// 非常量的字节模式：周期 251 与块大小互质，段错位或重叠时一定比对不上。
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn segment_ranges_are_chunk_aligned_and_cover_the_file() {
+        let chunk = TRANSFER_CHUNK as u64;
+        let total = 10 * chunk + 123;
+        let ranges = segment_ranges(total, 4);
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0].0, 0);
+        assert_eq!(ranges.last().unwrap().1, total);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "segments must be contiguous");
+        }
+        for (start, _) in &ranges {
+            assert_eq!(start % chunk, 0, "segment starts must be chunk aligned");
+        }
+        // 文件太小时段数自动收缩，不产生空段。
+        assert_eq!(segment_ranges(chunk + 1, 4), vec![(0, chunk), (chunk, chunk + 1)]);
+    }
+
+    #[tokio::test]
+    async fn segmented_download_runs_segments_concurrently_and_reassembles_bytes() {
+        let source = pattern(3 * TRANSFER_CHUNK + 4321);
+        let total = source.len() as u64;
+        let (result, bytes, peak, last_progress) = run_segmented(source.clone(), total).await;
+        assert_eq!(result.unwrap(), total);
+        // 各段 READ 必须同时在途，串行时吞吐仍是单句柄的块大小 / RTT。
+        assert!(peak > 1, "segments were read serially (peak in-flight = {peak})");
+        assert!(bytes == source, "reassembled bytes differ from the remote file");
+        assert_eq!(last_progress, total);
+    }
+
+    #[tokio::test]
+    async fn segmented_download_errors_when_file_shrinks_mid_transfer() {
+        // stat 时 4 块多，读的时候只剩 1 块：中间段会提前 EOF。
+        let total = 4 * TRANSFER_CHUNK as u64 + 10;
+        let (result, _, _, _) = run_segmented(pattern(TRANSFER_CHUNK), total).await;
+        assert!(matches!(result, Err(AppError::Sftp(_))), "shrunk file must not download silently");
+    }
+
+    #[tokio::test]
+    async fn directory_files_transfer_concurrently_and_propagate_errors() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let done = Arc::new(AtomicUsize::new(0));
+        let run = |fail_on: Option<usize>| {
+            let (in_flight, peak, done) = (in_flight.clone(), peak.clone(), done.clone());
+            transfer_files_concurrently((0..8).collect(), move |i: usize| {
+                let (in_flight, peak, done) = (in_flight.clone(), peak.clone(), done.clone());
+                async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    if Some(i) == fail_on {
+                        return Err(AppError::Sftp(format!("file {i} failed")));
+                    }
+                    done.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+        };
+
+        run(None).await.unwrap();
+        assert_eq!(done.load(Ordering::SeqCst), 8);
+        // 同层文件必须并发：每个小文件的 open/close 各一个 RTT，串行就是 N 轮往返。
+        assert!(peak.load(Ordering::SeqCst) > 1, "directory files were transferred serially");
+        assert!(matches!(run(Some(3)).await, Err(AppError::Sftp(_))));
+    }
 
     #[derive(Default)]
     struct RecordingWriter {
