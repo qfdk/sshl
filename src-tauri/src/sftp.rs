@@ -90,6 +90,9 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
         .map_err(|e| AppError::Sftp(format!("request sftp subsystem: {e}")))?;
     let sftp = SftpSession::new(channel.into_stream()).await
         .map_err(|e| AppError::Sftp(format!("sftp init: {e}")))?;
+    // russh-sftp 的读请求从发出起计时，默认 10s 超时（写请求不计时）。分段下载 / 目录并发下载
+    // 会同时挂约 1MB 的 READ，链路慢于 ~100KB/s 时排在后面的回复会超时；放宽到 30s（≥ ~35KB/s）。
+    sftp.set_timeout(30);
     let sftp = Arc::new(sftp);
     let mut cache = session.sftp.lock().await;
     *cache = Some(sftp.clone());
@@ -450,7 +453,10 @@ pub async fn file_download(
         }
     };
     let transferred = if total >= SEGMENTED_DOWNLOAD_MIN {
-        // 先创建/截断本地文件；各段再各自以写模式打开。
+        // 先确认远端可读再创建/截断本地文件：能 stat 但没有读权限（如 root 的大日志）时，
+        // 不留下 0 字节文件、也不截断同名的已有文件。之后各段再各自以写模式打开。
+        drop(sftp.open(&remote_path).await
+            .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?);
         tokio::fs::File::create(&local_path).await?;
         let (sftp_ref, remote_ref, local_ref) = (&sftp, remote_path.as_str(), local_path.as_str());
         download_segmented(
