@@ -53,3 +53,11 @@ objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSUserDefaults", "NSString", "NSDictionary"] }
 core-text = "20"
 core-foundation = "0.9"
+
+# release：全程序 LTO + 单 codegen unit 让编译器跨 crate 内联，strip 去掉符号表，
+# 换来更小更快的二进制，代价是 release 构建变慢。不设 panic = "abort"：
+# 后台任务（shell pump 等）panic 时只结束该任务，不能拖垮整个应用。
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
