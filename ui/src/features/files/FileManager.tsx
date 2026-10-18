@@ -6,7 +6,7 @@ import { Checkbox } from '../../components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
 import { Progress } from '../../components/ui/progress';
-import { joinPath, parentPath, useFileList, type FileEntry, type FileKind } from './useFileList';
+import { joinPath, parentPath, resolveRemoteHome, useFileList, type FileEntry, type FileKind } from './useFileList';
 import { FilePane, type FileContextMenuItem } from './FilePane';
 import { useTransfer } from './useTransfer';
 
@@ -354,8 +354,7 @@ export function FileManager() {
             onListDirectory={remote.listDirectory}
             onHome={async () => {
               if (!sessionId) return;
-              const result = await (window as AppWindow).api.ssh.execute(sessionId, 'echo "$HOME"');
-              const home = (result?.output ?? result?.data ?? result)?.toString().trim();
+              const home = await resolveRemoteHome(sessionId);
               if (home) void remote.load(home, true);
             }}
             onRefresh={refreshRemote}

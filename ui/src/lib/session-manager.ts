@@ -16,7 +16,8 @@ class SessionManager {
       active: true,
       buffer: data.buffer || '',
       lastActive: Date.now(),
-      currentRemotePath: '/',
+      // 空 = 还没打开过文件管理；第一次打开时从远程 home 开始（useFileList）
+      currentRemotePath: '',
     });
   }
 
@@ -93,7 +94,7 @@ class SessionManager {
   }
 
   getRemotePath(sessionId: string) {
-    return this.sessions.get(sessionId)?.currentRemotePath || '/';
+    return this.sessions.get(sessionId)?.currentRemotePath || '';
   }
 
   updateRemotePath(sessionId: string, path: string) {

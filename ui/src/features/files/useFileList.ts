@@ -89,6 +89,16 @@ export function isRootPath(path: string, kind: FileKind) {
   return kind === 'remote' ? normalizeRemotePath(path) === '/' : path === '/' || /^[A-Za-z]:[\\/]?$/.test(path);
 }
 
+// ssh.execute('echo "$HOME"') 的结果；失败或输出不是绝对路径（如 shell 启动脚本往 stdout 打了东西）时给空，调用方退回 /。
+export function remoteHomeFromResult(result: { output?: unknown } | null | undefined) {
+  const home = String(result?.output ?? '').trim();
+  return home.startsWith('/') ? home : '';
+}
+
+export async function resolveRemoteHome(sessionId: string) {
+  return remoteHomeFromResult(await (window as AppWindow).api?.ssh?.execute(sessionId, 'echo "$HOME"'));
+}
+
 export function formatFileSize(bytes = 0) {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -225,8 +235,9 @@ export function useFileList({ kind, sessionId, enabled }: { kind: FileKind; sess
 
   useEffect(() => {
     requestRef.current += 1;
+    const ticket = requestRef.current;
     const nextPath = kind === 'remote'
-      ? (sessionId ? sessionManager.getRemotePath(sessionId) || '/' : '')
+      ? (sessionId ? sessionManager.getRemotePath(sessionId) : '')
       : (lastLocalDirectory || '');
     pathRef.current = nextPath;
     setPathState(nextPath);
@@ -237,6 +248,13 @@ export function useFileList({ kind, sessionId, enabled }: { kind: FileKind; sess
       if (kind === 'local' && !nextPath) {
         const getHomeDir = (window as AppWindow).api?.file?.getHomeDir;
         if (getHomeDir) void Promise.resolve(getHomeDir()).then((home: string) => load(home, false));
+      } else if (kind === 'remote' && sessionId && !nextPath) {
+        // 这个会话第一次打开文件管理：从远程 home 开始，和终端登录后所在目录一致。
+        // 取 home 期间切了会话或标签页，这次结果作废，不能拿旧会话的 home 去加载。
+        setLoading(true);
+        void resolveRemoteHome(sessionId).then(home => {
+          if (requestRef.current === ticket) void load(home || '/');
+        });
       } else {
         void load(nextPath || undefined);
       }
