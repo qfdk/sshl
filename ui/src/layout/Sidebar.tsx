@@ -16,19 +16,19 @@ export function Sidebar({ manager }: { manager: ConnectionManager }) {
   );
   return (
     <aside className={`flex h-full min-h-0 shrink-0 select-none flex-col overflow-hidden transition-[width] duration-200 ${collapsed ? 'w-[76px]' : 'w-52'}`} id="sidebar" data-collapsed={collapsed}>
-      {/* 标题栏是透明叠加的（tauri.conf.json：Overlay + trafficLightPosition），红绿灯浮在这一行左侧，
-          与右侧顶栏同一中线；这里让出 82px 并作为窗口拖动区。收起时 76px 宽刚好容下红绿灯。 */}
-      <div data-tauri-drag-region className={`flex h-[58px] shrink-0 items-center ${collapsed ? '' : 'gap-2 pl-[82px] pr-2'}`}>
-        {!collapsed && (
-          <>
+      {/* 标题栏是透明叠加的（tauri.conf.json：Overlay + trafficLightPosition）：红绿灯单独占这一行，
+          与右侧顶栏同一中线；这一行只作窗口拖动区。收起时 76px 宽刚好容下红绿灯。 */}
+      <div data-tauri-drag-region className="h-[50px] shrink-0" />
+      {collapsed
+        ? <div className="flex shrink-0 justify-center pb-1">{toggle}</div>
+        : (
+          <div data-tauri-drag-region className="flex h-11 shrink-0 items-center gap-2 pl-4 pr-2">
             {/* 与 app 图标同一张 icon.png；图里四周约 10% 透明边距，放大并用负边距抵掉，可见方块约 24px */}
             <img data-tauri-drag-region src={appIcon} alt="" aria-hidden="true" className="-m-[3px] h-[30px] w-[30px] shrink-0" draggable={false} />
             <span data-tauri-drag-region className="font-semibold tracking-wide">SSHL</span>
             {toggle}
-          </>
+          </div>
         )}
-      </div>
-      {collapsed && <div className="flex shrink-0 justify-center pb-1">{toggle}</div>}
       {!collapsed && (
         <div className="relative px-3 pb-2">
           <Search className="pointer-events-none absolute left-6 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
