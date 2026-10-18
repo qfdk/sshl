@@ -74,16 +74,15 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
             )
             : (
               <>
-                <Server className={cn('h-4 w-4 shrink-0', connected ? 'text-foreground' : 'text-muted-foreground')} aria-hidden="true" />
+                {/* 在线状态是图标角上的绿点，不占一列文字宽度，地址少被截断 */}
+                <span className="relative shrink-0">
+                  <Server className={cn('h-4 w-4', connected ? 'text-foreground' : 'text-muted-foreground')} aria-hidden="true" />
+                  {connected && <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full bg-success ring-2', active ? 'ring-card' : 'ring-shell')} data-connection-status><span className="sr-only">在线</span></span>}
+                </span>
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate font-medium leading-5" title={connection.name}>{connection.name}</span>
-                  {connection.host && <span className="truncate font-mono text-[11px] leading-4 text-muted-foreground">{connection.username ? `${connection.username}@` : ''}{connection.host}</span>}
+                  {connection.host && <span className="truncate font-mono text-[11px] leading-4 text-muted-foreground" title={`${connection.username ? `${connection.username}@` : ''}${connection.host}`}>{connection.username ? `${connection.username}@` : ''}{connection.host}</span>}
                 </span>
-                {connected && (
-                  <span className="flex shrink-0 items-center gap-1 text-[11px] text-[#0b6b3a] transition-opacity group-hover:opacity-0 group-focus-within:opacity-0" data-connection-status>
-                    <span className="h-1.5 w-1.5 rounded-full bg-success" />在线
-                  </span>
-                )}
               </>
             )}
           {/* 悬停时浮在行右侧、盖住「在线」标记；用透明度而非 display 切换，键盘仍能 Tab 进来 */}
@@ -234,10 +233,11 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
     />
   ));
   return (
-    <div ref={listRef} className={`grid select-none gap-1 overflow-y-auto ${collapsed ? 'px-1 py-2' : 'p-2'}`} data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>
+    // grid-cols-1 = minmax(0, 1fr)：默认 auto 列会被长地址撑到内容宽度、溢出侧边栏，截断失效
+    <div ref={listRef} className={`grid grid-cols-1 select-none gap-1 overflow-y-auto ${collapsed ? 'px-1 py-2' : 'px-3 py-2'}`} data-connection-list onPointerDown={startDrag} onPointerMove={moveDrag}>
       <div
         className={cn(
-          'grid gap-1 rounded-md transition-colors',
+          'grid grid-cols-1 gap-1 rounded-md transition-colors',
           // 未分组为空时高度为 0，不给它一个最小高度就永远拖不进去
           dragging && 'min-h-10 border border-dashed border-border',
           drop?.kind === 'ungrouped' && 'border-primary bg-primary/10',
@@ -254,7 +254,7 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
         const dropHere = drop?.kind === 'group' && drop.group === group.name;
         // 收起后裸数字看不出是什么，换成文件夹图标（形态即展开状态）+ 右上角数量角标
         const header = (
-          <button type="button" className={cn('flex cursor-pointer select-none items-center rounded-md py-1 text-left text-xs font-semibold text-muted-foreground hover:bg-foreground/[0.04]', collapsed ? 'justify-center px-0' : 'gap-1 px-2', dropHere && 'text-primary')} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} aria-label={collapsed ? `${group.name}，${group.connections.length} 个连接` : undefined} onClick={() => manager.toggleGroup(group.name)}>
+          <button type="button" className={cn('flex cursor-pointer select-none items-center rounded-md py-1 text-left text-xs font-semibold text-muted-foreground hover:bg-foreground/[0.04]', collapsed ? 'justify-center px-0' : 'gap-1 px-2.5', dropHere && 'text-primary')} data-connection-group-header data-group={group.name} aria-expanded={!groupCollapsed} aria-label={collapsed ? `${group.name}，${group.connections.length} 个连接` : undefined} onClick={() => manager.toggleGroup(group.name)}>
             {collapsed
               ? (
                 <span className="relative flex h-7 w-7 items-center justify-center">
@@ -265,7 +265,7 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
               : <>{groupCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}<span className="min-w-0 flex-1 truncate">{group.name}</span><span>{group.connections.length}</span></>}
           </button>
         );
-        return <section key={group.name} data-connection-group data-group={group.name} className={cn('grid gap-1 rounded-md transition-colors', dropHere && 'bg-primary/10 ring-1 ring-primary')}>
+        return <section key={group.name} data-connection-group data-group={group.name} className={cn('grid grid-cols-1 gap-1 rounded-md transition-colors', dropHere && 'bg-primary/10 ring-1 ring-primary')}>
           {collapsed
             ? (
               <Tooltip>
@@ -274,7 +274,7 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
               </Tooltip>
             )
             : header}
-          {!groupCollapsed && <div className={`grid gap-1 ${collapsed ? 'ml-1.5 border-l border-border pl-1' : ''}`}>{renderItems(group.connections)}</div>}
+          {!groupCollapsed && <div className={`grid grid-cols-1 gap-1 ${collapsed ? 'ml-1.5 border-l border-border pl-1' : ''}`}>{renderItems(group.connections)}</div>}
         </section>;
       })}
     </div>
