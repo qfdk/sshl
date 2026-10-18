@@ -8,6 +8,7 @@ import {
 } from '../../lib/app-state';
 import { getUngroupedConnections, groupConnections, matchesConnection, moveConnection } from '../../lib/connection-groups';
 import sessionManager from '../../lib/session-manager';
+import { createSessionRevalidator } from '../../lib/session-revalidator';
 import type { TerminalManager } from '../terminal/useTerminal';
 type Connection = { id: string; name?: string; host?: string; username?: string; group?: string; [key: string]: unknown };
 
@@ -147,22 +148,30 @@ export function useConnections(): ConnectionManager {
     setRevision(value => value + 1);
   }, [updateConnectionStatus]);
 
+  // 切换会话的后台探活；失效且用户仍停在该会话上时自动重连（connectToSaved 定义在后面，经 ref 引用）。
+  const connectToSavedRef = useRef<((id: string) => Promise<void>) | null>(null);
+  const revalidatorRef = useRef<ReturnType<typeof createSessionRevalidator> | null>(null);
+  if (!revalidatorRef.current) {
+    revalidatorRef.current = createSessionRevalidator({
+      validate: sessionId => appWindow().api.ssh.validateSession(sessionId),
+      getCurrentSessionId,
+      discard: (sessionId, connectionId) => discardStaleSession({ sessionId, session: { connectionId } }),
+      reconnect: connectionId => { void connectToSavedRef.current?.(connectionId); },
+    });
+  }
+  const revalidator = revalidatorRef.current;
+
   const switchToSession = useCallback(async (connectionId: string) => {
     let sessionInfo = sessionManager.getSessionByConnectionId(connectionId);
     if (!sessionInfo) return false;
-    if (appWindow().api.ssh.validateSession) {
-      const alive = await appWindow().api.ssh.validateSession(sessionInfo.sessionId);
-      if (!alive?.success || !alive.alive) {
-        discardStaleSession(sessionInfo);
-        return false;
-      }
-    }
 
     const activationResult = await appWindow().api.ssh.activateSession(sessionInfo.sessionId);
     if (!activationResult?.success) {
       discardStaleSession(sessionInfo);
       return false;
     }
+    // 乐观切换：探活放到后台，不再挡在每次切换前面（见 session-revalidator）。
+    void revalidator.revalidate(sessionInfo.sessionId, connectionId);
     if (getCurrentSessionId() === sessionInfo.sessionId) return true;
 
     try {
@@ -270,6 +279,7 @@ export function useConnections(): ConnectionManager {
       if (attempt) finishConnectionAttempt(attempt);
     }
   }, [beginConnectionAttempt, finishConnectionAttempt, isConnecting, loadConnections, switchToSession, updateConnectionStatus, waitForConnection]);
+  connectToSavedRef.current = connectToSaved;
 
   const submitConnection = useCallback(async (details: ConnectionDetails) => {
     if (activeAttempt.current || isConnecting) return;
@@ -353,6 +363,8 @@ export function useConnections(): ConnectionManager {
       const message = transferring ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？' : '当前正在使用文件管理，断开连接会关闭文件传输。\n确定要断开吗？';
       if (!await appWindow().api.dialog.confirm(message, '断开连接')) return;
     }
+    // 用户主动断开：探活结果回来时不能把它当成「连接失效」去自动重连。
+    revalidator.forget(sessionId);
     try { await appWindow().api.ssh.disconnect(sessionId); } catch (error) { console.error('断开连接失败:', error); }
     sessionManager.removeSession(sessionId);
     appWindow().terminalManager?.disposeTerminalInstance(sessionId);
