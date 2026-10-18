@@ -10,6 +10,7 @@ mod system_fonts;
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use tauri::Manager;
 
 use config_store::{load_secret, ConfigStore};
@@ -113,6 +114,10 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// 启动预热的并发握手数。串行时一台不可达主机（connect_tcp 4 次重试 ≈ 22s）
+/// 会拖住排在它后面的所有主机。
+const PREWARM_CONCURRENCY: usize = 8;
+
 async fn prewarm_saved_connections(app: &tauri::AppHandle) {
     let store = app.state::<ConfigStore>();
     let conns = match store.read_all().await {
@@ -123,6 +128,8 @@ async fn prewarm_saved_connections(app: &tauri::AppHandle) {
         }
     };
     let state = app.state::<AppState>();
+    let mut seen = std::collections::HashSet::new();
+    let mut targets = Vec::new();
     for c in conns {
         // 不依赖 has_password / has_passphrase 标志（重连 re-save 曾把它误置为 false）；
         // secrets 库才是凭据真相来源，无条件按 id 读取。
@@ -132,33 +139,43 @@ async fn prewarm_saved_connections(app: &tauri::AppHandle) {
             continue;
         }
         let key = format!("{}:{}:{}", c.host, c.port, c.username);
-        if state.warm_contains(&key).await {
+        // 同一 host:port:user 保存了多份时只握手一次（并发下无法再靠 warm_contains 去重）。
+        if !seen.insert(key.clone()) || state.warm_contains(&key).await {
             continue;
         }
-        match ssh::do_handshake(
-            &c.host,
-            c.port,
-            &c.username,
-            password.as_deref(),
-            c.private_key.as_deref(),
-            passphrase.as_deref(),
-        )
-        .await
-        {
-            Ok(handle) => {
-                state
-                    .warm_insert(
-                        key.clone(),
-                        state::WarmConn {
-                            handle,
-                            created_at: std::time::Instant::now(),
-                        },
-                    )
-                    .await;
-            }
-            Err(e) => {
-                tracing::warn!("prewarm: {key} failed: {e}");
-            }
-        }
+        targets.push((key, c, password, passphrase));
     }
+
+    futures::stream::iter(targets)
+        .for_each_concurrent(PREWARM_CONCURRENCY, |(key, c, password, passphrase)| {
+            let state = &state;
+            async move {
+                match ssh::do_handshake(
+                    &c.host,
+                    c.port,
+                    &c.username,
+                    password.as_deref(),
+                    c.private_key.as_deref(),
+                    passphrase.as_deref(),
+                )
+                .await
+                {
+                    Ok(handle) => {
+                        state
+                            .warm_insert(
+                                key,
+                                state::WarmConn {
+                                    handle,
+                                    created_at: std::time::Instant::now(),
+                                },
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("prewarm: {key} failed: {e}");
+                    }
+                }
+            }
+        })
+        .await;
 }

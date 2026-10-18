@@ -3,10 +3,13 @@
 // (mirrors Electron-side fix in commits 8cb552c / a819e15).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use futures::stream::{self, StreamExt};
+use russh_sftp::client::fs::Metadata;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use serde::Serialize;
@@ -16,6 +19,16 @@ use tokio::io::AsyncWriteExt;
 use crate::error::{AppError, AppResult};
 use crate::ssh::SshSession;
 use crate::state::AppState;
+
+/// 单次 SFTP 读/写的块大小 = OpenSSH sftp-server 的 max-read/write-length（256KiB − 1KiB），
+/// 每块恰好一个 SFTP 请求。russh-sftp 的读是一问一答（等到回复才发下一个 READ），
+/// 吞吐 ≈ 块大小 / RTT：64KB 时 50ms RTT 下只有 ~1.3MB/s。写有 8 路 pipeline，
+/// 块越大在途数据越多（8 × 255KB ≈ SSH 默认 2MB 窗口）。
+const TRANSFER_CHUNK: usize = 255 * 1024;
+
+/// 符号链接 STAT 的并发度。每个 STAT 一个 RTT，russh-sftp 按请求 id 分发响应，可并发；
+/// 串行时 /usr/lib 这类几百个 .so 链接的目录要几百个 RTT。
+const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,13 +69,14 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
             return Ok(s.clone());
         }
     }
-    // Open new SFTP subsystem channel and cache it.
-    let handle = session.handle.lock().await;
-    let channel = handle.channel_open_session().await
-        .map_err(|e| AppError::Sftp(format!("open sftp channel: {e}")))?;
+    // Open new SFTP subsystem channel and cache it. Handle 锁只覆盖开通道（同 ssh_execute）。
+    let channel = {
+        let handle = session.handle.lock().await;
+        handle.channel_open_session().await
+            .map_err(|e| AppError::Sftp(format!("open sftp channel: {e}")))?
+    };
     channel.request_subsystem(true, "sftp").await
         .map_err(|e| AppError::Sftp(format!("request sftp subsystem: {e}")))?;
-    drop(handle);
     let sftp = SftpSession::new(channel.into_stream()).await
         .map_err(|e| AppError::Sftp(format!("sftp init: {e}")))?;
     let sftp = Arc::new(sftp);
@@ -131,6 +145,34 @@ fn join_remote(base: &str, name: &str) -> String {
     }
 }
 
+/// 对符号链接条目跟随一次 STAT，让 size / is_directory 反映目标；保持原顺序。
+/// STAT 失败（悬空链接等）时保留链接自身的元数据。
+async fn follow_symlinks<F, Fut>(
+    entries: Vec<(String, String, Metadata)>,
+    stat: F,
+) -> Vec<(String, String, Metadata)>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<Metadata>>,
+{
+    stream::iter(entries)
+        .map(|(name, full, meta)| {
+            // POSIX S_IFLNK = 0o120000, S_IFMT = 0o170000.
+            let is_symlink = meta.permissions.map(|p| p & 0o170000 == 0o120000).unwrap_or(false);
+            let target = is_symlink.then(|| stat(full.clone()));
+            async move {
+                let meta = match target {
+                    Some(fut) => fut.await.unwrap_or(meta),
+                    None => meta,
+                };
+                (name, full, meta)
+            }
+        })
+        .buffered(SYMLINK_STAT_CONCURRENCY)
+        .collect()
+        .await
+}
+
 #[tauri::command]
 pub async fn file_list(
     state: State<'_, AppState>,
@@ -140,26 +182,27 @@ pub async fn file_list(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    let entries = sftp.read_dir(&path).await
-        .map_err(|e| AppError::Sftp(format!("read_dir {path}: {e}")))?;
-    let users = passwd_map(&session, &sftp).await;
-    let groups = group_map(&session, &sftp).await;
-    let mut out: Vec<RemoteEntry> = Vec::new();
-    for e in entries {
-        let name = e.file_name();
-        if name == "." || name == ".." { continue; }
-        let mut meta = e.metadata();
-        let full = join_remote(&path, &name);
-
-        // If symlink, follow it so size/is_directory reflect the target.
-        // POSIX S_IFLNK = 0o120000, S_IFMT = 0o170000.
-        let is_symlink = meta.permissions.map(|p| p & 0o170000 == 0o120000).unwrap_or(false);
-        if is_symlink {
-            if let Ok(target) = sftp.metadata(&full).await {
-                meta = target;
-            }
-        }
-
+    // read_dir 与首次加载 /etc/passwd、/etc/group 互不依赖，并发发出省掉两轮往返。
+    let (entries, users, groups) = tokio::join!(
+        sftp.read_dir(&path),
+        passwd_map(&session, &sftp),
+        group_map(&session, &sftp),
+    );
+    let entries = entries.map_err(|e| AppError::Sftp(format!("read_dir {path}: {e}")))?;
+    let listed: Vec<(String, String, Metadata)> = entries
+        .filter_map(|e| {
+            let name = e.file_name();
+            if name == "." || name == ".." { return None; }
+            let full = join_remote(&path, &name);
+            Some((name, full, e.metadata()))
+        })
+        .collect();
+    let sftp_ref = &sftp;
+    let resolved = follow_symlinks(listed, |full| async move {
+        sftp_ref.metadata(full).await.ok()
+    }).await;
+    let mut out: Vec<RemoteEntry> = Vec::with_capacity(resolved.len());
+    for (name, full, meta) in resolved {
         out.push(RemoteEntry {
             path: full,
             is_directory: meta.is_dir(),
@@ -234,7 +277,7 @@ where
 {
     use tokio::io::AsyncReadExt;
     let mut local = tokio::fs::File::open(local_path).await?;
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; TRANSFER_CHUNK];
     let mut transferred: u64 = 0;
     loop {
         let n = local.read(&mut buf).await?;
@@ -245,6 +288,33 @@ where
         on_progress(transferred);
     }
     Ok(())
+}
+
+/// 与 `stream_to_remote` 对称：分块把 SFTP 远端句柄流式写进本地文件，返回累计字节数。
+/// `on_progress` 接收累计已传字节数，调用方负责节流。
+async fn stream_to_local<R, W>(
+    remote: &mut R,
+    local: &mut W,
+    remote_path: &str,
+    mut on_progress: impl FnMut(u64),
+) -> AppResult<u64>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; TRANSFER_CHUNK];
+    let mut transferred: u64 = 0;
+    loop {
+        let n = remote.read(&mut buf).await
+            .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
+        if n == 0 { break; }
+        local.write_all(&buf[..n]).await?;
+        transferred += n as u64;
+        on_progress(transferred);
+    }
+    local.flush().await?;
+    Ok(transferred)
 }
 
 #[tauri::command]
@@ -262,24 +332,16 @@ pub async fn file_download(
         .map_err(|e| AppError::Sftp(format!("stat {remote_path}: {e}")))?;
     let total = meta.size.unwrap_or(0);
 
-    use tokio::io::AsyncReadExt;
     let mut remote = sftp.open(&remote_path).await
         .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
     if let Some(parent) = Path::new(&local_path).parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
     let mut local = tokio::fs::File::create(&local_path).await?;
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut transferred: u64 = 0;
-    // 进度事件按 100ms 节流：64KB 一次 emit 会让 1GB 文件产生上万次 IPC + 字符串 clone，
+    // 进度事件按 100ms 节流：每块一次 emit 会让 1GB 文件产生上万次 IPC + 字符串 clone，
     // 淹没 webview 事件队列。只在间隔过去或传输完成时才 emit。
     let mut last_emit = std::time::Instant::now();
-    loop {
-        let n = remote.read(&mut buf).await
-            .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
-        if n == 0 { break; }
-        local.write_all(&buf[..n]).await?;
-        transferred += n as u64;
+    let transferred = stream_to_local(&mut remote, &mut local, &remote_path, |transferred| {
         if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
             emit_download_progress(&app, DownloadProgress {
                 session_id: session_id.clone(),
@@ -289,8 +351,7 @@ pub async fn file_download(
             });
             last_emit = std::time::Instant::now();
         }
-    }
-    local.flush().await?;
+    }).await?;
     // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
     emit_download_progress(&app, DownloadProgress {
         session_id,
@@ -384,18 +445,10 @@ fn download_dir<'a>(
             if meta.is_dir() {
                 download_dir(sftp.clone(), child_remote, child_local).await?;
             } else {
-                use tokio::io::AsyncReadExt;
                 let mut rf = sftp.open(&child_remote).await
                     .map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
                 let mut lf = tokio::fs::File::create(&child_local).await?;
-                let mut buf = vec![0u8; 64 * 1024];
-                loop {
-                    let n = rf.read(&mut buf).await
-                        .map_err(|e| AppError::Sftp(format!("read {child_remote}: {e}")))?;
-                    if n == 0 { break; }
-                    lf.write_all(&buf[..n]).await?;
-                }
-                lf.flush().await?;
+                stream_to_local(&mut rf, &mut lf, &child_remote, |_| {}).await?;
             }
         }
         Ok(())
@@ -427,9 +480,12 @@ pub async fn file_change_permissions(
     // and chmod via `chmod` is universally portable.
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    let handle = session.handle.lock().await;
-    let channel = handle.channel_open_session().await
-        .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))?;
+    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
+    let channel = {
+        let handle = session.handle.lock().await;
+        handle.channel_open_session().await
+            .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))?
+    };
     let cmd = format!("chmod {:o} {}", permissions, shell_quote(&remote_path));
     drain_exec(channel, &cmd).await
 }
@@ -444,9 +500,12 @@ pub async fn file_change_owner(
 ) -> AppResult<()> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    let handle = session.handle.lock().await;
-    let channel = handle.channel_open_session().await
-        .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))?;
+    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
+    let channel = {
+        let handle = session.handle.lock().await;
+        handle.channel_open_session().await
+            .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))?
+    };
     let cmd = format!(
         "chown {}:{} {}",
         shell_quote(&owner),
@@ -492,7 +551,126 @@ pub fn emit_upload_progress(app: &AppHandle, payload: UploadProgress) {
 
 #[cfg(test)]
 mod tests {
-    use super::{join_remote, parse_id_map, shell_quote};
+    use super::{
+        follow_symlinks, join_remote, parse_id_map, shell_quote, stream_to_local, stream_to_remote,
+    };
+    use russh_sftp::client::fs::Metadata;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    /// OpenSSH sftp-server 的 max-read-length / max-write-length（256KiB − 1KiB）。
+    const OPENSSH_MAX_RW_LEN: usize = 261_120;
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        writes: Vec<usize>,
+    }
+
+    impl AsyncWrite for RecordingWriter {
+        fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+            self.writes.push(buf.len());
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// 模拟远端文件：记录每次 poll_read 请求的长度（russh-sftp 据此决定 READ 请求大小）。
+    struct RecordingReader {
+        remaining: usize,
+        requested: Vec<usize>,
+    }
+
+    impl AsyncRead for RecordingReader {
+        fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            self.requested.push(buf.remaining());
+            let n = buf.remaining().min(self.remaining);
+            buf.put_slice(&vec![7u8; n]);
+            self.remaining -= n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_writes_one_max_size_sftp_request_per_chunk() {
+        let path = std::env::temp_dir().join(format!("sshl-upload-{}", uuid::Uuid::new_v4()));
+        let size = OPENSSH_MAX_RW_LEN * 2 + 10;
+        std::fs::write(&path, vec![1u8; size]).unwrap();
+        let mut writer = RecordingWriter::default();
+        let mut last = 0;
+        let result = stream_to_remote(path.to_str().unwrap(), &mut writer, "/r", |t| last = t).await;
+        std::fs::remove_file(&path).ok();
+        result.unwrap();
+        // 每块恰好占满一个 SFTP WRITE（上传有 8 路 pipeline，块越大在途数据越多），
+        // 且不超过服务端上限，不会被拆成「一大一小」两个请求浪费 pipeline 槽位。
+        assert_eq!(writer.writes, vec![OPENSSH_MAX_RW_LEN, OPENSSH_MAX_RW_LEN, 10]);
+        assert_eq!(last, size as u64);
+    }
+
+    #[tokio::test]
+    async fn download_requests_max_size_sftp_reads() {
+        let size = OPENSSH_MAX_RW_LEN * 2 + 10;
+        let mut reader = RecordingReader { remaining: size, requested: Vec::new() };
+        let mut local: Vec<u8> = Vec::new();
+        let mut last = 0;
+        let transferred = stream_to_local(&mut reader, &mut local, "/r", |t| last = t).await.unwrap();
+        // 下载是一问一答，吞吐 ≈ 单次 READ 大小 / RTT：每次都要按服务端上限请求。
+        assert_eq!(reader.requested[0], OPENSSH_MAX_RW_LEN);
+        assert_eq!(transferred, size as u64);
+        assert_eq!(last, size as u64);
+        assert_eq!(local.len(), size);
+    }
+
+    fn meta(permissions: u32) -> Metadata {
+        let mut m = Metadata::empty();
+        m.permissions = Some(permissions);
+        m
+    }
+
+    #[tokio::test]
+    async fn follow_symlinks_stats_links_concurrently_in_order() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let stated = Arc::new(Mutex::new(Vec::new()));
+        let link = |name: &str| (name.to_string(), format!("/d/{name}"), meta(0o120777));
+        let entries = vec![
+            link("a"),
+            ("f".to_string(), "/d/f".to_string(), meta(0o100644)),
+            link("b"),
+            link("dangling"),
+            link("c"),
+        ];
+
+        let out = follow_symlinks(entries, |full| {
+            let (in_flight, peak, stated) = (in_flight.clone(), peak.clone(), stated.clone());
+            async move {
+                stated.lock().unwrap().push(full.clone());
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                if full.ends_with("dangling") { None } else { Some(meta(0o040755)) }
+            }
+        }).await;
+
+        // 每个 STAT 一个 RTT：必须并发发出，串行时几百个链接的目录要几百个 RTT。
+        assert!(peak.load(Ordering::SeqCst) > 1, "symlink STATs ran serially");
+        let names: Vec<&str> = out.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, ["a", "f", "b", "dangling", "c"]);
+        assert!(out[0].2.is_dir() && out[2].2.is_dir() && out[4].2.is_dir());
+        // 普通文件不发 STAT；悬空链接保留自身元数据。
+        assert_eq!(out[1].2.permissions, Some(0o100644));
+        assert_eq!(out[3].2.permissions, Some(0o120777));
+        assert_eq!(stated.lock().unwrap().len(), 4);
+    }
 
     #[test]
     fn join_remote_handles_root_and_trailing_slash() {

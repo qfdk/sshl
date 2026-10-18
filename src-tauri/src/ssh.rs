@@ -742,9 +742,13 @@ pub async fn ssh_execute(
 ) -> AppResult<String> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    let handle = session.handle.lock().await;
-    let mut channel = handle.channel_open_session().await
-        .map_err(|e| AppError::Ssh(format!("open exec channel: {e}")))?;
+    // Handle 锁只覆盖开通道。命令执行 + 读输出可能持续数秒（rm -rf 大目录），
+    // 期间占锁会让其它开通道的操作全部排队，validate 探测 2s 超时还会把正常会话误判为失效。
+    let mut channel = {
+        let handle = session.handle.lock().await;
+        handle.channel_open_session().await
+            .map_err(|e| AppError::Ssh(format!("open exec channel: {e}")))?
+    };
     channel.exec(true, command.as_bytes()).await
         .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
     let mut out = Vec::new();
