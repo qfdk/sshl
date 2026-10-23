@@ -250,7 +250,8 @@ export function FilePane({
             <ContextMenuTrigger asChild>
               <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
                 <Table className="table-fixed text-xs">
-                  <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-card">
+                  {/* border-collapse 下行边框不随 sticky 走，分隔线用单元格的 inset 阴影画（WebKit 不画 thead 上的阴影） */}
+                  <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-card [&_th]:shadow-[inset_0_-1px_0_var(--color-border)] [&_tr]:border-b-0">
                     <TableRow>
                       <TableHead className="h-8 px-3.5 font-medium">名称</TableHead>
                       <TableHead className="h-8 w-20 px-3 text-right font-medium">大小</TableHead>
