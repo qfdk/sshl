@@ -57,6 +57,7 @@ export const api = {
   },
   file: {
     list: (sessionId: string, path: string) => call('file_list', { sessionId, path }, 'files'),
+    remoteHome: (sessionId: string) => call('file_remote_home', { sessionId }, 'home'),
     listLocal: (directory: string) => call('file_list_local', { directory }, 'files'),
     getHomeDir: () => invoke<string>('file_get_home_dir'),
     listSystemFonts: () => invoke<string[]>('list_system_fonts'),

@@ -89,14 +89,14 @@ export function isRootPath(path: string, kind: FileKind) {
   return kind === 'remote' ? normalizeRemotePath(path) === '/' : path === '/' || /^[A-Za-z]:[\\/]?$/.test(path);
 }
 
-// ssh.execute('echo "$HOME"') 的结果；失败或输出不是绝对路径（如 shell 启动脚本往 stdout 打了东西）时给空，调用方退回 /。
-export function remoteHomeFromResult(result: { output?: unknown } | null | undefined) {
-  const home = String(result?.output ?? '').trim();
+// file.remoteHome（SFTP realpath "."）的结果；失败或不是绝对路径时给空，调用方退回 /。
+export function remoteHomeFromResult(result: { home?: unknown } | null | undefined) {
+  const home = typeof result?.home === 'string' ? result.home : '';
   return home.startsWith('/') ? home : '';
 }
 
 export async function resolveRemoteHome(sessionId: string) {
-  return remoteHomeFromResult(await (window as AppWindow).api?.ssh?.execute(sessionId, 'echo "$HOME"'));
+  return remoteHomeFromResult(await (window as AppWindow).api?.file?.remoteHome(sessionId));
 }
 
 export function formatFileSize(bytes = 0) {

@@ -236,6 +236,21 @@ pub async fn file_list(
     Ok(out)
 }
 
+/// 远程 home = SFTP 服务端的初始工作目录（OpenSSH sftp 客户端也是 realpath "." 取初始目录）。
+/// 不用 exec `echo $HOME`：省一个 exec 通道和远端一次 shell 启动，SFTP 会话反正要开；
+/// 只允许 SFTP（ForceCommand internal-sftp）的服务器上 exec 会失败，这里照样能拿到。
+#[tauri::command]
+pub async fn file_remote_home(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<String> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let sftp = sftp_for(&session).await?;
+    sftp.canonicalize(".").await
+        .map_err(|e| AppError::Sftp(format!("realpath .: {e}")))
+}
+
 #[tauri::command]
 pub async fn file_upload(
     app: AppHandle,
