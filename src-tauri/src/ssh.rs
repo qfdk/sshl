@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::future::{AbortHandle, Abortable};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,8 @@ pub struct SshSession {
     /// 所属保存连接的 id（来自 ~/.sshl/connections.json）。ssh_fill_password 用它
     /// 从加密库解密密码并直接写入通道 —— 密码全程不经过渲染层（JS）。
     pub connection_id: Option<String>,
+    /// host:port:user —— 预热池据此跳过已有会话的主机（见 AppState::active_warm_keys）。
+    pub warm_key: String,
     pub buffer: Mutex<String>,
     /// Shared SSH handle — locked briefly when opening new channels (SFTP).
     pub handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
@@ -130,7 +132,7 @@ impl SshSession {
     }
 }
 
-fn warm_key(host: &str, port: u16, username: &str) -> String {
+pub(crate) fn warm_key(host: &str, port: u16, username: &str) -> String {
     format!("{}:{}:{}", host, port, username)
 }
 
@@ -407,6 +409,7 @@ async fn connect_session(
         host: details.host.clone(),
         username: details.username.clone(),
         connection_id: details.id.clone(),
+        warm_key: key,
         buffer: Mutex::new(String::new()),
         handle: handle_arc.clone(),
         sftp: Mutex::new(None),
@@ -531,7 +534,7 @@ pub async fn ssh_prewarm(
     )
     .await?;
     state
-        .warm_insert(key.clone(), WarmConn { handle, created_at: Instant::now() })
+        .warm_insert(key, WarmConn { handle })
         .await;
     Ok(true)
 }

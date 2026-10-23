@@ -1,14 +1,12 @@
 use futures::future::AbortHandle;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::ssh::{ClientHandler, SshSession};
 
 pub struct WarmConn {
     pub handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
-    pub created_at: Instant,
 }
 
 #[derive(Default)]
@@ -63,18 +61,24 @@ impl AppState {
         self.warm_pool.lock().await.contains_key(key)
     }
 
-    /// Drop warm entries older than ttl; returns evicted handles for explicit disconnect.
-    pub async fn warm_evict_expired(&self, ttl: Duration) -> Vec<WarmConn> {
+    pub async fn warm_keys(&self) -> HashSet<String> {
+        self.warm_pool.lock().await.keys().cloned().collect()
+    }
+
+    /// 已开会话占用的 host:port:user —— 预热池不给它们另开闲置连接。
+    pub async fn active_warm_keys(&self) -> HashSet<String> {
+        self.sessions.lock().await.values().map(|s| s.warm_key.clone()).collect()
+    }
+
+    /// 移出已断开的（keepalive 无响应时 russh 会关闭）和已不在保存列表里的预热连接，交给调用方断开。
+    pub async fn warm_evict_unwanted(&self, saved: &HashSet<String>) -> Vec<WarmConn> {
         let mut pool = self.warm_pool.lock().await;
-        let now = Instant::now();
-        let expired_keys: Vec<String> = pool
-            .iter()
-            .filter(|(_, c)| now.duration_since(c.created_at) > ttl)
-            .map(|(k, _)| k.clone())
-            .collect();
-        expired_keys
-            .into_iter()
-            .filter_map(|k| pool.remove(&k))
-            .collect()
+        let mut unwanted = Vec::new();
+        for (key, conn) in pool.iter() {
+            if !saved.contains(key) || conn.handle.lock().await.is_closed() {
+                unwanted.push(key.clone());
+            }
+        }
+        unwanted.into_iter().filter_map(|k| pool.remove(&k)).collect()
     }
 }
