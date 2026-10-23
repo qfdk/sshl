@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { cn } from '../../lib/utils';
 import { formatDate, formatFileSize, formatPermissions, type FileEntry, type FileKind, isRootPath } from './useFileList';
 import { matchDirectories, splitCompletionPath, tabCompletion } from './path-completion';
+import { isSelectAllShortcut } from './shortcuts';
 import { visibleRowWindow } from './virtual-rows';
 
 // 不超过这个行数就全量渲染：几屏以内的行渲染只需几毫秒，虚拟化没有可感知的收益，
@@ -50,6 +51,7 @@ export type FilePaneProps = {
   onRowSelect: (entry: FileEntry, index: number, event: MouseEvent<HTMLTableRowElement>) => void;
   onContextTarget: (entry: FileEntry | null) => void;
   onPermission?: (entry: FileEntry) => void;
+  onSelectAll?: () => void;
 };
 
 export function FilePane({
@@ -71,6 +73,7 @@ export function FilePane({
   onRowSelect,
   onContextTarget,
   onPermission,
+  onSelectAll,
 }: FilePaneProps) {
   const suggestionListId = useId();
   const suggestionListRef = useRef<HTMLDivElement>(null);
@@ -245,7 +248,18 @@ export function FilePane({
       {/* 遮罩不能放进滚动容器：absolute 会跟着内容滚走，滚下去后刷新只盖住顶部一屏。
           isolate 把遮罩的 z-20 限定在列表内，压住 sticky 表头，又不盖地址栏补全下拉。 */}
       <div className="relative isolate flex min-h-0 flex-1 flex-col">
-        <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto select-none" onScroll={onScroll}>
+        {/* 列表可获得焦点，Cmd+A 只作用于用户点过的这一侧；地址栏在列表外，Cmd+A 仍是全选文字。 */}
+        <div
+          ref={scrollRef}
+          tabIndex={-1}
+          className="min-h-0 flex-1 overflow-auto outline-none select-none"
+          onScroll={onScroll}
+          onKeyDown={event => {
+            if (!isSelectAllShortcut(event)) return;
+            event.preventDefault();
+            onSelectAll?.();
+          }}
+        >
           <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>
             <ContextMenuTrigger asChild>
               <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
@@ -286,7 +300,11 @@ export function FilePane({
                           data-state={selected ? 'selected' : undefined}
                           style={{ height: ROW_HEIGHT }}
                           className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
-                          onMouseDown={event => event.preventDefault()}
+                          // 阻止默认行为避免拖选文字，但焦点要交给列表，否则会留在终端里、收不到 Cmd+A。
+                          onMouseDown={event => {
+                            event.preventDefault();
+                            scrollRef.current?.focus({ preventScroll: true });
+                          }}
                           onClick={event => {
                             if (!parent) onRowSelect(entry, files.indexOf(entry), event);
                           }}

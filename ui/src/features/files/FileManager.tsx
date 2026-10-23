@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
 import { ArrowDownUp, Download, FolderPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { Button } from '../../components/ui/button';
@@ -9,6 +9,7 @@ import { Progress } from '../../components/ui/progress';
 import { joinPath, parentPath, resolveRemoteHome, useFileList, type FileEntry, type FileKind } from './useFileList';
 import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
+import { useSelectAllFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
@@ -62,6 +63,8 @@ export function FileManager() {
   const remote = useFileList({ kind: 'remote', sessionId, enabled });
   const [selected, setSelected] = useState<Selected>({ local: new Set(), remote: new Set() });
   const [lastSelected, setLastSelected] = useState<{ pane: PaneName; index: number } | null>(null);
+  // 最近操作过的一侧：焦点不在列表上时 Cmd+A 全选这一侧；都没碰过时已连接选远程，否则选本地。
+  const activePane = useRef<PaneName | null>(null);
   const [contextTargets, setContextTargets] = useState<Record<PaneName, FileEntry | null>>({ local: null, remote: null });
   const [remoteEmptyConnectionId, setRemoteEmptyConnectionId] = useState<string | null>(null);
   const [permissionTarget, setPermissionTarget] = useState<PermissionTarget | null>(null);
@@ -97,6 +100,13 @@ export function FileManager() {
     });
     setLastSelected({ pane, index });
   }, [lastSelected, local.files, remote.files]);
+
+  // 全选当前目录的全部条目（含虚拟化未渲染的行），并清空另一侧，与点选规则一致。
+  const selectAll = useCallback((pane: PaneName) => {
+    const entries = pane === 'local' ? local.files : remote.files;
+    setSelected(current => ({ ...current, [pane]: new Set(entries.map(item => item.path)), [pane === 'local' ? 'remote' : 'local']: new Set() }));
+  }, [local.files, remote.files]);
+  useSelectAllFallback(enabled, () => selectAll(activePane.current || (sessionId ? 'remote' : 'local')));
 
   const ensureContextSelection = useCallback((pane: PaneName, entry: FileEntry | null) => {
     setContextTargets(current => ({ ...current, [pane]: entry }));
@@ -317,7 +327,7 @@ export function FileManager() {
   return (
     <div className="relative flex h-full min-h-0 flex-col gap-2.5" data-file-manager>
       <div className="flex min-h-0 flex-1 overflow-hidden" id="file-manager-split-pane">
-        <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="local">
+        <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="local" onMouseDownCapture={() => { activePane.current = 'local'; }}>
           <FilePane
             kind="local"
             path={local.path}
@@ -335,10 +345,11 @@ export function FileManager() {
             onOpen={entry => openEntry('local', entry)}
             onRowSelect={(entry, index, event) => selectRow('local', entry, index, event)}
             onContextTarget={entry => ensureContextSelection('local', entry)}
+            onSelectAll={() => selectAll('local')}
           />
         </div>
         <div id="pane-divider" className="w-2.5 shrink-0 cursor-col-resize rounded-full transition-colors hover:bg-primary/15" title="拖动调整面板宽度" />
-        <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="remote">
+        <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="remote" onMouseDownCapture={() => { activePane.current = 'remote'; }}>
           <FilePane
             kind="remote"
             path={remote.path}
@@ -368,6 +379,7 @@ export function FileManager() {
             onRowSelect={(entry, index, event) => selectRow('remote', entry, index, event)}
             onContextTarget={entry => ensureContextSelection('remote', entry)}
             onPermission={openPermissions}
+            onSelectAll={() => selectAll('remote')}
           />
         </div>
       </div>
