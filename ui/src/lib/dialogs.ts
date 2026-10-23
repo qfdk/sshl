@@ -1,6 +1,6 @@
-// 应用内提示/确认框（由 layout/DialogHost 渲染）。不用 window.alert/confirm：wry 没实现 WKWebView 的
-// alert/confirm 回调，alert 静默不显示、confirm 恒为 false；也不用原生 NSAlert：窄、按钮是英文 Yes/No，
-// 中文长句会被拦腰折行，和应用自己的对话框风格不一。多个请求排队，一个一个显示。
+// 应用内提示/确认框（由 layout/DialogHost 渲染）。不用 window.alert/confirm：tauri-plugin-dialog 把它们
+// 换成了原生 NSAlert（窄、按钮英文、中文长句被拦腰折行，与应用对话框风格不一），且换后的 confirm 返回
+// Promise，`if (!confirm(..))` 永远拦不住；plugin-dialog 的 ask 同样是原生 NSAlert。多个请求排队，一个一个显示。
 
 export type DialogRequest = {
   id: number;
