@@ -40,9 +40,12 @@ pnpm build             # Tauri application build
   snapshot with `getSessionBuffer` before activating. The sole call site is the
   `terminalResult.isNew` replay path in `ui/src/features/connections/useConnections.ts`.
 - **Warm pool** is backend-owned. The frontend makes no prewarm call.
-- **Native splash** — `src-tauri/src/splash.rs` covers the WebView with a native view during
-  WebContent cold start (otherwise ~0.7s of blank window). `ui/src/main.tsx` must call
-  `api.app.ready()` after the first frame; without it the splash only clears at the 8s fallback.
+- **Window reveal** — the main window is built in `create_main_window` (`src-tauri/src/lib.rs`,
+  `create: false` in tauri.conf.json) at the screen work area, not via `maximized` (tao's async
+  maximize resizes the WKWebView while WebContent is launching and blocks the main thread ~430ms).
+  It starts at alpha 0; `ui/src/main.tsx` must call `api.app.ready()` after the first painted frame,
+  otherwise the window only appears at the 3s fallback. Do not hide the window instead: a hidden
+  WKWebView does not paint or fire rAF, so it would reveal a blank frame.
 - **SFTP channel reuse** — one cached SFTP session is shared per SSH session.
 - **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` keeps CanvasAddon after
   `term.open()`, Unicode11 registration, bottom alignment, ANSI background sampling, and

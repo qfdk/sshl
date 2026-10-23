@@ -4,7 +4,6 @@ mod db;
 mod error;
 mod local_fs;
 mod sftp;
-mod splash;
 mod ssh;
 mod state;
 mod system_fonts;
@@ -92,10 +91,15 @@ pub fn run() {
             config_store::cred_set,
             config_store::cred_delete,
             system_fonts::list_system_fonts,
-            splash::app_ready,
+            app_ready,
         ])
         .setup(|app| {
-            splash::show(app);
+            create_main_window(app)?;
+            let fallback = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(READY_FALLBACK).await;
+                reveal_main_window(&fallback);
+            });
             let handle = app.handle().clone();
             // 后台维护预热池：启动即预热全部已保存连接，之后每 WARM_POOL_TICK 一轮。
             tauri::async_runtime::spawn(async move {
@@ -109,6 +113,59 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 前端没报 ready（脚本异常等）时也要把窗口显示出来。
+const READY_FALLBACK: Duration = Duration::from_secs(3);
+
+/// 主窗口以透明度 0 创建，前端第一屏画出后调用这里显形：WebContent 进程冷启动期间窗口里只有背景色，
+/// 直接显示就是一段白屏。不用隐藏窗口：窗口不可见时 WebKit 不绘制、rAF 不触发，显示后首帧仍是空白。
+#[tauri::command]
+fn app_ready(app: tauri::AppHandle) {
+    reveal_main_window(&app);
+}
+
+fn reveal_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || set_window_alpha(&target, 1.0));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_window_alpha(window: &tauri::WebviewWindow, alpha: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    if let Ok(ns_window) = window.ns_window() {
+        unsafe {
+            let ns_window: &AnyObject = &*ns_window.cast::<AnyObject>();
+            let _: () = msg_send![ns_window, setAlphaValue: alpha];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_window_alpha(_: &tauri::WebviewWindow, _: f64) {}
+
+/// 主窗口直接按主屏可用区域创建（tauri.conf.json 里 create: false），代替 "maximized": true。
+/// tao 的最大化是异步派发的，落在 WKWebView 创建之后；这次尺寸变化让 WebKit 在主线程上同步等待
+/// 仍在启动的 WebContent 进程，实测主线程卡住约 430ms，页面加载与首屏跟着推迟。
+fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() else {
+        return Ok(());
+    };
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    if let Some(monitor) = app.primary_monitor()? {
+        let area = monitor.work_area();
+        let scale = monitor.scale_factor();
+        builder = builder
+            .position(area.position.x as f64 / scale, area.position.y as f64 / scale)
+            .inner_size(area.size.width as f64 / scale, area.size.height as f64 / scale);
+    }
+    let window = builder.build()?;
+    set_window_alpha(&window, 0.0);
+    Ok(())
 }
 
 /// 每轮预热的并发握手数。串行时一台不可达主机（connect_tcp 4 次重试 ≈ 22s）

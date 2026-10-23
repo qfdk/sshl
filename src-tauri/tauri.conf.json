@@ -14,12 +14,12 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "SSHL",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
         "minHeight": 600,
-        "maximized": true,
         "backgroundColor": "#f3f4f6",
         "decorations": true,
         "titleBarStyle": "Overlay",

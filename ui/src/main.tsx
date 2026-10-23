@@ -9,5 +9,5 @@ import './features/terminal/terminal.css';
 const root = document.getElementById('root');
 if (!root) throw new Error('React root element was not found');
 createRoot(root).render(<App />);
-// 第一屏提交并画出后再撤原生开屏层（src-tauri/src/splash.rs）。
+// 主窗口以透明度 0 创建，第一屏提交并画出后才显形（src-tauri/src/lib.rs 的 app_ready）。
 requestAnimationFrame(() => requestAnimationFrame(() => void api.app.ready()));
