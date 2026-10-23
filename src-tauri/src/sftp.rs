@@ -2,12 +2,13 @@
 // Per-session SftpSession is cached on SshSession.sftp to avoid Channel accumulation
 // (mirrors Electron-side fix in commits 8cb552c / a819e15).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
 use futures::stream::{self, StreamExt};
 use russh_sftp::client::fs::Metadata;
 use russh_sftp::client::SftpSession;
@@ -62,6 +63,11 @@ pub struct DownloadProgress {
     pub remote_path: String,
     pub transferred: u64,
     pub total: u64,
+    /// 目录传输才带：已完成 / 总文件数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +77,11 @@ pub struct UploadProgress {
     pub remote_path: String,
     pub transferred: u64,
     pub total: u64,
+    /// 目录传输才带：已完成 / 总文件数。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_total: Option<u64>,
 }
 
 async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
@@ -276,6 +287,8 @@ pub async fn file_upload(
                 remote_path: remote_path.clone(),
                 transferred,
                 total,
+                files_done: None,
+                files_total: None,
             });
             last_emit = std::time::Instant::now();
         }
@@ -288,6 +301,8 @@ pub async fn file_upload(
         remote_path,
         transferred: total,
         total,
+        files_done: None,
+        files_total: None,
     });
     Ok(())
 }
@@ -513,6 +528,8 @@ pub async fn file_download(
                 remote_path: remote_path.clone(),
                 transferred,
                 total,
+                files_done: None,
+                files_total: None,
             });
             *last = std::time::Instant::now();
         }
@@ -531,6 +548,8 @@ pub async fn file_download(
         remote_path,
         transferred,
         total,
+        files_done: None,
+        files_total: None,
     });
     Ok(())
 }
@@ -556,43 +575,120 @@ pub async fn file_create_remote_directory(
     Ok(())
 }
 
-fn upload_dir<'a>(
-    sftp: Arc<SftpSession>,
-    local: PathBuf,
-    remote: String,
-) -> BoxFuture<'a, AppResult<()>> {
-    Box::pin(async move {
-        let _ = sftp.create_dir(&remote).await;
-        let mut rd = tokio::fs::read_dir(&local).await?;
-        let mut files = Vec::new();
-        let mut dirs = Vec::new();
+/// 目录传输进度事件的节流间隔（与单文件传输一致）。
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// 目录传输计划：先完整遍历，拿到全部子目录（父目录在前）和每个文件的大小，才有总量和百分比；
+/// 遍历结果直接用于传输，不重复列目录。files 为 (源, 目标, 字节数)。
+struct DirPlan<S, D> {
+    dirs: Vec<D>,
+    files: Vec<(S, D, u64)>,
+}
+
+impl<S, D> DirPlan<S, D> {
+    fn total_bytes(&self) -> u64 {
+        self.files.iter().map(|(_, _, size)| size).sum()
+    }
+}
+
+/// 上传前遍历本地目录。目录判断沿用 DirEntry 的元数据（不跟随符号链接），
+/// 文件大小跟随符号链接取目标的，与实际传输的字节数一致。
+async fn scan_local(local: PathBuf, remote: String) -> AppResult<DirPlan<PathBuf, String>> {
+    let mut plan = DirPlan { dirs: vec![remote.clone()], files: Vec::new() };
+    let mut queue = VecDeque::from([(local, remote)]);
+    while let Some((dir_local, dir_remote)) = queue.pop_front() {
+        let mut rd = tokio::fs::read_dir(&dir_local).await?;
         while let Some(entry) = rd.next_entry().await? {
             let name = entry.file_name().to_string_lossy().to_string();
-            let child = (entry.path(), join_remote(&remote, &name));
-            if entry.metadata().await?.is_dir() { dirs.push(child); } else { files.push(child); }
+            let (child_local, child_remote) = (entry.path(), join_remote(&dir_remote, &name));
+            if entry.metadata().await?.is_dir() {
+                plan.dirs.push(child_remote.clone());
+                queue.push_back((child_local, child_remote));
+            } else {
+                let size = tokio::fs::metadata(&child_local).await.map(|m| m.len()).unwrap_or(0);
+                plan.files.push((child_local, child_remote, size));
+            }
         }
-        let sftp_ref = &sftp;
-        transfer_files_concurrently(files, |(child_local, child_remote): (PathBuf, String)| async move {
-            let mut f = sftp_ref.open_with_flags(
-                &child_remote,
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            ).await.map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
-            let child_local_str = child_local.to_string_lossy().to_string();
-            stream_to_remote(&child_local_str, &mut f, &child_remote, |_| {}).await?;
-            f.shutdown().await
-                .map_err(|e| AppError::Sftp(format!("close {child_remote}: {e}")))?;
-            Ok(())
-        }).await?;
-        for (child_local, child_remote) in dirs {
-            upload_dir(sftp.clone(), child_local, child_remote).await?;
+    }
+    Ok(plan)
+}
+
+/// 下载前遍历远端目录。`list` 列出一个远端目录的 (名称, 是否目录, 字节数)。
+async fn scan_remote<L, Fut>(remote: String, local: PathBuf, list: L) -> AppResult<DirPlan<String, PathBuf>>
+where
+    L: Fn(String) -> Fut,
+    Fut: Future<Output = AppResult<Vec<(String, bool, u64)>>>,
+{
+    let mut plan = DirPlan { dirs: vec![local.clone()], files: Vec::new() };
+    let mut queue = VecDeque::from([(remote, local)]);
+    while let Some((dir_remote, dir_local)) = queue.pop_front() {
+        for (name, is_dir, size) in list(dir_remote.clone()).await? {
+            if name == "." || name == ".." { continue; }
+            let (child_remote, child_local) = (join_remote(&dir_remote, &name), dir_local.join(&name));
+            if is_dir {
+                plan.dirs.push(child_local.clone());
+                queue.push_back((child_remote, child_local));
+            } else {
+                plan.files.push((child_remote, child_local, size));
+            }
         }
-        Ok(())
-    })
+    }
+    Ok(plan)
+}
+
+/// 目录传输的整体进度。各文件回报自己的累计字节，这里换算成增量累加到全目录；
+/// 按 interval 节流回调 (已传字节, 已完成文件数)，finish 时无条件再回调一次，保证进度走到终点。
+struct DirProgress<F: Fn(u64, u64)> {
+    interval: Duration,
+    transferred: AtomicU64,
+    files_done: AtomicU64,
+    last_emit: Mutex<Instant>,
+    emit: F,
+}
+
+impl<F: Fn(u64, u64)> DirProgress<F> {
+    fn new(interval: Duration, emit: F) -> Self {
+        Self {
+            interval,
+            transferred: AtomicU64::new(0),
+            files_done: AtomicU64::new(0),
+            last_emit: Mutex::new(Instant::now()),
+            emit,
+        }
+    }
+
+    /// 单个文件的进度回调，参数是该文件的累计字节数。
+    fn file(&self) -> impl Fn(u64) + '_ {
+        let seen = AtomicU64::new(0);
+        move |current| {
+            let delta = current.saturating_sub(seen.swap(current, Ordering::Relaxed));
+            self.transferred.fetch_add(delta, Ordering::Relaxed);
+            self.maybe_emit();
+        }
+    }
+
+    fn file_done(&self) {
+        self.files_done.fetch_add(1, Ordering::Relaxed);
+        self.maybe_emit();
+    }
+
+    fn maybe_emit(&self) {
+        let mut last = self.last_emit.lock().unwrap();
+        if last.elapsed() >= self.interval {
+            *last = Instant::now();
+            drop(last);
+            self.finish();
+        }
+    }
+
+    fn finish(&self) {
+        (self.emit)(self.transferred.load(Ordering::Relaxed), self.files_done.load(Ordering::Relaxed));
+    }
 }
 
 #[tauri::command]
 pub async fn file_upload_directory(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     local_path: String,
@@ -601,52 +697,41 @@ pub async fn file_upload_directory(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    upload_dir(sftp, PathBuf::from(local_path), remote_path).await
-}
-
-fn download_dir<'a>(
-    sftp: Arc<SftpSession>,
-    remote: String,
-    local: PathBuf,
-) -> BoxFuture<'a, AppResult<()>> {
-    Box::pin(async move {
-        tokio::fs::create_dir_all(&local).await?;
-        let entries = sftp.read_dir(&remote).await
-            .map_err(|e| AppError::Sftp(format!("read_dir {remote}: {e}")))?;
-        let mut files = Vec::new();
-        let mut dirs = Vec::new();
-        for e in entries {
-            let name = e.file_name();
-            if name == "." || name == ".." { continue; }
-            let child = (join_remote(&remote, &name), local.join(&name));
-            let meta = e.metadata();
-            if meta.is_dir() { dirs.push(child); } else { files.push((child, meta.size.unwrap_or(0))); }
-        }
-        let sftp_ref = &sftp;
-        download_dir_files(
-            files,
-            |(child_remote, child_local): (String, PathBuf)| async move {
-                let mut rf = sftp_ref.open(&child_remote).await
-                    .map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
-                let mut lf = tokio::fs::File::create(&child_local).await?;
-                stream_to_local(&mut rf, &mut lf, &child_remote, |_| {}).await?;
-                Ok(())
-            },
-            |(child_remote, child_local): (String, PathBuf), size| async move {
-                download_large(sftp_ref, &child_remote, &child_local, size, |_| {}).await?;
-                Ok(())
-            },
-        ).await?;
-        for (child_remote, child_local) in dirs {
-            download_dir(sftp.clone(), child_remote, child_local).await?;
-        }
+    let plan = scan_local(PathBuf::from(local_path), remote_path.clone()).await?;
+    for dir in &plan.dirs {
+        // 已存在不算错（mkdir -p 语义）。
+        let _ = sftp.create_dir(dir).await;
+    }
+    let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
+    let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
+        emit_upload_progress(&app, UploadProgress {
+            session_id: session_id.clone(),
+            remote_path: remote_path.clone(),
+            transferred,
+            total,
+            files_done: Some(files_done),
+            files_total: Some(files_total),
+        });
+    });
+    let (sftp_ref, progress_ref) = (&sftp, &progress);
+    transfer_files_concurrently(plan.files, |(local, remote, _): (PathBuf, String, u64)| async move {
+        let mut f = sftp_ref.open_with_flags(
+            &remote,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+        ).await.map_err(|e| AppError::Sftp(format!("open {remote}: {e}")))?;
+        stream_to_remote(&local.to_string_lossy(), &mut f, &remote, progress_ref.file()).await?;
+        f.shutdown().await
+            .map_err(|e| AppError::Sftp(format!("close {remote}: {e}")))?;
+        progress_ref.file_done();
         Ok(())
-    })
+    }).await?;
+    progress.finish();
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn file_download_directory(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     remote_path: String,
@@ -655,7 +740,48 @@ pub async fn file_download_directory(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    download_dir(sftp, remote_path, PathBuf::from(local_path)).await
+    let sftp_ref = &sftp;
+    let plan = scan_remote(remote_path.clone(), PathBuf::from(local_path), |dir| async move {
+        let entries = sftp_ref.read_dir(&dir).await
+            .map_err(|e| AppError::Sftp(format!("read_dir {dir}: {e}")))?;
+        Ok(entries.into_iter().map(|e| {
+            let meta = e.metadata();
+            (e.file_name(), meta.is_dir(), meta.size.unwrap_or(0))
+        }).collect())
+    }).await?;
+    for dir in &plan.dirs {
+        tokio::fs::create_dir_all(dir).await?;
+    }
+    let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
+    let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
+        emit_download_progress(&app, DownloadProgress {
+            session_id: session_id.clone(),
+            remote_path: remote_path.clone(),
+            transferred,
+            total,
+            files_done: Some(files_done),
+            files_total: Some(files_total),
+        });
+    });
+    let progress_ref = &progress;
+    download_dir_files(
+        plan.files.into_iter().map(|(remote, local, size)| ((remote, local), size)).collect(),
+        |(remote, local): (String, PathBuf)| async move {
+            let mut rf = sftp_ref.open(&remote).await
+                .map_err(|e| AppError::Sftp(format!("open {remote}: {e}")))?;
+            let mut lf = tokio::fs::File::create(&local).await?;
+            stream_to_local(&mut rf, &mut lf, &remote, progress_ref.file()).await?;
+            progress_ref.file_done();
+            Ok(())
+        },
+        |(remote, local): (String, PathBuf), size| async move {
+            download_large(sftp_ref, &remote, &local, size, progress_ref.file()).await?;
+            progress_ref.file_done();
+            Ok(())
+        },
+    ).await?;
+    progress.finish();
+    Ok(())
 }
 
 #[tauri::command]
@@ -742,9 +868,13 @@ pub fn emit_upload_progress(app: &AppHandle, payload: UploadProgress) {
 mod tests {
     use super::{
         download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
-        segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        transfer_files_concurrently, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
+        scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
+        transfer_files_concurrently, DirProgress, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN,
+        TRANSFER_CHUNK,
     };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::time::Duration;
     use crate::error::{AppError, AppResult};
     use russh_sftp::client::fs::Metadata;
     use std::io::{self, SeekFrom};
@@ -1125,5 +1255,96 @@ mod tests {
         // 坏行被跳过，但合法行仍被收录（旧实现遇坏行会丢掉整张表）。
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(&42).map(String::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn dir_progress_sums_per_file_cumulative_reports() {
+        let emitted = Mutex::new(Vec::new());
+        let progress = DirProgress::new(Duration::ZERO, |transferred, files_done| {
+            emitted.lock().unwrap().push((transferred, files_done));
+        });
+        let (a, b) = (progress.file(), progress.file());
+        // 各文件回报的是自己的累计字节：a 先 10 后 30，只能再计入 20。
+        a(10);
+        b(5);
+        a(30);
+        progress.file_done();
+        b(20);
+        progress.file_done();
+        progress.finish();
+        assert_eq!(
+            *emitted.lock().unwrap(),
+            [(10, 0), (15, 0), (35, 0), (35, 1), (50, 1), (50, 2), (50, 2)]
+        );
+    }
+
+    #[test]
+    fn dir_progress_throttles_but_always_emits_on_finish() {
+        let emitted = Mutex::new(Vec::new());
+        let progress = DirProgress::new(Duration::from_secs(3600), |transferred, files_done| {
+            emitted.lock().unwrap().push((transferred, files_done));
+        });
+        let file = progress.file();
+        file(10);
+        file(30);
+        progress.file_done();
+        assert!(emitted.lock().unwrap().is_empty(), "节流期内不应发事件");
+        progress.finish();
+        assert_eq!(*emitted.lock().unwrap(), [(30, 1)]);
+    }
+
+    #[tokio::test]
+    async fn scan_local_lists_dirs_parent_first_with_file_sizes() {
+        let root = std::env::temp_dir().join(format!("sshl-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub/deeper")).unwrap();
+        std::fs::write(root.join("a.txt"), b"abc").unwrap();
+        std::fs::write(root.join("sub/b.bin"), b"12345").unwrap();
+
+        let plan = scan_local(root.clone(), "/r".to_string()).await;
+        std::fs::remove_dir_all(&root).unwrap();
+        let plan = plan.unwrap();
+
+        // 先建父目录再建子目录，否则远端 mkdir 子目录会失败。
+        assert_eq!(plan.dirs, ["/r", "/r/sub", "/r/sub/deeper"]);
+        let mut files = plan.files.clone();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                (root.join("a.txt"), "/r/a.txt".to_string(), 3),
+                (root.join("sub/b.bin"), "/r/sub/b.bin".to_string(), 5),
+            ]
+        );
+        assert_eq!(plan.total_bytes(), 8);
+    }
+
+    #[tokio::test]
+    async fn scan_remote_walks_listing_and_skips_dot_entries() {
+        let tree: HashMap<&str, Vec<(&str, bool, u64)>> = HashMap::from([
+            ("/r", vec![(".", true, 0), ("..", true, 0), ("a.txt", false, 3), ("sub", true, 0)]),
+            ("/r/sub", vec![(".", true, 0), ("b.bin", false, 5), ("deeper", true, 0)]),
+            ("/r/sub/deeper", vec![]),
+        ]);
+        let list = |dir: String| {
+            let entries = tree.get(dir.as_str()).cloned();
+            async move {
+                let entries = entries.ok_or_else(|| AppError::Sftp(format!("read_dir {dir}: no such file")))?;
+                Ok(entries.into_iter().map(|(n, d, s)| (n.to_string(), d, s)).collect())
+            }
+        };
+
+        let plan = scan_remote("/r".to_string(), PathBuf::from("/l"), list).await.unwrap();
+        assert_eq!(plan.dirs, [PathBuf::from("/l"), PathBuf::from("/l/sub"), PathBuf::from("/l/sub/deeper")]);
+        assert_eq!(
+            plan.files,
+            [
+                ("/r/a.txt".to_string(), PathBuf::from("/l/a.txt"), 3),
+                ("/r/sub/b.bin".to_string(), PathBuf::from("/l/sub/b.bin"), 5),
+            ]
+        );
+        assert_eq!(plan.total_bytes(), 8);
+
+        let missing = scan_remote("/nope".to_string(), PathBuf::from("/l"), list).await;
+        assert!(matches!(missing, Err(AppError::Sftp(msg)) if msg.contains("/nope")));
     }
 }

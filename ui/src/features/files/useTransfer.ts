@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { formatFileSize } from './useFileList';
+import { describeProgress, type TransferProgress } from './transfer-progress';
 
 type AppWindow = Window & { api?: any };
 
@@ -18,12 +18,8 @@ export function useTransfer(sessionId: string | null, onUploadComplete: () => vo
   useEffect(() => {
     const api = (window as AppWindow).api?.file;
     if (!api) return;
-    const handleProgress = (verb: string, data: any) => {
-      const total = data?.total || 0;
-      const transferred = data?.transferred || 0;
-      const progress = total > 0 ? Math.min(100, Math.round((transferred / total) * 100)) : 0;
-      const name = String(data?.remotePath || '').split('/').pop() || '';
-      setStatus({ active: true, progress, info: `正在${verb}: ${name} (${progress}% - ${formatFileSize(transferred)}/${formatFileSize(total)})` });
+    const handleProgress = (verb: string, data: TransferProgress) => {
+      setStatus({ active: true, ...describeProgress(verb, data) });
     };
     const stopDownload = api.onDownloadProgress?.((_event: unknown, data: any) => handleProgress('下载', data));
     const stopUpload = api.onUploadProgress?.((_event: unknown, data: any) => handleProgress('上传', data));
