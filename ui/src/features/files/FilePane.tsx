@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type UIEvent } from 'react';
-import { ChevronRight, FileText, Folder, FolderOpen, House, LoaderCircle, RefreshCw } from 'lucide-react';
+import { ArrowUp, ChevronRight, FileText, Folder, FolderOpen, House, LoaderCircle, RefreshCw } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -326,24 +326,26 @@ export function FilePane({
                         >
                           <TableCell className={cn('truncate px-3.5 py-2', selected && 'font-medium')} title={entry.name}>
                             <span className="mr-2 inline-flex align-middle">
-                              {entry.isDirectory ? <Folder className="h-4 w-4 text-primary" /> : <FileText className="h-4 w-4 text-muted-foreground" />}
+                              {/* 「..」用向上箭头，一眼看出是返回上级 */}
+                              {parent ? <ArrowUp className="h-4 w-4 text-primary" /> : entry.isDirectory ? <Folder className="h-4 w-4 text-primary" /> : <FileText className="h-4 w-4 text-muted-foreground" />}
                             </span>
                             {entry.name}
                           </TableCell>
-                          <TableCell className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">{entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
-                          <TableCell className="whitespace-nowrap px-3 py-2 tabular-nums text-muted-foreground">{formatDate(entry.modifyTime)}</TableCell>
-                          {/* 「..」行与服务端未返回 uid 的条目没有所有者，与其他空列一样显示「-」 */}
-                        {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{entry.owner || '-'}</TableCell>}
+                          {/* 「..」只表示返回上级：大小、日期、所有者、权限都留空，连「-」也不显示 */}
+                          <TableCell className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">{parent ? null : entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
+                          <TableCell className="whitespace-nowrap px-3 py-2 tabular-nums text-muted-foreground">{parent ? null : formatDate(entry.modifyTime)}</TableCell>
+                          {/* 服务端未返回 uid 的条目没有所有者，与其他空列一样显示「-」 */}
+                          {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{parent ? null : entry.owner || '-'}</TableCell>}
                           {isRemote && (
                             <TableCell
-                              className="cursor-pointer px-3 py-2"
-                              title="点击修改权限"
+                              className={cn('px-3 py-2', !parent && 'cursor-pointer')}
+                              title={parent ? undefined : '点击修改权限'}
                               onClick={event => {
                                 event.stopPropagation();
                                 if (!parent) onPermission?.(entry);
                               }}
                             >
-                              {formatPermissions(entry.permissions)}
+                              {parent ? null : formatPermissions(entry.permissions)}
                             </TableCell>
                           )}
                         </TableRow>
