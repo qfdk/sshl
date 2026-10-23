@@ -421,6 +421,56 @@ where
     Ok(transferred.into_inner())
 }
 
+/// 大文件分段下载到 `local_path`。先确认远端可读再创建/截断本地文件：能 stat 但没有读权限
+/// （如 root 的大日志）时，不留下 0 字节文件、也不截断同名的已有文件。之后各段再各自以写模式打开。
+async fn download_large(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &Path,
+    total: u64,
+    on_progress: impl Fn(u64),
+) -> AppResult<u64> {
+    drop(sftp.open(remote_path).await
+        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?);
+    tokio::fs::File::create(local_path).await?;
+    download_segmented(
+        total,
+        DOWNLOAD_SEGMENTS,
+        move || async move {
+            sftp.open(remote_path).await
+                .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))
+        },
+        move || async move {
+            Ok(tokio::fs::OpenOptions::new().write(true).open(local_path).await?)
+        },
+        remote_path,
+        on_progress,
+    ).await
+}
+
+/// 目录下载的同层文件：小文件按 DIR_FILE_CONCURRENCY 并发；≥ SEGMENTED_DOWNLOAD_MIN 的大文件
+/// 在小文件之后逐个分段下载。两批不重叠，在途 READ 至多 max(DIR_FILE_CONCURRENCY, DOWNLOAD_SEGMENTS)
+/// 个，与单文件分段下载持平，SFTP 30s 读超时的余量不变。
+async fn download_dir_files<T, FS, FutS, FL, FutL>(
+    files: Vec<(T, u64)>,
+    small: FS,
+    large: FL,
+) -> AppResult<()>
+where
+    FS: Fn(T) -> FutS,
+    FutS: Future<Output = AppResult<()>>,
+    FL: Fn(T, u64) -> FutL,
+    FutL: Future<Output = AppResult<()>>,
+{
+    let (large_files, small_files): (Vec<_>, Vec<_>) =
+        files.into_iter().partition(|(_, size)| *size >= SEGMENTED_DOWNLOAD_MIN);
+    transfer_files_concurrently(small_files.into_iter().map(|(item, _)| item).collect(), small).await?;
+    for (item, size) in large_files {
+        large(item, size).await?;
+    }
+    Ok(())
+}
+
 /// 按 DIR_FILE_CONCURRENCY 并发处理同一层的一批文件，遇到第一个错误即返回。
 async fn transfer_files_concurrently<T, F, Fut>(items: Vec<T>, transfer: F) -> AppResult<()>
 where
@@ -468,25 +518,7 @@ pub async fn file_download(
         }
     };
     let transferred = if total >= SEGMENTED_DOWNLOAD_MIN {
-        // 先确认远端可读再创建/截断本地文件：能 stat 但没有读权限（如 root 的大日志）时，
-        // 不留下 0 字节文件、也不截断同名的已有文件。之后各段再各自以写模式打开。
-        drop(sftp.open(&remote_path).await
-            .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?);
-        tokio::fs::File::create(&local_path).await?;
-        let (sftp_ref, remote_ref, local_ref) = (&sftp, remote_path.as_str(), local_path.as_str());
-        download_segmented(
-            total,
-            DOWNLOAD_SEGMENTS,
-            move || async move {
-                sftp_ref.open(remote_ref).await
-                    .map_err(|e| AppError::Sftp(format!("open remote {remote_ref}: {e}")))
-            },
-            move || async move {
-                Ok(tokio::fs::OpenOptions::new().write(true).open(local_ref).await?)
-            },
-            &remote_path,
-            &on_progress,
-        ).await?
+        download_large(&sftp, &remote_path, Path::new(&local_path), total, &on_progress).await?
     } else {
         let mut remote = sftp.open(&remote_path).await
             .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
@@ -587,16 +619,24 @@ fn download_dir<'a>(
             let name = e.file_name();
             if name == "." || name == ".." { continue; }
             let child = (join_remote(&remote, &name), local.join(&name));
-            if e.metadata().is_dir() { dirs.push(child); } else { files.push(child); }
+            let meta = e.metadata();
+            if meta.is_dir() { dirs.push(child); } else { files.push((child, meta.size.unwrap_or(0))); }
         }
         let sftp_ref = &sftp;
-        transfer_files_concurrently(files, |(child_remote, child_local): (String, PathBuf)| async move {
-            let mut rf = sftp_ref.open(&child_remote).await
-                .map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
-            let mut lf = tokio::fs::File::create(&child_local).await?;
-            stream_to_local(&mut rf, &mut lf, &child_remote, |_| {}).await?;
-            Ok(())
-        }).await?;
+        download_dir_files(
+            files,
+            |(child_remote, child_local): (String, PathBuf)| async move {
+                let mut rf = sftp_ref.open(&child_remote).await
+                    .map_err(|e| AppError::Sftp(format!("open {child_remote}: {e}")))?;
+                let mut lf = tokio::fs::File::create(&child_local).await?;
+                stream_to_local(&mut rf, &mut lf, &child_remote, |_| {}).await?;
+                Ok(())
+            },
+            |(child_remote, child_local): (String, PathBuf), size| async move {
+                download_large(sftp_ref, &child_remote, &child_local, size, |_| {}).await?;
+                Ok(())
+            },
+        ).await?;
         for (child_remote, child_local) in dirs {
             download_dir(sftp.clone(), child_remote, child_local).await?;
         }
@@ -701,9 +741,9 @@ pub fn emit_upload_progress(app: &AppHandle, payload: UploadProgress) {
 #[cfg(test)]
 mod tests {
     use super::{
-        download_segmented, follow_symlinks, join_remote, parse_id_map, segment_ranges,
-        shell_quote, stream_to_local, stream_to_remote, transfer_files_concurrently,
-        DOWNLOAD_SEGMENTS, TRANSFER_CHUNK,
+        download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
+        segment_ranges, shell_quote, stream_to_local, stream_to_remote,
+        transfer_files_concurrently, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
     };
     use crate::error::{AppError, AppResult};
     use russh_sftp::client::fs::Metadata;
@@ -897,6 +937,54 @@ mod tests {
         // 同层文件必须并发：每个小文件的 open/close 各一个 RTT，串行就是 N 轮往返。
         assert!(peak.load(Ordering::SeqCst) > 1, "directory files were transferred serially");
         assert!(matches!(run(Some(3)).await, Err(AppError::Sftp(_))));
+    }
+
+    #[tokio::test]
+    async fn directory_download_segments_large_files_one_at_a_time() {
+        let min = SEGMENTED_DOWNLOAD_MIN;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let small_seen = Arc::new(Mutex::new(Vec::new()));
+        let large_seen = Arc::new(Mutex::new(Vec::new()));
+        let files = vec![("a", 10), ("big1", min), ("b", min - 1), ("big2", 3 * min), ("c", 0)];
+
+        download_dir_files(
+            files,
+            |name| {
+                let (in_flight, seen) = (in_flight.clone(), small_seen.clone());
+                async move {
+                    in_flight.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    seen.lock().unwrap().push(name);
+                    Ok(())
+                }
+            },
+            |name, size| {
+                let (in_flight, seen) = (in_flight.clone(), large_seen.clone());
+                async move {
+                    // 大文件自带 DOWNLOAD_SEGMENTS 路在途 READ，开始时不能还有别的文件在传，
+                    // 否则在途总量翻倍，慢链路上排在后面的 READ 会撞 SFTP 读超时。
+                    assert_eq!(in_flight.fetch_add(1, Ordering::SeqCst), 0, "{name} overlapped another transfer");
+                    tokio::task::yield_now().await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    seen.lock().unwrap().push((name, size));
+                    Ok(())
+                }
+            },
+        ).await.unwrap();
+
+        let mut small = small_seen.lock().unwrap().clone();
+        small.sort();
+        assert_eq!(small, ["a", "b", "c"]);
+        // 大文件必须走分段：单句柄一问一答的吞吐只有块大小 / RTT。
+        assert_eq!(*large_seen.lock().unwrap(), [("big1", min), ("big2", 3 * min)]);
+
+        let failed = download_dir_files(
+            vec![("big", min)],
+            |_| async { Ok(()) },
+            |name, _| async move { Err(AppError::Sftp(format!("{name} failed"))) },
+        ).await;
+        assert!(matches!(failed, Err(AppError::Sftp(_))));
     }
 
     #[derive(Default)]
