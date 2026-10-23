@@ -332,7 +332,8 @@ export function FilePane({
                           </TableCell>
                           <TableCell className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">{entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
                           <TableCell className="whitespace-nowrap px-3 py-2 tabular-nums text-muted-foreground">{formatDate(entry.modifyTime)}</TableCell>
-                          {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{entry.owner || 'unknown'}</TableCell>}
+                          {/* 「..」行与服务端未返回 uid 的条目没有所有者，与其他空列一样显示「-」 */}
+                        {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{entry.owner || '-'}</TableCell>}
                           {isRemote && (
                             <TableCell
                               className="cursor-pointer px-3 py-2"
