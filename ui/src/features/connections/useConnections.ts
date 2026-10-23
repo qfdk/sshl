@@ -7,7 +7,7 @@ import {
   setEditingConnection,
 } from '../../lib/app-state';
 import { getUngroupedConnections, groupConnections, matchesConnection, moveConnection } from '../../lib/connection-groups';
-import { alertDialog, confirmDialog } from '../../lib/dialogs';
+import { alertDialog, confirmDialog, currentDialog } from '../../lib/dialogs';
 import sessionManager from '../../lib/session-manager';
 import { createSessionRevalidator } from '../../lib/session-revalidator';
 import type { TerminalManager } from '../terminal/useTerminal';
@@ -404,6 +404,8 @@ export function useConnections(): ConnectionManager {
     const onKeyDown = (event: KeyboardEvent) => {
       const attempt = activeAttempt.current;
       if (event.key !== 'Escape' || !attempt || attempt.cancelled || attempt.resolved) return;
+      // 有提示/确认框开着时 Esc 归它（关闭），不能顺手取消正在进行的连接
+      if (currentDialog()) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       void cancelConnectionAttempt();

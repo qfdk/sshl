@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { alertDialog, confirmDialog, currentDialog, settleDialog, subscribeDialogs } from '../ui/src/lib/dialogs.ts';
+import { alertDialog, confirmDialog, currentDialog, restoreFocusAfterDialogs, settleDialog, subscribeDialogs } from '../ui/src/lib/dialogs.ts';
 import { disconnectPrompt } from '../ui/src/features/connections/disconnect-prompt.ts';
 import { deletePrompt } from '../ui/src/features/files/delete-prompt.ts';
 
@@ -63,4 +63,26 @@ test('detail 透传到对话框请求', () => {
   void confirmDialog({ title: 't', message: 'm', detail: 'a、b' });
   assert.equal(currentDialog().detail, 'a、b');
   settleDialog(false);
+});
+
+test('最后一个对话框关闭后，焦点还给弹出前的元素（如终端）；排队中途不动', async () => {
+  let focused = 0;
+  const terminalInput = { isConnected: true, focus: () => { focused += 1; } };
+  globalThis.document = { activeElement: terminalInput };
+  try {
+    const first = alertDialog({ title: '上传失败' });
+    const second = alertDialog({ title: '下载失败' });
+    settleDialog(true);
+    await first;
+    restoreFocusAfterDialogs();
+    assert.equal(focused, 0, '还有排队的对话框，不还焦点');
+    settleDialog(true);
+    await second;
+    restoreFocusAfterDialogs();
+    assert.equal(focused, 1);
+    restoreFocusAfterDialogs();
+    assert.equal(focused, 1, '只还一次');
+  } finally {
+    delete globalThis.document;
+  }
 });

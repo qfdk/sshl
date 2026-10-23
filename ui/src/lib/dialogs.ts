@@ -19,6 +19,8 @@ type DialogOptions = { title: string; message?: string; detail?: string; confirm
 const queue: DialogRequest[] = [];
 const listeners = new Set<() => void>();
 let nextId = 1;
+// 第一个对话框弹出前的焦点（如终端的 textarea）。对话框没有 DialogTrigger，Radix 关闭时不会自己还焦点。
+let focusBefore: { focus: (options?: FocusOptions) => void; isConnected?: boolean } | null = null;
 
 function notify() {
   listeners.forEach(listener => listener());
@@ -41,8 +43,17 @@ export function settleDialog(ok: boolean) {
   notify();
 }
 
+/** 最后一个对话框关闭后把焦点还给弹出前的元素，否则在终端里关掉报错后要再点一下才能继续输入。 */
+export function restoreFocusAfterDialogs() {
+  if (queue.length) return;
+  const target = focusBefore;
+  focusBefore = null;
+  if (target && target.isConnected !== false) target.focus({ preventScroll: true });
+}
+
 function enqueue(request: Omit<DialogRequest, 'id' | 'resolve'>) {
   return new Promise<boolean>(resolve => {
+    if (!queue.length && typeof document !== 'undefined') focusBefore = document.activeElement as typeof focusBefore;
     queue.push({ ...request, id: nextId++, resolve });
     notify();
   });
