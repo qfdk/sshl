@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ask, open } from '@tauri-apps/plugin-dialog';
+import { open } from '@tauri-apps/plugin-dialog';
 
 type EventCallback = (event: unknown, payload: any) => void;
 type CallShape = 'raw' | string | undefined;
@@ -105,7 +105,6 @@ export const api = {
       if (result == null) return { canceled: true, filePaths: [] };
       return { canceled: false, filePaths: [Array.isArray(result) ? result[0] : result] };
     },
-    confirm: (message: string, title?: string) => ask(message, { title: title || '确认', kind: 'warning' }),
   },
 };
 

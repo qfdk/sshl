@@ -12,6 +12,8 @@ import { Terminal } from './layout/Terminal';
 import { FileManager } from './features/files/FileManager';
 import { ConnectionDialog } from './layout/ConnectionDialog';
 import { SettingsDialog } from './layout/SettingsDialog';
+import { DialogHost } from './layout/DialogHost';
+import { alertDialog } from './lib/dialogs';
 import { useConnections } from './features/connections/useConnections';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
@@ -37,7 +39,7 @@ export function App() {
   const doFillPassword = async (kind: string) => {
     if (!currentSessionId) return;
     const result = await window.api.ssh.fillPassword(currentSessionId, kind);
-    if (!result?.success) { alert(`填充密码失败: ${result?.error || '未知错误'}`); return; }
+    if (!result?.success) { void alertDialog({ title: '填充密码失败', message: result?.error || '未知错误' }); return; }
     setFeedback(true);
     setTimeout(() => setFeedback(false), 1500);
     try { (window as Window & { terminalManager?: { activeTerminal?: { focus: () => void } } }).terminalManager?.activeTerminal?.focus(); } catch {}
@@ -105,6 +107,7 @@ export function App() {
       {connections.loadingText && <div className="fixed inset-0 z-50 grid place-items-center bg-background/70 backdrop-blur-sm"><div className="flex items-center gap-3 rounded-lg border border-border bg-card px-5 py-4 shadow-xl"><span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" /><span>{connections.loadingText}</span><button type="button" className="rounded border border-border px-2 py-1 text-xs hover:bg-muted" onClick={() => void connections.cancel()}>取消</button></div></div>}
       <ConnectionDialog manager={connections} />
       <SettingsDialog />
+      <DialogHost />
     </div>
     </TooltipProvider>
   );

@@ -7,9 +7,11 @@ import {
   setEditingConnection,
 } from '../../lib/app-state';
 import { getUngroupedConnections, groupConnections, matchesConnection, moveConnection } from '../../lib/connection-groups';
+import { alertDialog, confirmDialog } from '../../lib/dialogs';
 import sessionManager from '../../lib/session-manager';
 import { createSessionRevalidator } from '../../lib/session-revalidator';
 import type { TerminalManager } from '../terminal/useTerminal';
+import { disconnectPrompt } from './disconnect-prompt';
 type Connection = { id: string; name?: string; host?: string; username?: string; group?: string; [key: string]: unknown };
 
 const COLLAPSED_GROUPS_KEY = 'sshl.collapsedConnectionGroups';
@@ -42,7 +44,7 @@ export type ConnectionManager = {
   switchToSession: (connectionId: string) => Promise<boolean>;
   submitConnection: (details: ConnectionDetails) => Promise<void>;
   saveEditedConnection: (id: string, details: ConnectionDetails) => Promise<void>;
-  disconnect: (sessionId: string, options?: { confirm?: boolean }) => Promise<void>;
+  disconnect: (sessionId: string) => Promise<void>;
   deleteConnection: (id: string) => Promise<void>;
   move: (connectionId: string, targetGroup: string, beforeId?: string | null) => void;
   toggleGroup: (groupName: string) => void;
@@ -269,12 +271,12 @@ export function useConnections(): ConnectionManager {
         updateConnectionStatus(true, connection.name, connection.host);
         await loadConnections();
       } else {
-        alert(`连接失败: ${result?.error || 'unknown error'}`);
+        void alertDialog({ title: '连接失败', message: result?.error || '未知错误' });
       }
     } catch (error) {
       if (attempt?.cancelled) return;
       console.error('连接错误:', error);
-      alert(`连接错误: ${errorText(error)}`);
+      void alertDialog({ title: '连接失败', message: errorText(error) });
     } finally {
       if (attempt) finishConnectionAttempt(attempt);
     }
@@ -319,11 +321,11 @@ export function useConnections(): ConnectionManager {
           console.warn(`[连接] 激活会话失败:`, err);
         }
         await loadConnections();
-      } else alert(`连接失败: ${result.error}`);
+      } else void alertDialog({ title: '连接失败', message: result.error || '未知错误' });
     } catch (error) {
       if (attempt?.cancelled) return;
       console.error('连接错误:', error);
-      alert(`连接错误: ${errorText(error)}`);
+      void alertDialog({ title: '连接失败', message: errorText(error) });
     } finally {
       if (attempt) finishConnectionAttempt(attempt);
     }
@@ -345,26 +347,22 @@ export function useConnections(): ConnectionManager {
         setConnectionDialogOpen(false);
         setEditingConnection(null);
         await loadConnections();
-      } else alert('保存连接失败');
+      } else void alertDialog({ title: '保存连接失败' });
     } catch (error) {
       console.error('编辑连接失败:', error);
-      alert(`编辑连接失败: ${errorText(error)}`);
+      void alertDialog({ title: '编辑连接失败', message: errorText(error) });
     }
   }, [loadConnections]);
 
-  // options.confirm：调用方（如会话标签的 ×）要求无论如何先确认；传输中/文件管理页仍用更具体的提示，只弹一次。
-  const disconnect = useCallback(async (sessionId: string, options: { confirm?: boolean } = {}) => {
+  // 所有断开入口（顶栏、会话标签 ×、侧栏图标、右键菜单）都走这里，统一先确认。
+  const disconnect = useCallback(async (sessionId: string) => {
     if (!sessionId) return;
     const isActive = getCurrentSessionId() === sessionId;
     const connectionId = sessionManager.getSession(sessionId)?.connectionId || null;
     const fileManager = appWindow().fileManager;
-    const transferring = fileManager && fileManager.activeTransfers > 0;
-    const onFileTab = getActiveTabId() === 'file-manager';
-    if (transferring || onFileTab || options.confirm) {
-      const name = String(sessionManager.getSession(sessionId)?.name || '') || '这个会话';
-      const message = transferring ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？' : onFileTab ? '当前正在使用文件管理，断开连接会关闭文件传输。\n确定要断开吗？' : `确定要断开「${name}」吗？`;
-      if (!await appWindow().api.dialog.confirm(message, '断开连接')) return;
-    }
+    const name = String(sessionManager.getSession(sessionId)?.name || '') || '这个会话';
+    const prompt = disconnectPrompt(name, { transferring: Boolean(fileManager && fileManager.activeTransfers > 0), onFileTab: getActiveTabId() === 'file-manager' });
+    if (!await confirmDialog(prompt)) return;
     // 用户主动断开：探活结果回来时不能把它当成「连接失效」去自动重连。
     revalidator.forget(sessionId);
     try { await appWindow().api.ssh.disconnect(sessionId); } catch (error) { console.error('断开连接失败:', error); }
@@ -381,7 +379,7 @@ export function useConnections(): ConnectionManager {
   }, [loadConnections, updateConnectionStatus]);
 
   const deleteConnection = useCallback(async (id: string) => {
-    if (!await appWindow().api.dialog.confirm('确定要删除这个连接吗?', '删除连接')) return;
+    if (!await confirmDialog({ title: '删除连接', message: '确定要删除这个连接吗？', confirmLabel: '删除' })) return;
     const result = await appWindow().api.config.deleteConnection(id);
     if (result) await loadConnections();
   }, [loadConnections]);

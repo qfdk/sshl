@@ -52,6 +52,10 @@ pnpm build             # Tauri application build
   PTY resize synchronization. Do not reorder those paths.
 - **Bundled Nerd Font** — both JetBrainsMono Nerd Font weights are loaded from
   `ui/src/index.css` and `ui/src/assets/fonts/`; do not replace them with system fallback.
+- **Prompts** — use `alertDialog` / `confirmDialog` from `ui/src/lib/dialogs.ts` (rendered by
+  `layout/DialogHost`). Never `window.alert` / `window.confirm` (wry has no WKWebView alert/confirm
+  callbacks: alert is silently dropped, confirm always returns false) or plugin-dialog `ask`
+  (native NSAlert: English Yes/No, narrow, breaks Chinese sentences mid-line).
 - **Dialog mounting** — Dialogs must not use `forceMount`; `TabsContent` in `App.tsx`
   intentionally keeps `forceMount` so xterm instances survive tab switches.
 - **xterm** is pinned to 5.3.0. Do not upgrade to v6.

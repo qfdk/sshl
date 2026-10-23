@@ -3,7 +3,7 @@ import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { CanvasAddon } from 'xterm-addon-canvas';
 import { Unicode11Addon } from 'xterm-addon-unicode11';
-import { getActiveTabId, getCurrentSessionId, setCurrentSessionId, subscribe } from '../../lib/app-state';
+import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { getTerminalSettings } from '../../lib/terminal-settings';
 
 type AppWindow = Window & {
@@ -36,7 +36,6 @@ export type TerminalManager = {
   getTerminalForSession: (sessionId: string) => Terminal | null;
   isPasswordPromptVisible: (term: Terminal | null) => boolean;
   disposeTerminalInstance: (sessionId: string) => void;
-  disconnectSession: (sessionId: string) => Promise<void>;
   ensureTerminalVisible: () => void;
   resizeTerminal: () => void;
 };
@@ -442,38 +441,6 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
     }
   };
 
-  const disconnectSession = async (sessionId: string) => {
-    if (!sessionId) return;
-    const isActive = getCurrentSessionId() === sessionId;
-    const appWindow = window as AppWindow;
-    const connectionId = appWindow.sessionManager?.getSession(sessionId)?.connectionId || null;
-    const fm = appWindow.fileManager;
-    const transferring = fm && fm.activeTransfers > 0;
-    const onFileTab = getActiveTabId() === 'file-manager';
-    if (transferring || onFileTab) {
-      const msg = transferring ? '当前有正在进行的文件传输，断开连接会中断传输。\n确定要断开吗？' : '当前正在使用文件管理，断开连接会关闭文件传输。\n确定要断开吗？';
-      try {
-        const ok = await appWindow.api.dialog.confirm(msg, '断开连接');
-        if (!ok) return;
-      } catch (err) {
-        console.error('[disconnectSession] confirm failed:', err);
-        if (!confirm(msg)) return;
-      }
-    }
-    try { await appWindow.api.ssh.disconnect(sessionId); } catch (error) { console.error('断开连接失败:', error); }
-    appWindow.sessionManager.removeSession(sessionId);
-    disposeTerminalInstance(sessionId);
-    if (isActive) {
-      setCurrentSessionId(null);
-      appWindow.uiManager.updateConnectionStatus(false);
-      appWindow.uiManager.updateServerInfo(false);
-      appWindow.fileManager.clearFileManagerCache();
-      appWindow.fileManager.fileManagerInitialized = false;
-      appWindow.fileManager.renderRemoteEmptyState('连接已断开，请重新连接到服务器', connectionId);
-    }
-    await appWindow.connectionManager.loadConnections();
-  };
-
   const ensureTerminalVisible = () => {
     if (terminalFitAddonRef.current && !isTabSwitchingRef.current) resizeTerminalRef.current!();
     if (activeTerminalRef.current && !isTabSwitchingRef.current) setTimeout(() => {
@@ -494,7 +461,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       get isTabSwitching() { return isTabSwitchingRef.current; },
       set isTabSwitching(value) { isTabSwitchingRef.current = value; },
       createXterm, initTerminal, getTerminalForSession, isPasswordPromptVisible,
-      disposeTerminalInstance, disconnectSession, ensureTerminalVisible, resizeTerminal,
+      disposeTerminalInstance, ensureTerminalVisible, resizeTerminal,
     };
   }
 

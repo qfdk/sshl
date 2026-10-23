@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent } fro
 import { getSettingsDialogOpen, setSettingsDialogOpen, subscribe } from '../lib/app-state';
 import { getTerminalSettings, clampTerminalFontSize, CUSTOM_SENTINEL, DEFAULT_FONT_FAMILY, DEFAULTS, loadSystemFontPresets, warmSystemFontPresets, setTerminalSettings, type FontPreset } from '../lib/terminal-settings';
 import { moveConnection, normalizeGroupName } from '../lib/connection-groups';
+import { alertDialog } from '../lib/dialogs';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader } from '../components/ui/card';
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
@@ -67,7 +68,7 @@ export function SettingsDialog() {
       setSavedSnapshot(snapshotOf(nextConnections, nextGroups));
     } catch (error) {
       console.error('加载分组管理失败:', error);
-      alert(`加载分组管理失败: ${(error as Error).message || error}`);
+      void alertDialog({ title: '加载分组失败', message: String((error as Error).message || error) });
     }
   };
 
@@ -113,7 +114,7 @@ export function SettingsDialog() {
     const name = newGroupName.trim();
     if (!name) return;
     if (groups.includes(name)) {
-      alert('分组名称已存在');
+      void alertDialog({ title: '无法保存分组', message: '分组名称已存在。' });
       return;
     }
     setGroups(previous => [...previous, name]);
@@ -148,7 +149,7 @@ export function SettingsDialog() {
       setSettingsDialogOpen(false);
     } catch (error) {
       console.error('保存分组失败:', error);
-      alert(`保存分组失败: ${(error as Error).message || error}`);
+      void alertDialog({ title: '保存分组失败', message: String((error as Error).message || error) });
     }
   };
 

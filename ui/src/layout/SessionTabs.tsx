@@ -100,7 +100,7 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
             <span className={cn('truncate', tab.active ? 'font-semibold' : 'text-foreground/80')}>{tab.name}</span>
             {tab.active && tab.host && <span className="truncate font-mono text-[11px] text-muted-foreground">{tab.host}</span>}
           </button>
-          <button type="button" data-session-tab-close className="mr-1 grid h-[26px] w-[26px] shrink-0 place-items-center rounded-[7px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground" title={`断开 ${tab.name}`} aria-label={`断开 ${tab.name}`} onClick={() => void manager.disconnect(tab.sessionId, { confirm: true })}>
+          <button type="button" data-session-tab-close className="mr-1 grid h-[26px] w-[26px] shrink-0 place-items-center rounded-[7px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground" title={`断开 ${tab.name}`} aria-label={`断开 ${tab.name}`} onClick={() => void manager.disconnect(tab.sessionId)}>
             <X className="h-3 w-3" />
           </button>
         </div>

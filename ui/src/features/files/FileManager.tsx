@@ -9,6 +9,8 @@ import { Progress } from '../../components/ui/progress';
 import { joinPath, parentPath, resolveRemoteHome, useFileList, type FileEntry, type FileKind } from './useFileList';
 import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
+import { alertDialog, confirmDialog } from '../../lib/dialogs';
+import { deletePrompt } from './delete-prompt';
 import { useSelectAllFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
 
@@ -150,16 +152,12 @@ export function FileManager() {
 
   const deleteItems = useCallback(async (pane: PaneName, items: FileEntry[]) => {
     if (!items.length) return;
-    const names = items.map(item => basename(item.path)).join(', ');
-    const message = items.length > 1
-      ? `确定要删除 ${items.length} 个项目吗？\n${names}\n此操作不可恢复！`
-      : `确定要删除${items[0].isDirectory ? '目录' : '文件'} "${basename(items[0].path)}"${items[0].isDirectory ? ' 及其所有内容' : ''}吗？此操作不可恢复！`;
-    if (!await (window as AppWindow).api.dialog.confirm(message, items.length > 1 ? '批量删除' : '删除')) return;
+    if (!await confirmDialog(deletePrompt(items))) return;
 
     if (pane === 'remote') {
       for (const command of remoteDeleteCommands(items.map(item => item.path))) {
         const result = await (window as AppWindow).api.ssh.execute(sessionId, command);
-        if (!result?.success) window.alert(`删除失败: ${result?.error || '未知错误'}`);
+        if (!result?.success) void alertDialog({ title: '删除失败', message: result?.error || '未知错误' });
       }
       remote.invalidate(remote.path, sessionId);
       void remote.load(remote.path || '/', true);
@@ -168,7 +166,7 @@ export function FileManager() {
     for (const item of items) {
       const result = await (window as AppWindow).api.file[item.isDirectory ? 'deleteLocalDirectory' : 'deleteLocal'](item.path);
       if (!result?.success) {
-        window.alert(`删除失败: ${result?.error || '未知错误'}`);
+        void alertDialog({ title: '删除失败', message: result?.error || '未知错误' });
         continue;
       }
       local.invalidate(local.path);
@@ -181,7 +179,7 @@ export function FileManager() {
     const name = window.prompt('请输入文件夹名称');
     if (!name) return;
     if (name.includes('/') || name.includes('\\')) {
-      window.alert('文件夹名称不能包含斜杠');
+      void alertDialog({ title: '无法新建文件夹', message: '文件夹名称不能包含斜杠。' });
       return;
     }
     const fullPath = remote.path === '/' ? `/${name}` : `${remote.path}/${name}`;
@@ -190,7 +188,7 @@ export function FileManager() {
       remote.invalidate(remote.path, sessionId);
       void remote.load(remote.path || '/', true);
     } else {
-      window.alert(`创建文件夹失败: ${result?.error || '未知错误'}`);
+      void alertDialog({ title: '新建文件夹失败', message: result?.error || '未知错误' });
     }
   }, [remote, sessionId]);
 
@@ -256,7 +254,7 @@ export function FileManager() {
       remote.invalidate(remote.path, sessionId);
       void remote.load(remote.path || '/', true);
     } else {
-      window.alert(`权限修改失败: ${result?.error || '未知错误'}`);
+      void alertDialog({ title: '修改权限失败', message: result?.error || '未知错误' });
     }
   }, [permissionTarget, permissionValue, remote, sessionId]);
 
