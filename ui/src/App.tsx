@@ -97,8 +97,9 @@ export function App() {
               </div>
             </div>
             <div className="min-h-0 flex-1">
-              <TabsContent value="terminal" id="terminal-tab" forceMount className="m-0 h-full data-[state=inactive]:hidden"><Terminal /></TabsContent>
-              <TabsContent value="file-manager" id="file-manager-tab" forceMount className="m-0 h-full data-[state=inactive]:hidden"><FileManager /></TabsContent>
+              {/* 整块面板不画焦点环：点过面板里的空白再按 Esc 等键，会给整个区域套一圈蓝框 */}
+              <TabsContent value="terminal" id="terminal-tab" forceMount className="m-0 h-full focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"><Terminal /></TabsContent>
+              <TabsContent value="file-manager" id="file-manager-tab" forceMount className="m-0 h-full focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"><FileManager /></TabsContent>
             </div>
           </Tabs>
         </main>

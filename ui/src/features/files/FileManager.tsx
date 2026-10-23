@@ -11,7 +11,7 @@ import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
 import { alertDialog, confirmDialog } from '../../lib/dialogs';
 import { deletePrompt } from './delete-prompt';
-import { useSelectAllFallback } from './shortcuts';
+import { useFileSelectionFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
@@ -108,7 +108,10 @@ export function FileManager() {
     const entries = pane === 'local' ? local.files : remote.files;
     setSelected(current => ({ ...current, [pane]: new Set(entries.map(item => item.path)), [pane === 'local' ? 'remote' : 'local']: new Set() }));
   }, [local.files, remote.files]);
-  useSelectAllFallback(enabled, () => selectAll(activePane.current || (sessionId ? 'remote' : 'local')));
+  useFileSelectionFallback(enabled, {
+    selectAll: () => selectAll(activePane.current || (sessionId ? 'remote' : 'local')),
+    clearSelection: () => setSelected({ local: new Set(), remote: new Set() }),
+  });
 
   const ensureContextSelection = useCallback((pane: PaneName, entry: FileEntry | null) => {
     setContextTargets(current => ({ ...current, [pane]: entry }));
@@ -344,6 +347,7 @@ export function FileManager() {
             onRowSelect={(entry, index, event) => selectRow('local', entry, index, event)}
             onContextTarget={entry => ensureContextSelection('local', entry)}
             onSelectAll={() => selectAll('local')}
+            onClearSelection={() => clearSelection('local')}
           />
         </div>
         <div id="pane-divider" className="w-2.5 shrink-0 cursor-col-resize rounded-full transition-colors hover:bg-primary/15" title="拖动调整面板宽度" />
@@ -378,6 +382,7 @@ export function FileManager() {
             onContextTarget={entry => ensureContextSelection('remote', entry)}
             onPermission={openPermissions}
             onSelectAll={() => selectAll('remote')}
+            onClearSelection={() => clearSelection('remote')}
           />
         </div>
       </div>

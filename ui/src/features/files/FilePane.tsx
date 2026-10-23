@@ -12,7 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { cn } from '../../lib/utils';
 import { formatDate, formatFileSize, formatPermissions, type FileEntry, type FileKind, isRootPath } from './useFileList';
 import { matchDirectories, splitCompletionPath, tabCompletion } from './path-completion';
-import { isSelectAllShortcut } from './shortcuts';
+import { isClearSelectionKey, isSelectAllShortcut } from './shortcuts';
 import { visibleRowWindow } from './virtual-rows';
 
 // 不超过这个行数就全量渲染：几屏以内的行渲染只需几毫秒，虚拟化没有可感知的收益，
@@ -52,6 +52,7 @@ export type FilePaneProps = {
   onContextTarget: (entry: FileEntry | null) => void;
   onPermission?: (entry: FileEntry) => void;
   onSelectAll?: () => void;
+  onClearSelection?: () => void;
 };
 
 export function FilePane({
@@ -74,6 +75,7 @@ export function FilePane({
   onContextTarget,
   onPermission,
   onSelectAll,
+  onClearSelection,
 }: FilePaneProps) {
   const suggestionListId = useId();
   const suggestionListRef = useRef<HTMLDivElement>(null);
@@ -248,7 +250,7 @@ export function FilePane({
       {/* 遮罩不能放进滚动容器：absolute 会跟着内容滚走，滚下去后刷新只盖住顶部一屏。
           isolate 把遮罩的 z-20 限定在列表内，压住 sticky 表头，又不盖地址栏补全下拉。 */}
       <div className="relative isolate flex min-h-0 flex-1 flex-col">
-        {/* 列表可获得焦点，Cmd+A 只作用于用户点过的这一侧；地址栏在列表外，Cmd+A 仍是全选文字。 */}
+        {/* 列表可获得焦点，Cmd+A / Esc 只作用于用户点过的这一侧；地址栏在列表外，Cmd+A 仍是全选文字。 */}
         <div
           ref={scrollRef}
           data-file-list
@@ -256,9 +258,15 @@ export function FilePane({
           className="min-h-0 flex-1 overflow-auto outline-none select-none"
           onScroll={onScroll}
           onKeyDown={event => {
-            if (!isSelectAllShortcut(event)) return;
-            event.preventDefault();
-            onSelectAll?.();
+            // 右键菜单经 portal 渲染在 body 下，但 React 事件仍沿组件树冒泡到这里；只处理 DOM 上在列表内的按键，
+            // 否则菜单开着时按 Esc 会在关菜单的同时清空选择。
+            if (!event.currentTarget.contains(event.target as Node)) return;
+            if (isSelectAllShortcut(event)) {
+              event.preventDefault();
+              onSelectAll?.();
+            } else if (isClearSelectionKey(event.nativeEvent)) {
+              onClearSelection?.();
+            }
           }}
         >
           <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>

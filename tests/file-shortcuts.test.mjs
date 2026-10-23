@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isSelectAllShortcut, preventUiSelectAll } from '../ui/src/features/files/shortcuts.ts';
+import { isClearSelectionKey, isSelectAllShortcut, preventUiSelectAll } from '../ui/src/features/files/shortcuts.ts';
 
 const key = (overrides) => ({ key: 'a', metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...overrides });
 
@@ -39,4 +39,12 @@ test('输入框、终端里的 Cmd+A 放行；其他按键不拦', () => {
   const copy = keydown({ key: 'c', metaKey: true }, false);
   preventUiSelectAll(copy);
   assert.equal(copy.prevented, false);
+});
+
+test('Esc 取消选择；带修饰键、输入法选字中的 Esc 不算', () => {
+  assert.equal(isClearSelectionKey({ ...key({ key: 'Escape' }), isComposing: false }), true);
+  // 输入法候选框里的 Esc 是取消输入，不能顺手把文件选择也清掉
+  assert.equal(isClearSelectionKey({ ...key({ key: 'Escape' }), isComposing: true }), false);
+  assert.equal(isClearSelectionKey({ ...key({ key: 'Escape', metaKey: true }), isComposing: false }), false);
+  assert.equal(isClearSelectionKey({ ...key({ key: 'a' }), isComposing: false }), false);
 });
