@@ -96,8 +96,16 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* 桌面应用：界面文字默认不可选，Cmd+A、编辑菜单「全选」、拖动都不会把界面整片高亮。
+     输入框与终端（xterm 的输入是 textarea，选区由 xterm 自绘）仍可选；需要复制的内容用 select-text 放开。 */
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground select-none;
+  }
+  input,
+  textarea,
+  [contenteditable=""],
+  [contenteditable="true"] {
+    @apply select-text;
   }
   /* Tailwind v4 的 preflight 把 button 的 cursor 从 pointer 改成了 default，
      于是 shadcn 的按钮全是箭头。恢复成手形，禁用态除外。 */

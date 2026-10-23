@@ -251,6 +251,7 @@ export function FilePane({
         {/* 列表可获得焦点，Cmd+A 只作用于用户点过的这一侧；地址栏在列表外，Cmd+A 仍是全选文字。 */}
         <div
           ref={scrollRef}
+          data-file-list
           tabIndex={-1}
           className="min-h-0 flex-1 overflow-auto outline-none select-none"
           onScroll={onScroll}
