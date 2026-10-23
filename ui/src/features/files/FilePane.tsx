@@ -308,7 +308,7 @@ export function FilePane({
                           key={parent ? '..' : entry.path}
                           data-state={selected ? 'selected' : undefined}
                           style={{ height: ROW_HEIGHT }}
-                          className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
+                          className={cn('cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
                           // 阻止默认行为避免拖选文字，但焦点要交给列表，否则会留在终端里、收不到 Cmd+A。
                           onMouseDown={event => {
                             event.preventDefault();
@@ -338,7 +338,7 @@ export function FilePane({
                           {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{parent ? null : entry.owner || '-'}</TableCell>}
                           {isRemote && (
                             <TableCell
-                              className={cn('px-3 py-2', !parent && 'cursor-pointer')}
+                              className="px-3 py-2"
                               title={parent ? undefined : '点击修改权限'}
                               onClick={event => {
                                 event.stopPropagation();
