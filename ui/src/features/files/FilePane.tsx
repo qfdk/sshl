@@ -242,99 +242,103 @@ export function FilePane({
         </Button>
       </header>
 
-      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-auto select-none" onScroll={onScroll}>
-        <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>
-          <ContextMenuTrigger asChild>
-            <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
-              <Table className="table-fixed text-xs">
-                <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-card">
-                  <TableRow>
-                    <TableHead className="h-8 px-3.5 font-medium">名称</TableHead>
-                    <TableHead className="h-8 w-20 px-3 text-right font-medium">大小</TableHead>
-                    <TableHead className="h-8 w-36 px-3 font-medium">修改日期</TableHead>
-                    {isRemote && <TableHead className="h-8 w-24 px-3 font-medium">所有者</TableHead>}
-                    {isRemote && <TableHead className="h-8 w-16 px-3 font-medium">权限</TableHead>}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {emptyMessage && !loading && (
+      {/* 遮罩不能放进滚动容器：absolute 会跟着内容滚走，滚下去后刷新只盖住顶部一屏。
+          isolate 把遮罩的 z-20 限定在列表内，压住 sticky 表头，又不盖地址栏补全下拉。 */}
+      <div className="relative isolate flex min-h-0 flex-1 flex-col">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto select-none" onScroll={onScroll}>
+          <ContextMenu onOpenChange={open => { if (!open) onContextTarget(null); }}>
+            <ContextMenuTrigger asChild>
+              <div className="min-h-full" onContextMenu={event => { if (!(event.target as HTMLElement).closest('tr')) onContextTarget(null); }}>
+                <Table className="table-fixed text-xs">
+                  <TableHeader ref={headerRef} className="sticky top-0 z-10 bg-card">
                     <TableRow>
-                      <TableCell colSpan={columnCount} className="h-32 whitespace-pre-wrap text-center text-muted-foreground">
-                        {emptyMessage}
-                      </TableCell>
+                      <TableHead className="h-8 px-3.5 font-medium">名称</TableHead>
+                      <TableHead className="h-8 w-20 px-3 text-right font-medium">大小</TableHead>
+                      <TableHead className="h-8 w-36 px-3 font-medium">修改日期</TableHead>
+                      {isRemote && <TableHead className="h-8 w-24 px-3 font-medium">所有者</TableHead>}
+                      {isRemote && <TableHead className="h-8 w-16 px-3 font-medium">权限</TableHead>}
                     </TableRow>
-                  )}
-                  {!emptyMessage && !loading && rows.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={columnCount} className="h-32 text-center text-muted-foreground">目录为空</TableCell>
-                    </TableRow>
-                  )}
-                  {/* spacer 只在高度 > 0 时渲染：滚到底时最后一条数据行仍是 last-child，沿用 TableBody 去掉末行边框的样式。 */}
-                  {range.padTop > 0 && (
-                    <tr aria-hidden="true"><td colSpan={columnCount} className="p-0" style={{ height: range.padTop }} /></tr>
-                  )}
-                  {rows.slice(range.start, range.end).map(entry => {
-                    const selected = selectedPaths.has(entry.path);
-                    const parent = entry.name === '..';
-                    return (
-                      <TableRow
-                        key={parent ? '..' : entry.path}
-                        data-state={selected ? 'selected' : undefined}
-                        style={{ height: ROW_HEIGHT }}
-                        className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
-                        onMouseDown={event => event.preventDefault()}
-                        onClick={event => {
-                          if (!parent) onRowSelect(entry, files.indexOf(entry), event);
-                        }}
-                        onDoubleClick={() => {
-                          if (entry.isDirectory) onOpen(entry);
-                        }}
-                        onContextMenu={() => {
-                          if (!parent) onContextTarget(entry);
-                        }}
-                      >
-                        <TableCell className={cn('truncate px-3.5 py-2', selected && 'font-medium')} title={entry.name}>
-                          <span className="mr-2 inline-flex align-middle">
-                            {entry.isDirectory ? <Folder className="h-4 w-4 text-primary" /> : <FileText className="h-4 w-4 text-muted-foreground" />}
-                          </span>
-                          {entry.name}
+                  </TableHeader>
+                  <TableBody>
+                    {emptyMessage && !loading && (
+                      <TableRow>
+                        <TableCell colSpan={columnCount} className="h-32 whitespace-pre-wrap text-center text-muted-foreground">
+                          {emptyMessage}
                         </TableCell>
-                        <TableCell className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">{entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
-                        <TableCell className="whitespace-nowrap px-3 py-2 tabular-nums text-muted-foreground">{formatDate(entry.modifyTime)}</TableCell>
-                        {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{entry.owner || 'unknown'}</TableCell>}
-                        {isRemote && (
-                          <TableCell
-                            className="cursor-pointer px-3 py-2"
-                            title="点击修改权限"
-                            onClick={event => {
-                              event.stopPropagation();
-                              if (!parent) onPermission?.(entry);
-                            }}
-                          >
-                            {formatPermissions(entry.permissions)}
-                          </TableCell>
-                        )}
                       </TableRow>
-                    );
-                  })}
-                  {range.padBottom > 0 && (
-                    <tr aria-hidden="true"><td colSpan={columnCount} className="p-0" style={{ height: range.padBottom }} /></tr>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </ContextMenuTrigger>
-          <ContextMenuContent className="min-w-48">
-            {contextMenuItems.map(item => (
-              <ContextMenuItem key={item.label} disabled={item.disabled} onSelect={item.onSelect}>
-                {item.icon}
-                <span>{item.label}</span>
-              </ContextMenuItem>
-            ))}
-          </ContextMenuContent>
-        </ContextMenu>
+                    )}
+                    {!emptyMessage && !loading && rows.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={columnCount} className="h-32 text-center text-muted-foreground">目录为空</TableCell>
+                      </TableRow>
+                    )}
+                    {/* spacer 只在高度 > 0 时渲染：滚到底时最后一条数据行仍是 last-child，沿用 TableBody 去掉末行边框的样式。 */}
+                    {range.padTop > 0 && (
+                      <tr aria-hidden="true"><td colSpan={columnCount} className="p-0" style={{ height: range.padTop }} /></tr>
+                    )}
+                    {rows.slice(range.start, range.end).map(entry => {
+                      const selected = selectedPaths.has(entry.path);
+                      const parent = entry.name === '..';
+                      return (
+                        <TableRow
+                          key={parent ? '..' : entry.path}
+                          data-state={selected ? 'selected' : undefined}
+                          style={{ height: ROW_HEIGHT }}
+                          className={cn('cursor-default', entry.isDirectory && 'cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
+                          onMouseDown={event => event.preventDefault()}
+                          onClick={event => {
+                            if (!parent) onRowSelect(entry, files.indexOf(entry), event);
+                          }}
+                          onDoubleClick={() => {
+                            if (entry.isDirectory) onOpen(entry);
+                          }}
+                          onContextMenu={() => {
+                            if (!parent) onContextTarget(entry);
+                          }}
+                        >
+                          <TableCell className={cn('truncate px-3.5 py-2', selected && 'font-medium')} title={entry.name}>
+                            <span className="mr-2 inline-flex align-middle">
+                              {entry.isDirectory ? <Folder className="h-4 w-4 text-primary" /> : <FileText className="h-4 w-4 text-muted-foreground" />}
+                            </span>
+                            {entry.name}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground">{entry.isDirectory ? '-' : formatFileSize(entry.size || 0)}</TableCell>
+                          <TableCell className="whitespace-nowrap px-3 py-2 tabular-nums text-muted-foreground">{formatDate(entry.modifyTime)}</TableCell>
+                          {isRemote && <TableCell className="truncate px-3 py-2 text-muted-foreground">{entry.owner || 'unknown'}</TableCell>}
+                          {isRemote && (
+                            <TableCell
+                              className="cursor-pointer px-3 py-2"
+                              title="点击修改权限"
+                              onClick={event => {
+                                event.stopPropagation();
+                                if (!parent) onPermission?.(entry);
+                              }}
+                            >
+                              {formatPermissions(entry.permissions)}
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      );
+                    })}
+                    {range.padBottom > 0 && (
+                      <tr aria-hidden="true"><td colSpan={columnCount} className="p-0" style={{ height: range.padBottom }} /></tr>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent className="min-w-48">
+              {contextMenuItems.map(item => (
+                <ContextMenuItem key={item.label} disabled={item.disabled} onSelect={item.onSelect}>
+                  {item.icon}
+                  <span>{item.label}</span>
+                </ContextMenuItem>
+              ))}
+            </ContextMenuContent>
+          </ContextMenu>
+        </div>
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-background/70">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/70">
             <LoaderCircle className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>
         )}
