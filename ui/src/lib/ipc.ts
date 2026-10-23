@@ -91,6 +91,9 @@ export const api = {
     set: (connectionId: string, account: string, password: string) => call('cred_set', { connectionId, account, password }),
     delete: (connectionId: string, account: string) => call('cred_delete', { connectionId, account }),
   },
+  app: {
+    ready: () => invoke('app_ready').catch(error => console.error('[ipc] app_ready failed:', errorMessage(error))),
+  },
   dialog: {
     selectFile: async () => {
       const result = await open({ multiple: false, directory: false });

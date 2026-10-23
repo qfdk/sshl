@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSUserDefaults", "NSString", "NSDictionary"] }
+objc2-foundation = { version = "0.2", features = ["NSUserDefaults", "NSString", "NSDictionary", "NSGeometry", "NSValue", "NSData"] }
 core-text = "20"
 core-foundation = "0.9"
 

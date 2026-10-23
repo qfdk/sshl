@@ -40,6 +40,9 @@ pnpm build             # Tauri application build
   snapshot with `getSessionBuffer` before activating. The sole call site is the
   `terminalResult.isNew` replay path in `ui/src/features/connections/useConnections.ts`.
 - **Warm pool** is backend-owned. The frontend makes no prewarm call.
+- **Native splash** — `src-tauri/src/splash.rs` covers the WebView with a native view during
+  WebContent cold start (otherwise ~0.7s of blank window). `ui/src/main.tsx` must call
+  `api.app.ready()` after the first frame; without it the splash only clears at the 8s fallback.
 - **SFTP channel reuse** — one cached SFTP session is shared per SSH session.
 - **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` keeps CanvasAddon after
   `term.open()`, Unicode11 registration, bottom alignment, ANSI background sampling, and

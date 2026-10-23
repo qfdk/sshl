@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod local_fs;
 mod sftp;
+mod splash;
 mod ssh;
 mod state;
 mod system_fonts;
@@ -91,8 +92,10 @@ pub fn run() {
             config_store::cred_set,
             config_store::cred_delete,
             system_fonts::list_system_fonts,
+            splash::app_ready,
         ])
         .setup(|app| {
+            splash::show(app);
             let handle = app.handle().clone();
             // 后台维护预热池：启动即预热全部已保存连接，之后每 WARM_POOL_TICK 一轮。
             tauri::async_runtime::spawn(async move {

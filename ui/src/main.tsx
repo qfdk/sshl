@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import './lib/ipc';
+import { api } from './lib/ipc';
 import { App } from './App';
 import './index.css';
 import 'xterm/css/xterm.css';
@@ -9,3 +9,5 @@ import './features/terminal/terminal.css';
 const root = document.getElementById('root');
 if (!root) throw new Error('React root element was not found');
 createRoot(root).render(<App />);
+// 第一屏提交并画出后再撤原生开屏层（src-tauri/src/splash.rs）。
+requestAnimationFrame(() => requestAnimationFrame(() => void api.app.ready()));
