@@ -8,6 +8,7 @@ import { Input } from '../../components/ui/input';
 import { Progress } from '../../components/ui/progress';
 import { joinPath, parentPath, resolveRemoteHome, useFileList, type FileEntry, type FileKind } from './useFileList';
 import { FilePane, type FileContextMenuItem } from './FilePane';
+import { remoteDeleteCommands } from './remote-delete';
 import { useTransfer } from './useTransfer';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
@@ -145,19 +146,24 @@ export function FileManager() {
       : `确定要删除${items[0].isDirectory ? '目录' : '文件'} "${basename(items[0].path)}"${items[0].isDirectory ? ' 及其所有内容' : ''}吗？此操作不可恢复！`;
     if (!await (window as AppWindow).api.dialog.confirm(message, items.length > 1 ? '批量删除' : '删除')) return;
 
+    if (pane === 'remote') {
+      for (const command of remoteDeleteCommands(items.map(item => item.path))) {
+        const result = await (window as AppWindow).api.ssh.execute(sessionId, command);
+        if (!result?.success) window.alert(`删除失败: ${result?.error || '未知错误'}`);
+      }
+      remote.invalidate(remote.path, sessionId);
+      void remote.load(remote.path || '/', true);
+      return;
+    }
     for (const item of items) {
-      const result = pane === 'remote'
-        ? await (window as AppWindow).api.ssh.execute(sessionId, `${item.isDirectory ? 'rm -rf' : 'rm -f'} "${item.path}"`)
-        : await (window as AppWindow).api.file[item.isDirectory ? 'deleteLocalDirectory' : 'deleteLocal'](item.path);
+      const result = await (window as AppWindow).api.file[item.isDirectory ? 'deleteLocalDirectory' : 'deleteLocal'](item.path);
       if (!result?.success) {
         window.alert(`删除失败: ${result?.error || '未知错误'}`);
         continue;
       }
-      if (pane === 'remote') remote.invalidate(remote.path, sessionId);
-      else local.invalidate(local.path);
+      local.invalidate(local.path);
     }
-    if (pane === 'remote') void remote.load(remote.path || '/', true);
-    else void local.load(local.path, true);
+    void local.load(local.path, true);
   }, [local, remote, sessionId]);
 
   const createRemoteDirectory = useCallback(async () => {
