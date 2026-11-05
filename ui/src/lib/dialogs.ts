@@ -4,14 +4,17 @@
 
 export type DialogRequest = {
   id: number;
-  kind: 'confirm' | 'alert';
+  kind: 'confirm' | 'alert' | 'prompt';
   title: string;
   message?: string;
   /** 单行补充信息（如文件名清单），超出省略，不在名字中间折行。 */
   detail?: string;
   confirmLabel: string;
   cancelLabel?: string;
-  resolve: (ok: boolean) => void;
+  /** prompt 的输入框类型。 */
+  inputType?: 'password' | 'text';
+  placeholder?: string;
+  resolve: (ok: boolean, value?: string) => void;
 };
 
 type DialogOptions = { title: string; message?: string; detail?: string; confirmLabel?: string };
@@ -35,11 +38,11 @@ export function currentDialog(): DialogRequest | null {
   return queue[0] ?? null;
 }
 
-/** 关闭当前对话框：confirm 按 ok 返回，alert 总是结束。 */
-export function settleDialog(ok: boolean) {
+/** 关闭当前对话框：confirm 按 ok 返回，alert 总是结束，prompt 确定时带上输入值。 */
+export function settleDialog(ok: boolean, value?: string) {
   const head = queue.shift();
   if (!head) return;
-  head.resolve(ok);
+  head.resolve(ok, value);
   notify();
 }
 
@@ -51,12 +54,22 @@ export function restoreFocusAfterDialogs() {
   if (target && target.isConnected !== false) target.focus({ preventScroll: true });
 }
 
+function enqueueRaw(request: Omit<DialogRequest, 'id'>) {
+  if (!queue.length && typeof document !== 'undefined') focusBefore = document.activeElement as typeof focusBefore;
+  queue.push({ ...request, id: nextId++ });
+  notify();
+}
+
 function enqueue(request: Omit<DialogRequest, 'id' | 'resolve'>) {
-  return new Promise<boolean>(resolve => {
-    if (!queue.length && typeof document !== 'undefined') focusBefore = document.activeElement as typeof focusBefore;
-    queue.push({ ...request, id: nextId++, resolve });
-    notify();
-  });
+  return new Promise<boolean>(resolve => enqueueRaw({ ...request, resolve: ok => resolve(ok) }));
+}
+
+/** 密码输入框：确定 → 输入值（可为空串），取消/Esc → null。 */
+export function passwordDialog({ title, message, detail, confirmLabel = '确定', cancelLabel = '取消', placeholder }: DialogOptions & { cancelLabel?: string; placeholder?: string }) {
+  return new Promise<string | null>(resolve => enqueueRaw({
+    kind: 'prompt', title, message, detail, confirmLabel, cancelLabel, inputType: 'password', placeholder,
+    resolve: (ok, value) => resolve(ok ? value ?? '' : null),
+  }));
 }
 
 export function confirmDialog({ title, message, detail, confirmLabel = '确定', cancelLabel = '取消' }: DialogOptions & { cancelLabel?: string }) {

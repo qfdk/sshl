@@ -59,7 +59,7 @@ pnpm build             # Tauri application build
   deduped and throttled to ~30/s. Release WebGL contexts explicitly on dispose (xterm.js #6068).
 - **Bundled Nerd Font** — both JetBrainsMono Nerd Font weights are loaded from
   `ui/src/index.css` and `ui/src/assets/fonts/`; do not replace them with system fallback.
-- **Prompts** — use `alertDialog` / `confirmDialog` from `ui/src/lib/dialogs.ts` (rendered by
+- **Prompts** — use `alertDialog` / `confirmDialog` / `passwordDialog` from `ui/src/lib/dialogs.ts` (rendered by
   `layout/DialogHost`). Never `window.alert` / `window.confirm` / plugin-dialog `ask`: the dialog
   plugin's init script swaps alert/confirm for native NSAlert (English buttons, narrow, breaks Chinese
   sentences mid-line), and its `confirm` returns a Promise, so `if (!confirm(..))` never blocks.
