@@ -1,8 +1,7 @@
 import { useEffect, useRef, type RefObject } from 'react';
-import { Terminal } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
-import { CanvasAddon } from 'xterm-addon-canvas';
-import { Unicode11Addon } from 'xterm-addon-unicode11';
+import type { Terminal } from 'xterm';
+import type { FitAddon } from 'xterm-addon-fit';
+import type { WebglAddon } from 'xterm-addon-webgl';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { getTerminalSettings } from '../../lib/terminal-settings';
 
@@ -15,15 +14,24 @@ type AppWindow = Window & {
   terminalManager?: TerminalManager;
 };
 
-type TerminalEntry = {
-  term: Terminal;
-  fitAddon: FitAddon;
+type XtermModules = {
+  Terminal: typeof import('xterm').Terminal;
+  FitAddon: typeof import('xterm-addon-fit').FitAddon;
+  CanvasAddon: typeof import('xterm-addon-canvas').CanvasAddon;
+  WebglAddon: typeof import('xterm-addon-webgl').WebglAddon;
+  Unicode11Addon: typeof import('xterm-addon-unicode11').Unicode11Addon;
+};
+
+type BuiltTerminal = { term: Terminal; fitAddon: FitAddon; webgl: WebglAddon | null };
+
+type TerminalEntry = BuiltTerminal & {
   host: HTMLDivElement;
   dataDisposer: (() => void) | null;
-  cleanup: (() => void) | null;
   defaultBg: string;
   bgColor?: string;
 };
+
+type SpareTerminal = BuiltTerminal & { host: HTMLDivElement; fontSize: number; fontFamily: string };
 
 export type TerminalManager = {
   readonly terminals: Map<string, TerminalEntry>;
@@ -31,14 +39,38 @@ export type TerminalManager = {
   terminalFitAddon: FitAddon | null;
   activeSessionId: string | null;
   isTabSwitching: boolean;
-  createXterm: (container: HTMLElement | string, options?: Record<string, unknown>, sessionId?: string | null) => Promise<{ term: Terminal; fitAddon: FitAddon }>;
+  createXterm: (container: HTMLElement | string, options?: Record<string, unknown>) => Promise<BuiltTerminal>;
   initTerminal: (sessionId: string, existingSession?: unknown, showBuffer?: boolean) => Promise<{ term: Terminal; fitAddon: FitAddon; isNew: boolean } | null>;
   getTerminalForSession: (sessionId: string) => Terminal | null;
   isPasswordPromptVisible: (term: Terminal | null) => boolean;
   disposeTerminalInstance: (sessionId: string) => void;
   ensureTerminalVisible: () => void;
   resizeTerminal: () => void;
+  prewarm: () => Promise<void>;
+  proposeSize: () => { cols: number; rows: number } | null;
+  syncPtySize: (sessionId: string) => void;
 };
+
+// xterm 与插件单独成块：首屏不再解析这约 400KB，首屏画出后空闲时预取（prewarm）。
+// 这些包是 UMD/CJS，命名导出可能挂在 default 上，两处都取。
+let xtermModules: Promise<XtermModules> | null = null;
+const pick = (mod: any, name: string) => mod?.[name] ?? mod?.default?.[name];
+export function loadXterm() {
+  xtermModules ??= Promise.all([
+    import('xterm'),
+    import('xterm-addon-fit'),
+    import('xterm-addon-canvas'),
+    import('xterm-addon-webgl'),
+    import('xterm-addon-unicode11'),
+  ]).then(([xterm, fit, canvas, webgl, unicode11]) => ({
+    Terminal: pick(xterm, 'Terminal'),
+    FitAddon: pick(fit, 'FitAddon'),
+    CanvasAddon: pick(canvas, 'CanvasAddon'),
+    WebglAddon: pick(webgl, 'WebglAddon'),
+    Unicode11Addon: pick(unicode11, 'Unicode11Addon'),
+  }));
+  return xtermModules;
+}
 
 // 终端主题：与用户 Ghostty 配置（Carbonfox 改）对齐 —— 背景/前景/光标/选区 + 16 色调色板。
 // 两条终端创建路径（createXtermInstance 默认 + initTerminal 的 termOptions）共用，
@@ -59,8 +91,8 @@ const ANSI_BASE_16 = [
   TERM_THEME.brightBlue, TERM_THEME.brightMagenta, TERM_THEME.brightCyan, TERM_THEME.brightWhite,
 ];
 
-// 读取 xterm 运行时真实使用的 0-15 调色板（CanvasAddon 实际渲染用的就是它）。
-// 设 theme.ansi 在本 xterm+CanvasAddon 下不生效（仍用其自带默认，如 magenta=#75507b），
+// 读取 xterm 运行时真实使用的 0-15 调色板（渲染器实际用的就是它）。
+// 设 theme.ansi 在本 xterm 下不生效（仍用其自带默认，如 magenta=#75507b），
 // 故采样必须按「xterm 真画出来的色」解码，否则 paletteToHex 用 ANSI_BASE_16(#bc3fbc) →
 // padding 与正文色不符露缝。私有 API：5.x 在 _themeService，4.x 在 _colorManager。
 function getAnsiPalette(term: Terminal) {
@@ -172,10 +204,10 @@ function debounce<T extends (...args: any[]) => void>(func: T, wait: number) {
 
 // 统一构造 xterm 实例。调用方的 options 在最后展开，可覆盖默认 theme/透明度等。
 // 注意：xterm 5.x 已移除 `rendererType` 构造选项（静默忽略），默认是 DOM renderer，
-// 要 canvas renderer 必须显式 loadAddon(CanvasAddon)，见 loadCanvasRenderer。
-function createXtermInstance(options: Record<string, unknown>) {
+// GPU 渲染必须显式 loadAddon，见 loadGpuRenderer。
+function createXtermInstance(mods: XtermModules, options: Record<string, unknown>) {
   const userSettings = getTerminalSettings();
-  return new Terminal({
+  return new mods.Terminal({
     cursorBlink: true,
     cursorStyle: 'bar',
     cursorInactiveStyle: 'bar',
@@ -190,16 +222,41 @@ function createXtermInstance(options: Record<string, unknown>) {
   });
 }
 
-// CanvasAddon 必须在 term.open() 之后加载（它需要已挂载的 DOM）。加载失败时静默回退 DOM renderer。
-function loadCanvasRenderer(term: Terminal) {
+// 渲染器必须在 term.open() 之后加载（需要已挂载的 DOM）。
+// 首选 WebGL（GPU 绘制字形与背景）；不可用或 GPU 上下文丢失时回退 Canvas，再不行留 DOM renderer。
+function loadCanvasRenderer(term: Terminal, mods: XtermModules) {
   try {
-    term.loadAddon(new CanvasAddon());
+    term.loadAddon(new mods.CanvasAddon());
   } catch (err) {
     console.warn('[terminal] canvas renderer 加载失败，回退 DOM renderer:', err);
   }
 }
 
-// canvas renderer 把行高量化成整数 px → 渲染区(canvas)比可用高度矮几~十几 px，
+function loadGpuRenderer(term: Terminal, mods: XtermModules): WebglAddon | null {
+  try {
+    const webgl = new mods.WebglAddon();
+    webgl.onContextLoss(() => {
+      releaseWebgl(webgl);
+      loadCanvasRenderer(term, mods);
+    });
+    term.loadAddon(webgl);
+    return webgl;
+  } catch (err) {
+    console.warn('[terminal] WebGL renderer 不可用，回退 canvas:', err);
+    loadCanvasRenderer(term, mods);
+    return null;
+  }
+}
+
+// xterm 5.3 配套的 WebglAddon.dispose() 不释放 WebGL 上下文（xterm.js #6068），
+// 频繁开关会话会把 WebKit 的活跃上下文配额耗尽，最老的终端随之丢上下文。先主动 loseContext。
+function releaseWebgl(webgl: WebglAddon | null) {
+  if (!webgl) return;
+  try { (webgl as any)._renderer?._gl?.getExtension('WEBGL_lose_context')?.loseContext(); } catch (_) {}
+  try { webgl.dispose(); } catch (_) {}
+}
+
+// 渲染器把行高量化成整数 px → 渲染区(canvas)比可用高度矮几~十几 px，
 // 默认贴顶，底部多出一道空隙（与终端同色但位置突兀，用户感知为"底部多一行"）。
 // 这里把渲染区精确贴底：强制 .xterm-screen 高度 = canvas 高度（覆盖 CSS 的 height:100%，
 // 否则 screen 会被撑满到可用高度），再用 relative 把整段余量推到顶部，底部只剩正常 padding。
@@ -222,26 +279,29 @@ function alignScreenToBottom(host: HTMLElement) {
   (sc as HTMLElement).style.setProperty('top', leftover + 'px', 'important');
 }
 
-// 窗口缩放时去抖 fit；存 cleanup 以便 dispose 时移除监听器，避免多 session 叠加泄漏。
-function attachResizeHandler(term: Terminal, fitAddon: FitAddon, sessionId: string | null) {
-  const resizeHandler = debounce(() => {
-    if (!fitAddon || !term) return;
-    fitAddon.fit();
-    // 关键：fit 重排 xterm 网格后，必须把新列/行数同步给后端 PTY（window_change），
-    // 否则 vim 等全屏程序仍按旧 TIOCGWINSZ 尺寸重绘，滚动时 erase-line 清除范围
-    // 与实际列数错位 → 旧帧残留、内容堆左侧（截图里的 gutter 重影/截断）。
-    // 隐藏的后台终端容器无尺寸，proposeDimensions 返回空 → 自动跳过，不误改其 PTY。
-    try {
-      const d = fitAddon.proposeDimensions();
-      if (d && d.cols && d.rows && sessionId && (window as AppWindow).api?.ssh) {
-        (window as AppWindow).api!.ssh.resize(sessionId, d.cols, d.rows).catch(() => {});
-      }
-    } catch (_) {}
-  }, 50);
-  window.addEventListener('resize', resizeHandler);
-  (term as any)._resizeHandler = resizeHandler;
-  (term as any)._cleanup = () => window.removeEventListener('resize', resizeHandler);
+// 字形度量依赖字体已加载：内置 Nerd Font 是 2MB 级 TTF，没加载完就 open 会按回退字体量 cell。
+// 已加载时立即 resolve；最多等 500ms，不让异常字体卡住终端。
+function waitForTerminalFont() {
+  const { fontSize, fontFamily } = getTerminalSettings();
+  if (!document.fonts?.load) return Promise.resolve();
+  const loads = Promise.all([
+    document.fonts.load(`${fontSize}px ${fontFamily}`),
+    document.fonts.load(`bold ${fontSize}px ${fontFamily}`),
+  ]).catch(() => {});
+  return Promise.race([loads, new Promise(resolve => setTimeout(resolve, 500))]);
 }
+
+function makeHost(container: HTMLElement) {
+  const host = document.createElement('div');
+  host.className = 'term-host';
+  host.style.position = 'absolute';
+  host.style.inset = '0';
+  container.appendChild(host);
+  return host;
+}
+
+// PTY 尺寸同步的节流间隔：拖动窗口时每帧都重排本地网格，但给远端的 window_change 最多约 30 次/秒。
+const PTY_RESIZE_INTERVAL_MS = 33;
 
 export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
   const terminalsRef = useRef(new Map<string, TerminalEntry>());
@@ -249,52 +309,150 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
   const terminalFitAddonRef = useRef<FitAddon | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const isTabSwitchingRef = useRef(false);
-  const resizeTerminalRef = useRef<() => void>(null);
   const managerRef = useRef<TerminalManager | null>(null);
+  const spareRef = useRef<SpareTerminal | null>(null);
+  const sparePendingRef = useRef<Promise<void> | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const ptySizeRef = useRef(new Map<string, string>());
+  const ptyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ptyLastSentRef = useRef(0);
 
-  if (!resizeTerminalRef.current) {
-    resizeTerminalRef.current = debounce(() => {
-      if (terminalFitAddonRef.current && activeTerminalRef.current && getCurrentSessionId()) {
-        try {
-          terminalFitAddonRef.current.fit();
-          const dimensions = terminalFitAddonRef.current.proposeDimensions();
-          if (dimensions && dimensions.cols && dimensions.rows) {
-            const api = (window as AppWindow).api;
-            api?.ssh?.resize(getCurrentSessionId(), dimensions.cols, dimensions.rows).catch((err: any) => {
-              if (!err.message || !err.message.includes('会话未找到')) console.error('调整终端大小失败:', err);
-            });
-          }
-        } catch (err) {
-          console.error('调整终端大小失败:', err);
-        }
-      }
-    }, 100);
-  }
+  // 把 fit 后的网格尺寸同步给后端 PTY（window_change）——否则 vim 等全屏程序仍按旧 TIOCGWINSZ 重绘，
+  // 滚动时 erase-line 范围与实际列数错位 → 旧帧残留、内容堆左侧。尺寸没变不重复发。
+  // 隐藏的后台终端容器无尺寸，proposeDimensions 返回空 → 自动跳过，不误改其 PTY。
+  const sendPtySize = (sessionId: string, fitAddon: FitAddon) => {
+    try {
+      const d = fitAddon.proposeDimensions();
+      if (!d || !d.cols || !d.rows) return;
+      const key = `${d.cols}x${d.rows}`;
+      if (ptySizeRef.current.get(sessionId) === key) return;
+      ptySizeRef.current.set(sessionId, key);
+      ptyLastSentRef.current = performance.now();
+      (window as AppWindow).api?.ssh?.resize(sessionId, d.cols, d.rows).catch((err: any) => {
+        ptySizeRef.current.delete(sessionId);
+        if (!err?.message || !err.message.includes('会话未找到')) console.error('调整终端大小失败:', err);
+      });
+    } catch (err) {
+      console.error('调整终端大小失败:', err);
+    }
+  };
 
-  const createXterm = async (container: HTMLElement | string, options: Record<string, unknown> = {}, sessionId: string | null = null) => {
+  const schedulePtySize = (sessionId: string, fitAddon: FitAddon) => {
+    const wait = PTY_RESIZE_INTERVAL_MS - (performance.now() - ptyLastSentRef.current);
+    if (wait <= 0) { sendPtySize(sessionId, fitAddon); return; }
+    if (ptyTimerRef.current) clearTimeout(ptyTimerRef.current);
+    ptyTimerRef.current = setTimeout(() => {
+      ptyTimerRef.current = null;
+      const id = activeSessionIdRef.current;
+      if (id && terminalFitAddonRef.current) sendPtySize(id, terminalFitAddonRef.current);
+    }, wait);
+  };
+
+  // 窗口/容器尺寸变化：每个动画帧重排一次（像原生终端那样拖动中实时跟随），并立刻贴底。
+  const resizeNow = () => {
+    const sessionId = activeSessionIdRef.current;
+    const fitAddon = terminalFitAddonRef.current;
+    if (!sessionId || !fitAddon || !activeTerminalRef.current || !getCurrentSessionId()) return;
+    try {
+      fitAddon.fit();
+      const host = terminalsRef.current.get(sessionId)?.host;
+      if (host) alignScreenToBottom(host);
+      schedulePtySize(sessionId, fitAddon);
+    } catch (err) {
+      console.error('调整终端大小失败:', err);
+    }
+  };
+  const resizeTerminal = () => {
+    if (resizeFrameRef.current !== null) return;
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      resizeNow();
+    });
+  };
+
+  // term.open() 之后挂 fit + GPU 渲染器，再 fit 一次。
+  const createXterm = async (container: HTMLElement | string, options: Record<string, unknown> = {}): Promise<BuiltTerminal> => {
     if (typeof container === 'string') container = document.getElementById(container)!;
-    // term.open() 之后挂 fit + canvas renderer，再 fit 一次并注册缩放监听。
-    const buildTerminal = (resolve: (value: { term: Terminal; fitAddon: FitAddon }) => void, reject: (reason?: unknown) => void) => {
-      try {
-        const term = createXtermInstance(options);
-        const fitAddon = new FitAddon();
-        term.loadAddon(fitAddon);
-        // Unicode 11 宽度表：默认 Unicode 6 把绝大多数 emoji 算成 1 格，Apple Color Emoji 字形实占 2 格。
-        term.loadAddon(new Unicode11Addon());
-        (term as any).unicode.activeVersion = '11';
-        term.open(container as HTMLElement);
-        loadCanvasRenderer(term);
-        try { if ((term as any)._core?.viewport) (term as any)._core.viewport.scrollBarWidth = 0; } catch (_) {}
-        fitAddon.fit();
-        attachResizeHandler(term, fitAddon, sessionId);
-        setTimeout(() => fitAddon.fit(), 100);
-        resolve({ term, fitAddon });
-      } catch (error) {
-        console.error('创建终端错误:', error);
-        reject(error);
-      }
+    const [mods] = await Promise.all([loadXterm(), waitForTerminalFont()]);
+    try {
+      const term = createXtermInstance(mods, options);
+      const fitAddon = new mods.FitAddon();
+      term.loadAddon(fitAddon);
+      // Unicode 11 宽度表：默认 Unicode 6 把绝大多数 emoji 算成 1 格，Apple Color Emoji 字形实占 2 格。
+      term.loadAddon(new mods.Unicode11Addon());
+      (term as any).unicode.activeVersion = '11';
+      term.open(container as HTMLElement);
+      const webgl = loadGpuRenderer(term, mods);
+      try { if ((term as any)._core?.viewport) (term as any)._core.viewport.scrollBarWidth = 0; } catch (_) {}
+      fitAddon.fit();
+      setTimeout(() => { try { fitAddon.fit(); } catch (_) {} }, 100);
+      return { term, fitAddon, webgl };
+    } catch (error) {
+      console.error('创建终端错误:', error);
+      throw error;
+    }
+  };
+
+  const sessionTermOptions = () => {
+    const userSettings = getTerminalSettings();
+    return {
+      cursorBlink: true, cursorStyle: 'bar', fontSize: userSettings.fontSize, fontFamily: userSettings.fontFamily,
+      theme: { ...TERM_THEME }, allowTransparency: true, blinkInterval: 500,
     };
-    return new Promise<{ term: Terminal; fitAddon: FitAddon }>((resolve, reject) => buildTerminal(resolve, reject));
+  };
+
+  const disposeBuilt = (built: BuiltTerminal & { host: HTMLDivElement }) => {
+    releaseWebgl(built.webgl);
+    try { built.term.dispose(); } catch (err) { console.warn('[dispose] term.dispose 失败:', err); }
+    if (built.host.parentNode) built.host.parentNode.removeChild(built.host);
+  };
+
+  // 预建一个备用终端（xterm 实例 + GPU 上下文 + 字形度量），隐藏在终端区里。
+  // 双击连接时直接认领它，不在连接路径上现建；同时它的 fit 结果就是新 PTY 的初始尺寸。
+  const buildSpare = async () => {
+    const container = containerRef.current;
+    if (!container || spareRef.current || !container.clientWidth || !container.clientHeight) return;
+    const host = makeHost(container);
+    host.style.visibility = 'hidden';
+    host.style.pointerEvents = 'none';
+    try {
+      const { fontSize, fontFamily } = getTerminalSettings();
+      const built = await createXterm(host, sessionTermOptions());
+      spareRef.current = { ...built, host, fontSize, fontFamily };
+    } catch (err) {
+      console.warn('[terminal] 预建终端失败:', err);
+      if (host.parentNode) host.parentNode.removeChild(host);
+    }
+  };
+
+  const prewarm = () => {
+    if (spareRef.current) return Promise.resolve();
+    sparePendingRef.current ??= buildSpare().finally(() => { sparePendingRef.current = null; });
+    return sparePendingRef.current;
+  };
+
+  const takeSpare = () => {
+    const spare = spareRef.current;
+    spareRef.current = null;
+    if (!spare) return null;
+    const { fontSize, fontFamily } = getTerminalSettings();
+    if (spare.fontSize !== fontSize || spare.fontFamily !== fontFamily) {
+      disposeBuilt(spare);
+      return null;
+    }
+    spare.host.style.visibility = '';
+    spare.host.style.pointerEvents = '';
+    return spare;
+  };
+
+  const proposeSize = () => {
+    const fitAddon = spareRef.current?.fitAddon || terminalFitAddonRef.current;
+    try {
+      const d = fitAddon?.proposeDimensions();
+      return d && d.cols && d.rows ? { cols: d.cols, rows: d.rows } : null;
+    } catch (_) {
+      return null;
+    }
   };
 
   const isPasswordPromptVisible = (term: Terminal | null) => {
@@ -325,8 +483,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       try { entry.term.focus(); } catch (err) { console.warn('[showTerminal] focus 失败:', err); }
       try {
         entry.fitAddon.fit();
-        const d = entry.fitAddon.proposeDimensions();
-        if (d && d.cols && d.rows && (window as AppWindow).api?.ssh) (window as AppWindow).api!.ssh.resize(sessionId, d.cols, d.rows).catch(() => {});
+        sendPtySize(sessionId, entry.fitAddon);
       } catch (err) { console.warn('[showTerminal] fit 失败:', err); }
     });
   };
@@ -348,19 +505,14 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
         return { term: existing.term, fitAddon: existing.fitAddon, isNew: false };
       }
       hideAllTerminalHosts();
-      const host = document.createElement('div');
-      host.className = 'term-host';
+      if (!spareRef.current && sparePendingRef.current) await sparePendingRef.current;
+      let built: (BuiltTerminal & { host: HTMLDivElement }) | null = takeSpare();
+      if (!built) {
+        const host = makeHost(container);
+        built = { ...(await createXterm(host, sessionTermOptions())), host };
+      }
+      const { term, fitAddon, webgl, host } = built;
       host.dataset.sessionId = sessionId;
-      host.style.position = 'absolute';
-      host.style.inset = '0';
-      container.appendChild(host);
-
-      const userSettings = getTerminalSettings();
-      const termOptions = {
-        cursorBlink: true, cursorStyle: 'bar', fontSize: userSettings.fontSize, fontFamily: userSettings.fontFamily,
-        theme: { ...TERM_THEME }, allowTransparency: true, blinkInterval: 500,
-      };
-      const { term, fitAddon } = await createXterm(host, termOptions, sessionId);
 
       const applyBg = (color: string | null) => {
         if (!color) return;
@@ -405,20 +557,22 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
         else if (disposer && typeof (disposer as any).dispose === 'function') dataDisposer = () => (disposer as any).dispose();
       } catch (err) { console.error('[initTerminal] 注册 onData 失败:', err); }
 
-      const entry: TerminalEntry = { term, fitAddon, host, dataDisposer, defaultBg: DEFAULT_TERM_BG, cleanup: (term as any)._cleanup || null };
+      const entry: TerminalEntry = { term, fitAddon, webgl, host, dataDisposer, defaultBg: DEFAULT_TERM_BG };
       terminalsRef.current.set(sessionId, entry);
       activeTerminalRef.current = term;
       terminalFitAddonRef.current = fitAddon;
       activeSessionIdRef.current = sessionId;
 
+      try { term.focus(); } catch (err) { console.warn('[initTerminal] focus 失败:', err); }
       requestAnimationFrame(() => {
-        try { term.focus(); } catch (err) { console.warn('[initTerminal] focus 失败:', err); }
         try {
           fitAddon.fit();
-          const d = fitAddon.proposeDimensions();
-          if (d && d.cols && d.rows && (window as AppWindow).api?.ssh) (window as AppWindow).api!.ssh.resize(sessionId, d.cols, d.rows).catch((err: unknown) => console.error('初始化调整终端大小失败:', err));
+          alignScreenToBottom(host);
+          sendPtySize(sessionId, fitAddon);
         } catch (err) { console.warn('[initTerminal] fit 失败:', err); }
       });
+      // 认领后立刻在空闲时补一个备用终端，给下一次连接用。
+      setTimeout(() => { void prewarm(); }, 300);
       return { term, fitAddon, isNew: true };
     } catch (error) {
       console.error('初始化终端失败:', error);
@@ -430,10 +584,9 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
     const entry = terminalsRef.current.get(sessionId);
     if (!entry) return;
     try { if (typeof entry.dataDisposer === 'function') entry.dataDisposer(); } catch (err) { console.warn('[dispose] dataDisposer 失败:', err); }
-    try { if (typeof entry.cleanup === 'function') entry.cleanup(); } catch (err) { console.warn('[dispose] cleanup 失败:', err); }
-    try { entry.term.dispose(); } catch (err) { console.warn('[dispose] term.dispose 失败:', err); }
-    if (entry.host.parentNode) entry.host.parentNode.removeChild(entry.host);
+    disposeBuilt(entry);
     terminalsRef.current.delete(sessionId);
+    ptySizeRef.current.delete(sessionId);
     if (activeSessionIdRef.current === sessionId) {
       activeTerminalRef.current = null;
       terminalFitAddonRef.current = null;
@@ -442,12 +595,11 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
   };
 
   const ensureTerminalVisible = () => {
-    if (terminalFitAddonRef.current && !isTabSwitchingRef.current) resizeTerminalRef.current!();
+    if (terminalFitAddonRef.current && !isTabSwitchingRef.current) resizeTerminal();
     if (activeTerminalRef.current && !isTabSwitchingRef.current) setTimeout(() => {
       try { activeTerminalRef.current?.focus(); } catch (err) { console.warn('聚焦终端失败:', err); }
     }, 100);
   };
-  const resizeTerminal = () => resizeTerminalRef.current!();
 
   if (!managerRef.current) {
     managerRef.current = {
@@ -461,13 +613,18 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       get isTabSwitching() { return isTabSwitchingRef.current; },
       set isTabSwitching(value) { isTabSwitchingRef.current = value; },
       createXterm, initTerminal, getTerminalForSession, isPasswordPromptVisible,
-      disposeTerminalInstance, ensureTerminalVisible, resizeTerminal,
+      disposeTerminalInstance, ensureTerminalVisible, resizeTerminal, prewarm, proposeSize,
+      syncPtySize: (sessionId: string) => {
+        const entry = terminalsRef.current.get(sessionId);
+        if (entry) sendPtySize(sessionId, entry.fitAddon);
+      },
     };
   }
 
   useEffect(() => {
     const unsubscribe = subscribe('activeTabId', () => {
-      if (getActiveTabId() !== 'terminal' || !activeTerminalRef.current) return;
+      if (getActiveTabId() !== 'terminal') return;
+      if (!activeTerminalRef.current) { void prewarm(); return; }
       requestAnimationFrame(() => {
         isTabSwitchingRef.current = true;
         ensureTerminalVisible();
@@ -478,16 +635,30 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       });
     });
     const container = containerRef.current;
+    // 容器尺寸变化（含窗口缩放）统一走这里；备用终端也跟着重排，保证它给出的初始尺寸是准的。
     const observer = typeof ResizeObserver === 'undefined' || !container
       ? null
       : new ResizeObserver(() => {
-        if (getActiveTabId() === 'terminal' && activeTerminalRef.current) resizeTerminal();
+        if (getActiveTabId() !== 'terminal') return;
+        if (activeTerminalRef.current) resizeTerminal();
+        const spare = spareRef.current;
+        if (spare) requestAnimationFrame(() => { try { spare.fitAddon.fit(); } catch (_) {} });
       });
     if (observer && container) observer.observe(container);
+    // 首屏画出后空闲时加载 xterm 并预建备用终端，不占启动关键路径。
+    const idle = (window as any).requestIdleCallback
+      ? (window as any).requestIdleCallback(() => { void prewarm(); }, { timeout: 1500 })
+      : setTimeout(() => { void prewarm(); }, 300);
     return () => {
       unsubscribe();
       observer?.disconnect();
+      if ((window as any).cancelIdleCallback) (window as any).cancelIdleCallback(idle); else clearTimeout(idle);
+      if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
+      if (ptyTimerRef.current) clearTimeout(ptyTimerRef.current);
       for (const sessionId of [...terminalsRef.current.keys()]) disposeTerminalInstance(sessionId);
+      const spare = spareRef.current;
+      spareRef.current = null;
+      if (spare) disposeBuilt(spare);
     };
   }, []);
 

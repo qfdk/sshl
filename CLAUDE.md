@@ -45,11 +45,18 @@ pnpm build             # Tauri application build
   maximize resizes the WKWebView while WebContent is launching and blocks the main thread ~430ms).
   It starts at alpha 0; `ui/src/main.tsx` must call `api.app.ready()` after the first painted frame,
   otherwise the window only appears at the 3s fallback. Do not hide the window instead: a hidden
-  WKWebView does not paint or fire rAF, so it would reveal a blank frame.
+  WKWebView does not paint or fire rAF, so it would reveal a blank frame. After first paint,
+  closing the main window (red button / ⌘W) only hides it and the process stays resident;
+  `RunEvent::Reopen` (Dock click) shows it again. ⌘Q quits.
 - **SFTP channel reuse** — one cached SFTP session is shared per SSH session.
-- **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` keeps CanvasAddon after
-  `term.open()`, Unicode11 registration, bottom alignment, ANSI background sampling, and
-  PTY resize synchronization. Do not reorder those paths.
+- **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` loads the GPU renderer
+  (WebglAddon, falling back to CanvasAddon on failure or context loss) after `term.open()`,
+  Unicode11 registration, bottom alignment, ANSI background sampling, and PTY resize
+  synchronization. Do not reorder those paths. xterm and its addons are a lazy chunk
+  (`loadXterm`); do not import them statically. A hidden spare terminal is prebuilt at idle and
+  claimed by `initTerminal`; its fitted size is sent as `cols`/`rows` with `ssh_connect` so the
+  PTY opens at the real grid size. Resize is per animation frame; PTY `window_change` is
+  deduped and throttled to ~30/s. Release WebGL contexts explicitly on dispose (xterm.js #6068).
 - **Bundled Nerd Font** — both JetBrainsMono Nerd Font weights are loaded from
   `ui/src/index.css` and `ui/src/assets/fonts/`; do not replace them with system fallback.
 - **Prompts** — use `alertDialog` / `confirmDialog` from `ui/src/lib/dialogs.ts` (rendered by

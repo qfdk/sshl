@@ -549,12 +549,9 @@ async fn run_channel(
     let mut exit_code: Option<u32> = None;
     let exit_reason: String;
 
-    // ssh:data 事件合并：累积 4ms 窗口或 32KB 上限内的数据为单次 emit，
-    // 避免 vim / tmux ctrl+B+F 等大流量爆发拖垮 webview IPC 队列。
-    const COALESCE_WINDOW: Duration = Duration::from_millis(4);
-    const COALESCE_MAX: usize = 32 * 1024;
     let mut pending = String::with_capacity(COALESCE_MAX);
     let mut flush_deadline: Option<tokio::time::Instant> = None;
+    let mut last_emit = tokio::time::Instant::now() - COALESCE_WINDOW;
     // 跨 chunk UTF-8 残字节暂存：SSH 数据按任意字节边界到达，一个多字节字符
     // （中文/emoji）可能被切在两个 chunk 之间。stdout / stderr 是独立字节流，各自一份。
     let mut utf8_out: Vec<u8> = Vec::new();
@@ -572,6 +569,7 @@ async fn run_channel(
                 if !pending.is_empty() {
                     emit_data(&app, &session_id, &pending);
                     pending.clear();
+                    last_emit = tokio::time::Instant::now();
                 }
                 flush_deadline = None;
             }
@@ -603,34 +601,14 @@ async fn run_channel(
                 match msg {
                     Some(russh::ChannelMsg::Data { data }) => {
                         let s = decode_stream_chunk(&mut utf8_out, &data);
-                        if !s.is_empty() {
-                            let emit = session.append_to_buffer(&s).await;
-                            if emit {
-                                pending.push_str(&s);
-                                if pending.len() >= COALESCE_MAX {
-                                    emit_data(&app, &session_id, &pending);
-                                    pending.clear();
-                                    flush_deadline = None;
-                                } else if flush_deadline.is_none() {
-                                    flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
-                                }
-                            }
+                        if !s.is_empty() && session.append_to_buffer(&s).await {
+                            queue_output(&app, &session_id, &s, &mut pending, &mut flush_deadline, &mut last_emit);
                         }
                     }
                     Some(russh::ChannelMsg::ExtendedData { data, ext: _ }) => {
                         let s = decode_stream_chunk(&mut utf8_err, &data);
-                        if !s.is_empty() {
-                            let emit = session.append_to_buffer(&s).await;
-                            if emit {
-                                pending.push_str(&s);
-                                if pending.len() >= COALESCE_MAX {
-                                    emit_data(&app, &session_id, &pending);
-                                    pending.clear();
-                                    flush_deadline = None;
-                                } else if flush_deadline.is_none() {
-                                    flush_deadline = Some(tokio::time::Instant::now() + COALESCE_WINDOW);
-                                }
-                            }
+                        if !s.is_empty() && session.append_to_buffer(&s).await {
+                            queue_output(&app, &session_id, &s, &mut pending, &mut flush_deadline, &mut last_emit);
                         }
                     }
                     Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
@@ -818,6 +796,37 @@ pub async fn ssh_get_session_buffer(
     Ok(buf)
 }
 
+// ssh:data 事件合并：累积 4ms 窗口或 32KB 上限内的数据为单次 emit，
+// 避免 vim / tmux ctrl+B+F 等大流量爆发拖垮 webview IPC 队列。
+const COALESCE_WINDOW: Duration = Duration::from_millis(4);
+const COALESCE_MAX: usize = 32 * 1024;
+
+/// 合并窗口按「前沿」触发：空闲后的第一包（按键回显、vim 单次重绘的开头）立刻发，
+/// 只有紧跟在刚发出的一包之后到达的数据才并进窗口。原来一律等满 4ms，每次按键回显都多 4ms。
+fn flush_output_now(pending_len: usize, flush_pending: bool, since_last_emit: Duration) -> bool {
+    pending_len >= COALESCE_MAX || (!flush_pending && since_last_emit >= COALESCE_WINDOW)
+}
+
+fn queue_output(
+    app: &AppHandle,
+    session_id: &str,
+    chunk: &str,
+    pending: &mut String,
+    flush_deadline: &mut Option<tokio::time::Instant>,
+    last_emit: &mut tokio::time::Instant,
+) {
+    pending.push_str(chunk);
+    let now = tokio::time::Instant::now();
+    if flush_output_now(pending.len(), flush_deadline.is_some(), now.duration_since(*last_emit)) {
+        emit_data(app, session_id, pending);
+        pending.clear();
+        *flush_deadline = None;
+        *last_emit = now;
+    } else if flush_deadline.is_none() {
+        *flush_deadline = Some(now + COALESCE_WINDOW);
+    }
+}
+
 pub fn emit_data(app: &AppHandle, session_id: &str, data: &str) {
     let _ = app.emit("ssh:data", SshDataEvent {
         session_id: session_id.to_string(),
@@ -854,7 +863,28 @@ pub(crate) fn decode_stream_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_stream_chunk, is_transient_connect_error};
+    use super::{decode_stream_chunk, flush_output_now, is_transient_connect_error, COALESCE_MAX, COALESCE_WINDOW};
+    use std::time::Duration;
+
+    #[test]
+    fn idle_output_goes_out_immediately() {
+        // 按键回显：距上次发送已超过合并窗口、也没有等待中的 flush → 立刻发，不再固定等 4ms。
+        assert!(flush_output_now(1, false, COALESCE_WINDOW));
+        assert!(flush_output_now(1, false, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn bursts_are_still_coalesced() {
+        // 刚发过一包：后续数据并进合并窗口，避免 vim / tmux 大量重绘拖垮 IPC。
+        assert!(!flush_output_now(64, false, Duration::from_millis(1)));
+        // 已有等待中的 flush：并进去，由定时器统一发。
+        assert!(!flush_output_now(64, true, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn full_batch_flushes_regardless_of_timing() {
+        assert!(flush_output_now(COALESCE_MAX, true, Duration::ZERO));
+    }
 
     #[test]
     fn treats_macos_host_down_as_transient() {

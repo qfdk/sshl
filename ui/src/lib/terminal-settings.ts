@@ -38,6 +38,7 @@ export type FontPreset = { label: string; value: string; group: string };
 
 type TerminalManagerLike = {
   terminals?: Map<string, { term: any; fitAddon: any }>;
+  syncPtySize?: (sessionId: string) => void;
 };
 
 type AppWindow = Window & { terminalManager?: TerminalManagerLike; api?: any };
@@ -158,10 +159,7 @@ function applyToAllTerminals(settings: TerminalSettings) {
           }
           entry.fitAddon.fit();
           entry.term.refresh(0, entry.term.rows - 1);
-          const d = entry.fitAddon.proposeDimensions();
-          if (d && d.cols && d.rows && getAppWindow().api?.ssh) {
-            getAppWindow().api.ssh.resize(sessionId, d.cols, d.rows).catch(() => {});
-          }
+          tm.syncPtySize?.(sessionId);
         } catch {}
       };
       const schedule = () => {

@@ -20,6 +20,7 @@
         "xterm-addon-canvas": "^0.5.0",
         "xterm-addon-fit": "^0.7.0",
         "xterm-addon-unicode11": "^0.6.0",
+        "xterm-addon-webgl": "0.16.0",
       },
       "devDependencies": {
         "@tailwindcss/vite": "^4.3.3",
@@ -372,6 +373,8 @@
     "xterm-addon-fit": ["xterm-addon-fit@0.7.0", "", { "peerDependencies": { "xterm": "^5.0.0" } }, "sha512-tQgHGoHqRTgeROPnvmtEJywLKoC/V9eNs4bLLz7iyJr1aW/QFzRwfd3MGiJ6odJd9xEfxcW36/xRU47JkD5NKQ=="],
 
     "xterm-addon-unicode11": ["xterm-addon-unicode11@0.6.0", "", { "peerDependencies": { "xterm": "^5.0.0" } }, "sha512-5pkb8YoS/deRtNqQRw8t640mu+Ga8B2MG3RXGQu0bwgcfr8XiXIRI880TWM49ICAHhTmnOLPzIIBIjEnCq7k2A=="],
+
+    "xterm-addon-webgl": ["xterm-addon-webgl@0.16.0", "", { "peerDependencies": { "xterm": "^5.0.0" } }, "sha512-E8cq1AiqNOv0M/FghPT+zPAEnvIQRDbAbkb04rRYSxUym69elPWVJ4sv22FCLBqM/3LcrmBLl/pELnBebVFKgA=="],
 
     "@tailwindcss/node/lightningcss": ["lightningcss@1.32.0", "", { "dependencies": { "detect-libc": "2.1.2" }, "optionalDependencies": { "lightningcss-android-arm64": "1.32.0", "lightningcss-darwin-arm64": "1.32.0", "lightningcss-darwin-x64": "1.32.0", "lightningcss-freebsd-x64": "1.32.0", "lightningcss-linux-arm-gnueabihf": "1.32.0", "lightningcss-linux-arm64-gnu": "1.32.0", "lightningcss-linux-arm64-musl": "1.32.0", "lightningcss-linux-x64-gnu": "1.32.0", "lightningcss-linux-x64-musl": "1.32.0", "lightningcss-win32-arm64-msvc": "1.32.0", "lightningcss-win32-x64-msvc": "1.32.0" } }, "sha512-NXYBzinNrblfraPGyrbPoD19C1h9lfI/1mzgWYvXUTe414Gz/X1FD2XBZSZM7rRTrMA8JL3OtAaGifrIKhQ5yQ=="],
 

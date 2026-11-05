@@ -54,6 +54,18 @@ export type ConnectionManager = {
 function appWindow() { return window as ApiWindow; }
 function errorText(error: unknown) { return (error as { message?: string })?.message || String(error || '未知错误'); }
 
+const LOADING_DELAY_MS = 300;
+
+// 按终端区的真实网格开 PTY：不带尺寸时后端按 80×24 开，shell 先按 80 列画提示符/MOTD，
+// 终端出来后再 window_change 重排，一连上就跳一下。尺寸来自预建的备用终端（同容器同字体）。
+async function withTerminalSize(details: unknown) {
+  const tm = appWindow().terminalManager;
+  if (!tm || !details || typeof details !== 'object') return details;
+  if (!tm.proposeSize()) await Promise.race([tm.prewarm(), new Promise(resolve => setTimeout(resolve, 150))]);
+  const size = tm.proposeSize();
+  return size ? { ...(details as Record<string, unknown>), cols: size.cols, rows: size.rows } : details;
+}
+
 export function useConnections(): ConnectionManager {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
@@ -87,14 +99,37 @@ export function useConnections(): ConnectionManager {
     }
   }, []);
 
+  // 连接遮罩延迟出现：预热池命中时整个连接 <300ms，像本地终端一样直接出终端，不闪一层毛玻璃。
+  // 慢连接（冷握手、远端慢）超过阈值才显示，仍可点取消；Esc 取消不依赖遮罩。
+  const loadingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadingShown = useRef(false);
+  const pendingLoading = useRef<string | null>(null);
+  const showLoading = useCallback((text: string) => {
+    pendingLoading.current = text;
+    if (loadingShown.current) { setLoadingText(text); return; }
+    if (loadingTimer.current) return;
+    loadingTimer.current = setTimeout(() => {
+      loadingTimer.current = null;
+      if (pendingLoading.current === null) return;
+      loadingShown.current = true;
+      setLoadingText(pendingLoading.current);
+    }, LOADING_DELAY_MS);
+  }, []);
+  const hideLoading = useCallback(() => {
+    pendingLoading.current = null;
+    if (loadingTimer.current) { clearTimeout(loadingTimer.current); loadingTimer.current = null; }
+    loadingShown.current = false;
+    setLoadingText(null);
+  }, []);
+
   const beginConnectionAttempt = useCallback(() => {
     const id = window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const attempt: Attempt = { id, cancelled: false, resolved: false, sessionId: null };
     activeAttempt.current = attempt;
     setIsConnecting(true);
-    setLoadingText('正在连接服务器...');
+    showLoading('正在连接服务器...');
     return attempt;
-  }, []);
+  }, [showLoading]);
 
   const cancelConnectionAttempt = useCallback(async () => {
     const attempt = activeAttempt.current;
@@ -104,7 +139,7 @@ export function useConnections(): ConnectionManager {
       activeAttempt.current = null;
       setIsConnecting(false);
     }
-    setLoadingText(null);
+    hideLoading();
     if (attempt.sessionId) {
       await appWindow().api.ssh.disconnect(attempt.sessionId);
       return;
@@ -113,23 +148,23 @@ export function useConnections(): ConnectionManager {
   }, []);
 
   const waitForConnection = useCallback(async (details: unknown, attempt: Attempt) => {
-    const result = await appWindow().api.ssh.connect(details, attempt.id);
+    const result = await appWindow().api.ssh.connect(await withTerminalSize(details), attempt.id);
     if (result?.success) attempt.sessionId = result.sessionId;
     attempt.resolved = true;
     if (attempt.cancelled) {
       if (attempt.sessionId) await appWindow().api.ssh.disconnect(attempt.sessionId);
       return null;
     }
-    if (result?.success) setLoadingText('正在准备终端...');
+    if (result?.success) showLoading('正在准备终端...');
     return result;
-  }, []);
+  }, [showLoading]);
 
   const finishConnectionAttempt = useCallback((attempt: Attempt) => {
     if (activeAttempt.current !== attempt) return;
     activeAttempt.current = null;
     setIsConnecting(false);
-    setLoadingText(null);
-  }, []);
+    hideLoading();
+  }, [hideLoading]);
 
   const updateConnectionStatus = useCallback((connected: boolean, name = '', host = '') => {
     appWindow().uiManager?.updateConnectionStatus?.(connected, name);
@@ -188,7 +223,7 @@ export function useConnections(): ConnectionManager {
         const connection = currentConnections.find((item: Connection) => item.id === connectionId);
         if (!connection) return false;
         try {
-          const result = await appWindow().api.ssh.connect(connection);
+          const result = await appWindow().api.ssh.connect(await withTerminalSize(connection));
           if (result.success) {
             setCurrentSessionId(result.sessionId);
             const terminalInfo = await appWindow().terminalManager!.initTerminal(result.sessionId, null, false);
@@ -244,8 +279,9 @@ export function useConnections(): ConnectionManager {
     if (activeAttempt.current || isConnecting) return;
     let attempt: Attempt | null = null;
     try {
-      const currentConnections = await appWindow().api.config.getConnections();
-      const connection = currentConnections.find((item: Connection) => item.id === id);
+      // 列表已在内存里（loadConnections 维护），双击不再先走一趟 IPC 读库；找不到再回落读库。
+      const connection = connectionsRef.current.find(item => item.id === id)
+        || (await appWindow().api.config.getConnections()).find((item: Connection) => item.id === id);
       if (!connection) return;
       const sessionInfo = sessionManager.getSessionByConnectionId(connection.id);
       if (sessionInfo) {
@@ -269,7 +305,8 @@ export function useConnections(): ConnectionManager {
           console.warn(`[连接] 激活会话失败:`, err);
         }
         updateConnectionStatus(true, connection.name, connection.host);
-        await loadConnections();
+        finishConnectionAttempt(attempt);
+        void loadConnections();
       } else {
         void alertDialog({ title: '连接失败', message: result?.error || '未知错误' });
       }

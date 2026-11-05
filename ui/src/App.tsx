@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from 'react';
 import { ChevronDown, KeyRound, Power } from 'lucide-react';
 import { getActiveTabId, getCurrentSessionId, setActiveTabId, subscribe } from './lib/app-state';
 import sessionManager from './lib/session-manager';
@@ -9,14 +9,16 @@ import { TooltipProvider } from './components/ui/tooltip';
 import { SessionTabs } from './layout/SessionTabs';
 import { Sidebar } from './layout/Sidebar';
 import { Terminal } from './layout/Terminal';
-import { FileManager } from './features/files/FileManager';
-import { ConnectionDialog } from './layout/ConnectionDialog';
-import { SettingsDialog } from './layout/SettingsDialog';
 import { DialogHost } from './layout/DialogHost';
 import { alertDialog } from './lib/dialogs';
 import { useTabShortcuts } from './lib/tab-shortcuts';
 import { cn } from './lib/utils';
 import { useConnections } from './features/connections/useConnections';
+
+// 首屏用不到的大块单独成包：第一帧不等它们解析执行，首屏渲染时即开始并行加载，画完马上就位。
+const FileManager = lazy(() => import('./features/files/FileManager').then(m => ({ default: m.FileManager })));
+const ConnectionDialog = lazy(() => import('./layout/ConnectionDialog').then(m => ({ default: m.ConnectionDialog })));
+const SettingsDialog = lazy(() => import('./layout/SettingsDialog').then(m => ({ default: m.SettingsDialog })));
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
 
@@ -118,15 +120,17 @@ export function App() {
             <div className="min-h-0 flex-1">
               {/* 整块面板不画焦点环：点过面板里的空白再按 Esc 等键，会给整个区域套一圈蓝框 */}
               <TabsContent value="terminal" id="terminal-tab" forceMount className="m-0 h-full focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"><Terminal /></TabsContent>
-              <TabsContent value="file-manager" id="file-manager-tab" forceMount className="m-0 h-full focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"><FileManager /></TabsContent>
+              <TabsContent value="file-manager" id="file-manager-tab" forceMount className="m-0 h-full focus-visible:ring-0 focus-visible:ring-offset-0 data-[state=inactive]:hidden"><Suspense fallback={null}><FileManager /></Suspense></TabsContent>
             </div>
           </Tabs>
         </main>
       </div>
       <div className="flex h-7 shrink-0 items-center gap-2 px-4 text-xs text-muted-foreground"><span>{status.connected ? `已连接: ${status.name}${status.host ? ` · ${status.host}` : ''}` : '未连接'}</span></div>
       {connections.loadingText && <div className="fixed inset-0 z-50 grid place-items-center bg-background/70 backdrop-blur-sm"><div className="flex items-center gap-3 rounded-lg border border-border bg-card px-5 py-4 shadow-xl"><span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" /><span>{connections.loadingText}</span><button type="button" className="rounded border border-border px-2 py-1 text-xs hover:bg-muted" onClick={() => void connections.cancel()}>取消</button></div></div>}
-      <ConnectionDialog manager={connections} />
-      <SettingsDialog />
+      <Suspense fallback={null}>
+        <ConnectionDialog manager={connections} />
+        <SettingsDialog />
+      </Suspense>
       <DialogHost />
     </div>
     </TooltipProvider>

@@ -21,15 +21,18 @@ use state::AppState;
 fn disable_press_and_hold() {
     use objc2_foundation::{NSString, NSUserDefaults};
 
-    // 1) 持久化到 app domain plist —— WKWebView 的 WebContent 子进程通过 plist 继承。
-    let _ = std::process::Command::new("defaults")
-        .args(["write", "me.qfdk.sshl", "ApplePressAndHoldEnabled", "-bool", "false"])
-        .status();
-
-    // 2) 立即写入当前进程 standardUserDefaults
     unsafe {
         let defaults = NSUserDefaults::standardUserDefaults();
         let key = NSString::from_str("ApplePressAndHoldEnabled");
+        // 1) 持久化到 app domain plist —— WKWebView 的 WebContent 子进程通过 plist 继承。
+        //    只在还没写过时跑一次 `defaults`：同步起子进程每次启动都要多花约 20ms。
+        let persisted = defaults.objectForKey(&key).is_some() && !defaults.boolForKey(&key);
+        if !persisted {
+            let _ = std::process::Command::new("defaults")
+                .args(["write", "me.qfdk.sshl", "ApplePressAndHoldEnabled", "-bool", "false"])
+                .status();
+        }
+        // 2) 立即写入当前进程 standardUserDefaults
         defaults.setBool_forKey(false, &key);
     }
 }
@@ -111,8 +114,29 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // 关窗口（红点 / ⌘W）只隐藏、进程常驻：会话、预热连接、已渲染的界面都留着，
+        // 再点 Dock 图标就是直接显示，不再走一遍 AppKit + WebKit 冷启动。⌘Q 走 terminate，照常退出。
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 /// 前端没报 ready（脚本异常等）时也要把窗口显示出来。
