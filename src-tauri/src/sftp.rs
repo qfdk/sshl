@@ -332,8 +332,14 @@ fn split_remote(path: &str) -> Option<(String, String)> {
     Some((dir.to_string(), name.to_string()))
 }
 
+/// 只验 sudo 能不能用（密码对不对、有没有权限），不做任何事。放在上传之前：密码错不会白传一遍大文件。
+fn sudo_check_command(with_password: bool) -> String {
+    let auth = if with_password { "-S -p ''" } else { "-n" };
+    format!("LC_ALL=C sudo {auth} true")
+}
+
 /// 登录用户没有目标目录写权限时的上传（前端在普通上传报 Permission denied 后、用户确认才调用）：
-/// 1) 以登录用户身份传到 0700 暂存区；2) sudo 以目标目录属主身份解包到位（见 sudo_extract_command）；
+/// 0) 先验 sudo；1) 以登录用户身份传到 0700 暂存区；2) sudo 以目标目录属主身份解包到位（见 sudo_extract_command）；
 /// 3) 无论成败都删暂存区。sudo 密码：前端传入 > 连接保存的登录密码 > 免密 sudo（-n）。
 #[tauri::command]
 pub async fn file_upload_sudo(
@@ -350,6 +356,16 @@ pub async fn file_upload_sudo(
     let sftp = sftp_for(&session).await?;
     let (dest_dir, name) = split_remote(&remote_path)
         .ok_or_else(|| AppError::Other(format!("无效的上传路径: {remote_path}")))?;
+    let password = sudo_password
+        .filter(|p| !p.is_empty())
+        .or_else(|| session.connection_id.as_deref().and_then(|cid| load_secret(cid, "password")));
+    let input = password.as_ref().map(|p| format!("{p}\n"));
+    let stdin = input.as_deref().map(str::as_bytes);
+
+    let (status, _, err) = exec_capture(open_exec_channel(&session).await?, &sudo_check_command(password.is_some()), stdin).await?;
+    if status != 0 {
+        return Err(AppError::Other(format!("{}: {}", sudo_failure(&err), err.trim())));
+    }
 
     // /var/tmp 落盘（/tmp 常是内存盘，大文件会撑满），不可用再退回 /tmp。mktemp -d 建出来即 0700。
     let (status, out, err) = exec_capture(
@@ -369,16 +385,8 @@ pub async fn file_upload_sudo(
         } else {
             upload_file_to(&app, &sftp, &session_id, &local_path, &staged, &remote_path).await?;
         }
-        let password = sudo_password
-            .filter(|p| !p.is_empty())
-            .or_else(|| session.connection_id.as_deref().and_then(|cid| load_secret(cid, "password")));
         let cmd = sudo_extract_command(password.is_some(), &staging, &dest_dir, &name);
-        let input = password.map(|p| format!("{p}\n"));
-        let (status, _, err) = exec_capture(
-            open_exec_channel(&session).await?,
-            &cmd,
-            input.as_deref().map(str::as_bytes),
-        ).await?;
+        let (status, _, err) = exec_capture(open_exec_channel(&session).await?, &cmd, stdin).await?;
         if status != 0 {
             return Err(AppError::Other(format!("{}: {}", sudo_failure(&err), err.trim())));
         }
@@ -1038,7 +1046,7 @@ mod tests {
     use super::{
         download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        split_remote, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
+        split_remote, sudo_check_command, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
         DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
     };
 
@@ -1104,6 +1112,8 @@ mod tests {
         assert!(cmd.contains("sudo -n "));
         assert!(!cmd.contains("-S"));
         assert!(sudo_extract_command(true, "/tmp/s", "/home/bob", "f").contains("sudo -S -p ''"));
+        assert_eq!(sudo_check_command(false), "LC_ALL=C sudo -n true");
+        assert_eq!(sudo_check_command(true), "LC_ALL=C sudo -S -p '' true");
     }
 
     /// 真实 Linux（GNU tar/stat + 真 sudo）上的 sudo 上传：
@@ -1135,6 +1145,14 @@ mod tests {
         let alice = crate::ssh::do_handshake(host, port, "alice", Some("alicepw"), None, None).await.unwrap();
         assert_ne!(exec(&alice, "touch /home/bob/uploads/x", None).await.0, 0, "前提：alice 不能直接写 bob 的目录");
 
+        // 上传前的 sudo 预检：密码错 / 没给密码在传文件之前就能识别
+        let (st, _, err) = exec(&alice, &sudo_check_command(true), Some(b"wrong\n")).await;
+        assert_ne!(st, 0);
+        assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_INCORRECT", "{err}");
+        let (_, _, err) = exec(&alice, &sudo_check_command(false), None).await;
+        assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_REQUIRED", "{err}");
+        assert_eq!(exec(&alice, &sudo_check_command(true), Some(b"alicepw\n")).await.0, 0);
+
         let staging = stage(&alice).await;
         let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, "it's a.txt"), Some(b"wrong\n")).await;
         assert_ne!(st, 0);
@@ -1159,11 +1177,16 @@ mod tests {
         let staging = stage(&carol).await;
         let (_, _, err) = exec(&carol, &sudo_extract_command(true, &staging, dest, "it's a.txt"), Some(b"carolpw\n")).await;
         assert_eq!(sudo_failure(&err), "SUDO_NOT_ALLOWED", "{err}");
+        let (_, _, err) = exec(&carol, &sudo_check_command(true), Some(b"carolpw\n")).await;
+        assert_eq!(sudo_failure(&err), "SUDO_NOT_ALLOWED", "{err}");
+        exec(&carol, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
 
         let dave = crate::ssh::do_handshake(host, port, "dave", Some("davepw"), None, None).await.unwrap();
         let staging = stage(&dave).await;
         let (st, _, err) = exec(&dave, &sudo_extract_command(false, &staging, dest, "existing"), None).await;
         assert_eq!(st, 0, "免密 sudo 走 -n：{err}");
+        assert_eq!(exec(&dave, &sudo_check_command(false), None).await.0, 0);
+        exec(&dave, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
     }
 
     #[test]
