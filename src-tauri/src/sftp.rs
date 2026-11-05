@@ -17,6 +17,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::AsyncWriteExt;
 
+use crate::config_store::load_secret;
 use crate::error::{AppError, AppResult};
 use crate::ssh::SshSession;
 use crate::state::AppState;
@@ -273,18 +274,30 @@ pub async fn file_upload(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    let total = tokio::fs::metadata(&local_path).await.map(|m| m.len()).unwrap_or(0);
+    upload_file_to(&app, &sftp, &session_id, &local_path, &remote_path, &remote_path).await
+}
+
+/// 上传单个文件到 `remote_path`；进度事件按 `progress_path` 上报（sudo 上传写暂存区，但进度仍报目标路径）。
+async fn upload_file_to(
+    app: &AppHandle,
+    sftp: &SftpSession,
+    session_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    progress_path: &str,
+) -> AppResult<()> {
+    let total = tokio::fs::metadata(local_path).await.map(|m| m.len()).unwrap_or(0);
     let mut file = sftp.open_with_flags(
-        &remote_path,
+        remote_path,
         OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
     ).await.map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
     // 进度事件按 100ms 节流，避免大文件刷爆 webview 事件队列（与下载侧一致）。
     let mut last_emit = std::time::Instant::now();
-    stream_to_remote(&local_path, &mut file, &remote_path, |transferred| {
+    stream_to_remote(local_path, &mut file, remote_path, |transferred| {
         if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
-            emit_upload_progress(&app, UploadProgress {
-                session_id: session_id.clone(),
-                remote_path: remote_path.clone(),
+            emit_upload_progress(app, UploadProgress {
+                session_id: session_id.to_string(),
+                remote_path: progress_path.to_string(),
                 transferred,
                 total,
                 files_done: None,
@@ -296,15 +309,86 @@ pub async fn file_upload(
     file.shutdown().await
         .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))?;
     // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
-    emit_upload_progress(&app, UploadProgress {
-        session_id,
-        remote_path,
+    emit_upload_progress(app, UploadProgress {
+        session_id: session_id.to_string(),
+        remote_path: progress_path.to_string(),
         transferred: total,
         total,
         files_done: None,
         files_total: None,
     });
     Ok(())
+}
+
+/// 远程路径拆成（父目录, 名字）。"/a/b/" → ("/a", "b")，"/x" → ("/", "x")。
+fn split_remote(path: &str) -> Option<(String, String)> {
+    let trimmed = path.trim_end_matches('/');
+    let idx = trimmed.rfind('/')?;
+    let name = &trimmed[idx + 1..];
+    if name.is_empty() {
+        return None;
+    }
+    let dir = if idx == 0 { "/" } else { &trimmed[..idx] };
+    Some((dir.to_string(), name.to_string()))
+}
+
+/// 登录用户没有目标目录写权限时的上传（前端在普通上传报 Permission denied 后、用户确认才调用）：
+/// 1) 以登录用户身份传到 0700 暂存区；2) sudo 以目标目录属主身份解包到位（见 sudo_extract_command）；
+/// 3) 无论成败都删暂存区。sudo 密码：前端传入 > 连接保存的登录密码 > 免密 sudo（-n）。
+#[tauri::command]
+pub async fn file_upload_sudo(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    local_path: String,
+    remote_path: String,
+    is_directory: bool,
+    sudo_password: Option<String>,
+) -> AppResult<()> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let sftp = sftp_for(&session).await?;
+    let (dest_dir, name) = split_remote(&remote_path)
+        .ok_or_else(|| AppError::Other(format!("无效的上传路径: {remote_path}")))?;
+
+    // /var/tmp 落盘（/tmp 常是内存盘，大文件会撑满），不可用再退回 /tmp。mktemp -d 建出来即 0700。
+    let (status, out, err) = exec_capture(
+        open_exec_channel(&session).await?,
+        "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX 2>/dev/null || mktemp -d /tmp/.sshl-upload.XXXXXXXX",
+        None,
+    ).await?;
+    let staging = out.trim().to_string();
+    if status != 0 || staging.is_empty() {
+        return Err(AppError::Other(format!("创建暂存目录失败: {}", err.trim())));
+    }
+
+    let result = async {
+        let staged = join_remote(&staging, &name);
+        if is_directory {
+            upload_tree_to(&app, &sftp, &session_id, &local_path, &staged, &remote_path).await?;
+        } else {
+            upload_file_to(&app, &sftp, &session_id, &local_path, &staged, &remote_path).await?;
+        }
+        let password = sudo_password
+            .filter(|p| !p.is_empty())
+            .or_else(|| session.connection_id.as_deref().and_then(|cid| load_secret(cid, "password")));
+        let cmd = sudo_extract_command(password.is_some(), &staging, &dest_dir, &name);
+        let input = password.map(|p| format!("{p}\n"));
+        let (status, _, err) = exec_capture(
+            open_exec_channel(&session).await?,
+            &cmd,
+            input.as_deref().map(str::as_bytes),
+        ).await?;
+        if status != 0 {
+            return Err(AppError::Other(format!("{}: {}", sudo_failure(&err), err.trim())));
+        }
+        Ok(())
+    }.await;
+
+    if let Ok(channel) = open_exec_channel(&session).await {
+        let _ = exec_capture(channel, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
+    }
+    result
 }
 
 /// 分块从本地文件流式写入 SFTP 远端句柄，避免大文件一次性读进内存。
@@ -697,16 +781,28 @@ pub async fn file_upload_directory(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    let plan = scan_local(PathBuf::from(local_path), remote_path.clone()).await?;
+    upload_tree_to(&app, &sftp, &session_id, &local_path, &remote_path, &remote_path).await
+}
+
+/// 上传整个本地目录到 `remote_path`；进度事件按 `progress_path` 上报。
+async fn upload_tree_to(
+    app: &AppHandle,
+    sftp: &SftpSession,
+    session_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    progress_path: &str,
+) -> AppResult<()> {
+    let plan = scan_local(PathBuf::from(local_path), remote_path.to_string()).await?;
     for dir in &plan.dirs {
         // 已存在不算错（mkdir -p 语义）。
         let _ = sftp.create_dir(dir).await;
     }
     let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
     let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
-        emit_upload_progress(&app, UploadProgress {
-            session_id: session_id.clone(),
-            remote_path: remote_path.clone(),
+        emit_upload_progress(app, UploadProgress {
+            session_id: session_id.to_string(),
+            remote_path: progress_path.to_string(),
             transferred,
             total,
             files_done: Some(files_done),
@@ -836,6 +932,79 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", escaped)
 }
 
+/// sudo 上传第二步：把暂存区里的条目 `name` 以**目标目录属主**的身份解包进 `dest_dir`。
+/// root 读暂存区（0700，属于登录用户），`sudo -u #<属主 uid> tar x` 写入：新文件直接归属主、
+/// 目录里已有文件的属主不变。只打包条目本身（不带 "."），否则解包会把目标目录权限改成暂存区的 0700。
+/// GNU tar 解包默认会改写已存在目录的权限（合并上传时把属主原来的 755 改成 775），加 --no-overwrite-dir；
+/// BSD tar 本就不改、也不认这个参数，所以只对 GNU 加。
+/// stat 先试 GNU（-c），再回落 BSD（-f）。LC_ALL=C 让 sudo 的报错保持英文，便于识别。
+fn sudo_extract_command(with_password: bool, staging: &str, dest_dir: &str, name: &str) -> String {
+    let auth = if with_password { "-S -p ''" } else { "-n" };
+    let script = "set -e; uid=$(stat -c %u -- \"$2\" 2>/dev/null || stat -f %u -- \"$2\"); \
+                  keep=; tar --version 2>/dev/null | grep -q GNU && keep=--no-overwrite-dir; \
+                  tar -C \"$1\" -cf - -- \"$3\" | sudo -u \"#$uid\" tar -C \"$2\" $keep -xf -";
+    format!(
+        "LC_ALL=C sudo {auth} sh -c '{script}' sshl-sudo {} {} {}",
+        shell_quote(staging),
+        shell_quote(dest_dir),
+        shell_quote(name),
+    )
+}
+
+/// 把 sudo 失败的 stderr 归成前端可识别的标记（前端据此决定是否弹框要密码）。
+fn sudo_failure(stderr: &str) -> &'static str {
+    let s = stderr.to_ascii_lowercase();
+    if s.contains("incorrect password") || s.contains("sorry, try again") {
+        "SUDO_PASSWORD_INCORRECT"
+    } else if s.contains("a password is required") || s.contains("no password was provided") || s.contains("a terminal is required") {
+        "SUDO_PASSWORD_REQUIRED"
+    } else if s.contains("not in the sudoers") || s.contains("is not allowed to") {
+        "SUDO_NOT_ALLOWED"
+    } else if s.contains("must have a tty") {
+        "SUDO_TTY_REQUIRED"
+    } else {
+        "SUDO_FAILED"
+    }
+}
+
+/// 跑一条命令：可选写入 stdin（写完即 EOF），收集退出码和 stdout/stderr。
+async fn exec_capture(
+    mut channel: russh::Channel<russh::client::Msg>,
+    cmd: &str,
+    stdin: Option<&[u8]>,
+) -> AppResult<(u32, String, String)> {
+    channel.exec(true, cmd.as_bytes()).await
+        .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
+    if let Some(input) = stdin {
+        channel.data(input).await
+            .map_err(|e| AppError::Ssh(format!("exec stdin: {e}")))?;
+    }
+    channel.eof().await
+        .map_err(|e| AppError::Ssh(format!("exec eof: {e}")))?;
+    let (mut out, mut err, mut status) = (Vec::new(), Vec::new(), None);
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { data } => out.extend_from_slice(&data),
+            russh::ChannelMsg::ExtendedData { data, .. } => err.extend_from_slice(&data),
+            russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+            russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok((
+        status.unwrap_or(255),
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&err).into_owned(),
+    ))
+}
+
+async fn open_exec_channel(session: &SshSession) -> AppResult<russh::Channel<russh::client::Msg>> {
+    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
+    let handle = session.handle.lock().await;
+    handle.channel_open_session().await
+        .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))
+}
+
 async fn drain_exec(
     mut channel: russh::Channel<russh::client::Msg>,
     cmd: &str,
@@ -869,9 +1038,152 @@ mod tests {
     use super::{
         download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        transfer_files_concurrently, DirProgress, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN,
-        TRANSFER_CHUNK,
+        split_remote, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
+        DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
     };
+
+    /// 假 sudo：按真 sudo 的参数形态吃掉 -S（读一行密码）/-p ''/-n/-u 用户，然后原样执行命令。
+    /// 用来在本机跑通 sudo_extract_command 生成的整条 shell（引号、tar、stat 回落）。
+    fn run_with_fake_sudo(cmd: &str, stdin: &[u8]) -> std::process::Output {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let bin = std::env::temp_dir().join(format!("sshl-fake-sudo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&bin).unwrap();
+        let sudo = bin.join("sudo");
+        std::fs::write(&sudo, "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -S) read -r _pw; shift;; -p|-u) shift 2;; -n) shift;; *) break;; esac; done\nexec \"$@\"\n").unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let mut child = std::process::Command::new("sh").arg("-c").arg(cmd).env("PATH", path)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&bin);
+        out
+    }
+
+    #[test]
+    fn sudo_extract_places_file_with_awkward_name_into_target_dir() {
+        let root = std::env::temp_dir().join(format!("sshl-sudo-{}", uuid::Uuid::new_v4()));
+        let (staging, dest) = (root.join("staging"), root.join("dest dir"));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(staging.join("it's a file.txt"), b"hello").unwrap();
+        let cmd = sudo_extract_command(true, &staging.to_string_lossy(), &dest.to_string_lossy(), "it's a file.txt");
+        let out = run_with_fake_sudo(&cmd, b"secret\n");
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read(dest.join("it's a file.txt")).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sudo_extract_merges_directory_tree_without_touching_target_dir_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("sshl-sudo-{}", uuid::Uuid::new_v4()));
+        let (staging, dest) = (root.join("staging"), root.join("dest"));
+        std::fs::create_dir_all(staging.join("my dir/sub")).unwrap();
+        std::fs::write(staging.join("my dir/sub/a.txt"), b"A").unwrap();
+        std::fs::create_dir_all(dest.join("my dir")).unwrap();
+        std::fs::write(dest.join("my dir/keep.txt"), b"K").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 真实暂存区由 mktemp -d 建，是 0700。
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cmd = sudo_extract_command(false, &staging.to_string_lossy(), &dest.to_string_lossy(), "my dir");
+        let out = run_with_fake_sudo(&cmd, b"");
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read(dest.join("my dir/sub/a.txt")).unwrap(), b"A");
+        // 合并进已有目录：原有文件保留；只打包条目本身，不带 "."，目标目录的权限不会被改成暂存区的 0700。
+        assert_eq!(std::fs::read(dest.join("my dir/keep.txt")).unwrap(), b"K");
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o755);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sudo_extract_uses_non_interactive_sudo_without_password() {
+        let cmd = sudo_extract_command(false, "/tmp/s", "/home/bob", "f");
+        assert!(cmd.contains("sudo -n "));
+        assert!(!cmd.contains("-S"));
+        assert!(sudo_extract_command(true, "/tmp/s", "/home/bob", "f").contains("sudo -S -p ''"));
+    }
+
+    /// 真实 Linux（GNU tar/stat + 真 sudo）上的 sudo 上传：
+    /// `docker build -t sshl-sudo-test -f tests/fixtures-sudo.Dockerfile tests && docker run -d --rm -p 127.0.0.1:2223:22 sshl-sudo-test` 后
+    /// `SSHL_SUDO_IT=127.0.0.1:2223 cargo test --lib sudo_upload_against_real_linux -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 SSHL_SUDO_IT=host:port 指向 sudo 测试容器"]
+    async fn sudo_upload_against_real_linux() {
+        use super::exec_capture;
+        let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
+        let (host, port) = target.split_once(':').unwrap();
+        let port: u16 = port.parse().unwrap();
+        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+        async fn exec(h: &H, cmd: &str, stdin: Option<&[u8]>) -> (u32, String, String) {
+            let ch = h.lock().await.channel_open_session().await.unwrap();
+            exec_capture(ch, cmd, stdin).await.unwrap()
+        }
+        async fn stage(h: &H) -> String {
+            let (st, out, _) = exec(h, "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX", None).await;
+            assert_eq!(st, 0);
+            let s = out.trim().to_string();
+            let (st, _, err) = exec(h, &format!(
+                "cd {0} && printf hi > \"it's a.txt\" && mkdir -p existing/sub && printf new > existing/sub/new.txt",
+                shell_quote(&s)), None).await;
+            assert_eq!(st, 0, "{err}");
+            s
+        }
+        let dest = "/home/bob/uploads";
+        let alice = crate::ssh::do_handshake(host, port, "alice", Some("alicepw"), None, None).await.unwrap();
+        assert_ne!(exec(&alice, "touch /home/bob/uploads/x", None).await.0, 0, "前提：alice 不能直接写 bob 的目录");
+
+        let staging = stage(&alice).await;
+        let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, "it's a.txt"), Some(b"wrong\n")).await;
+        assert_ne!(st, 0);
+        assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_INCORRECT", "{err}");
+        let (st, _, err) = exec(&alice, &sudo_extract_command(false, &staging, dest, "it's a.txt"), None).await;
+        assert_ne!(st, 0);
+        assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_REQUIRED", "{err}");
+        for name in ["it's a.txt", "existing"] {
+            let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, name), Some(b"alicepw\n")).await;
+            assert_eq!(st, 0, "{name}: {err}");
+        }
+        let (_, out, _) = exec(&alice, "cd /home/bob/uploads && stat -c '%U %a %n' . existing existing/keep.txt existing/sub existing/sub/new.txt \"it's a.txt\" && cat \"it's a.txt\" existing/sub/new.txt", None).await;
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "bob 755 .", "目标目录权限不能变：{out}");
+        assert_eq!(lines[1], "bob 755 existing", "合并进已有目录时不能改它的权限：{out}");
+        assert!(lines[2].starts_with("bob ") && lines[2].ends_with(" existing/keep.txt"), "{out}");
+        assert!(lines[3].starts_with("bob ") && lines[4].starts_with("bob ") && lines[5].starts_with("bob "), "新文件归目录属主：{out}");
+        assert_eq!(lines[6], "hinew", "{out}");
+        exec(&alice, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
+
+        let carol = crate::ssh::do_handshake(host, port, "carol", Some("carolpw"), None, None).await.unwrap();
+        let staging = stage(&carol).await;
+        let (_, _, err) = exec(&carol, &sudo_extract_command(true, &staging, dest, "it's a.txt"), Some(b"carolpw\n")).await;
+        assert_eq!(sudo_failure(&err), "SUDO_NOT_ALLOWED", "{err}");
+
+        let dave = crate::ssh::do_handshake(host, port, "dave", Some("davepw"), None, None).await.unwrap();
+        let staging = stage(&dave).await;
+        let (st, _, err) = exec(&dave, &sudo_extract_command(false, &staging, dest, "existing"), None).await;
+        assert_eq!(st, 0, "免密 sudo 走 -n：{err}");
+    }
+
+    #[test]
+    fn splits_remote_path_into_parent_and_name() {
+        assert_eq!(split_remote("/home/bob/a.txt"), Some(("/home/bob".into(), "a.txt".into())));
+        assert_eq!(split_remote("/home/bob/dir/"), Some(("/home/bob".into(), "dir".into())));
+        assert_eq!(split_remote("/x"), Some(("/".into(), "x".into())));
+        assert_eq!(split_remote("/"), None);
+        assert_eq!(split_remote("relative"), None);
+    }
+
+    #[test]
+    fn classifies_sudo_failures() {
+        assert_eq!(sudo_failure("sudo: a password is required"), "SUDO_PASSWORD_REQUIRED");
+        assert_eq!(sudo_failure("sudo: no password was provided"), "SUDO_PASSWORD_REQUIRED");
+        assert_eq!(sudo_failure("Sorry, try again.\nsudo: 1 incorrect password attempt"), "SUDO_PASSWORD_INCORRECT");
+        assert_eq!(sudo_failure("alice is not in the sudoers file."), "SUDO_NOT_ALLOWED");
+        assert_eq!(sudo_failure("sudo: sorry, you must have a tty to run sudo"), "SUDO_TTY_REQUIRED");
+        assert_eq!(sudo_failure("tar: x: Cannot open: Permission denied"), "SUDO_FAILED");
+    }
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::Duration;

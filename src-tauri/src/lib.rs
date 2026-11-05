@@ -70,6 +70,7 @@ pub fn run() {
             sftp::file_list,
             sftp::file_remote_home,
             sftp::file_upload,
+            sftp::file_upload_sudo,
             sftp::file_download,
             sftp::file_create_remote_directory,
             sftp::file_upload_directory,
