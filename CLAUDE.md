@@ -43,7 +43,8 @@ pnpm build             # Tauri application build
   russh patch (`src-tauri/vendor/`, see its README): the server can send at most 2MB beyond what the
   renderer has acked. Every `ssh:data` carries `bytes`; it must reach xterm through `flowAck.deliver`
   (`ui/src/lib/flow-ack.ts`), which acks via `ssh_ack_data` once xterm has parsed it. Dropping that path
-  freezes the terminal after 2MB of output. Other channels (SFTP, exec, probes) keep russh's auto window.
+  freezes the terminal after 2MB of output. Other channels (SFTP, exec, probes) keep russh's auto window
+  (`CONNECTION_WINDOW` in `ssh.rs`, 8MB; SFTP download segments / in-flight / timeout are derived from it in `sftp.rs`).
 - **Warm pool** is backend-owned. The frontend makes no prewarm call.
 - **Window reveal** — the main window is built in `create_main_window` (`src-tauri/src/lib.rs`,
   `create: false` in tauri.conf.json) at the screen work area, not via `maximized` (tao's async

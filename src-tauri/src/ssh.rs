@@ -145,8 +145,14 @@ pub(crate) fn warm_key(host: &str, port: u16, username: &str) -> String {
     format!("{}:{}:{}", host, port, username)
 }
 
+/// 连接上各通道（SFTP / exec）默认的 SSH 接收窗口。SFTP 下载吞吐上限 ≈ 窗口 / RTT：russh 默认 2MB
+/// 在 50ms RTT 下约 40MB/s，8MB 约 160MB/s。终端通道不用它（单独开 TERMINAL_WINDOW 的手动窗口），
+/// 刷屏时的积压不跟着变大。
+pub(crate) const CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
+
 fn russh_config() -> Arc<russh::client::Config> {
     Arc::new(russh::client::Config {
+        window_size: CONNECTION_WINDOW,
         inactivity_timeout: Some(Duration::from_secs(600)),
         keepalive_interval: Some(Duration::from_secs(10)),
         keepalive_max: 1,
