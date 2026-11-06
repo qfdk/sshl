@@ -2557,6 +2557,49 @@ mod tests {
             std::fs::remove_dir_all(&dst).unwrap();
         }
 
+        /// 分段数对大文件下载吞吐的影响（另需 SSHL_SFTP_BENCH=1）：同一连接上 4 / 8 / 16 段交替跑几轮，
+        /// 排除机器负载、网络抖动对单次结果的干扰。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 和 SSHL_SFTP_BENCH=1"]
+        async fn bench_segment_count() {
+            use super::super::{close_in_background, download_segmented};
+            if std::env::var("SSHL_SFTP_BENCH").is_err() { return; }
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-bench.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/big.bin");
+            exec(&h, &format!("head -c 100M /dev/urandom > {remote}")).await;
+            let size = 100 * 1024 * 1024u64;
+            let local = temp_dir("segments");
+            let mut results: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            for _ in 0..3 {
+                for segments in [4, 8, 16] {
+                    let t = Instant::now();
+                    let first = sftp.open(remote.as_str()).await.unwrap();
+                    tokio::fs::File::create(&local).await.unwrap();
+                    let (sftp, remote, local) = (&sftp, remote.as_str(), local.as_path());
+                    let n = download_segmented(
+                        size,
+                        segments,
+                        first,
+                        || async move { Ok(sftp.open(remote).await.unwrap()) },
+                        || async move { Ok(tokio::fs::OpenOptions::new().write(true).open(local).await?) },
+                        close_in_background,
+                        remote,
+                        |_| {},
+                    ).await.unwrap();
+                    assert_eq!(n, size);
+                    results.entry(segments).or_default().push(t.elapsed().as_secs_f64());
+                }
+            }
+            for (segments, secs) in &results {
+                let list: Vec<String> = secs.iter().map(|s| format!("{s:.2}s")).collect();
+                let best = secs.iter().cloned().fold(f64::MAX, f64::min);
+                eprintln!("BENCH 100MB download, {segments:>2} segments: {} (best {:.1} MB/s)", list.join(" "), 100.0 / best);
+            }
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_file(&local).unwrap();
+        }
+
         /// 耗时基准（另需 SSHL_SFTP_BENCH=1）：300 个目录 / 3000 个小文件的上传、遍历、下载，100MB 单文件上传、下载。
         /// 模拟 WAN：容器里 `apt-get install -y iproute2 && tc qdisc add dev eth0 root netem delay 50ms`。
         #[tokio::test(flavor = "multi_thread")]
