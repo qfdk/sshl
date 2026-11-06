@@ -18,7 +18,7 @@ import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
 import type { TransferStatusStore } from './transfer-progress';
-import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove, type DropTarget } from './file-drag';
+import { createDragPreviewStore, dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove, sameDropTarget, type DragPreviewStore, type DropTarget } from './file-drag';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
 const subscribeCurrentSessionId = (callback: () => void) => subscribe('currentSessionId', callback);
@@ -77,6 +77,36 @@ function TransferStatusBar({ store }: { store: TransferStatusStore }) {
       <Progress value={status.progress} className="h-1.5 w-48 shrink-0" />
     </div>
   );
+}
+
+// 拖拽中跟着指针的提示：拖了什么、松手会传到哪。自己订阅指针位置，拖拽时只有它按指针频率重渲染
+function DragPreviewOverlay({ store }: { store: DragPreviewStore }) {
+  const preview = useSyncExternalStore(store.subscribe, store.get);
+  if (!preview) return null;
+  return (
+    <div className="pointer-events-none fixed z-50 flex max-w-80 items-center gap-1.5 rounded-lg border border-border bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-lg" style={{ left: preview.x + 14, top: preview.y + 14 }}>
+      {preview.items.length === 1 && !preview.items[0].isDirectory ? <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />}
+      <span className="truncate font-medium">{dragLabel(preview.items)}</span>
+      {preview.destination && (
+        <span className="shrink-0 text-muted-foreground">
+          {preview.pane === 'local' ? '上传到' : '下载到'} {basename(preview.destination) || '/'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// 放置目标（高亮哪一侧、哪个文件夹行）只在真正换了时才进 state：拖拽时指针每动一下都 setState
+// 会让整个文件管理和两侧列表按指针频率重渲染
+function useDropTarget() {
+  const currentRef = useRef<DropTarget | null>(null);
+  const [target, setTarget] = useState<DropTarget | null>(null);
+  const update = useCallback((next: DropTarget | null) => {
+    if (sameDropTarget(currentRef.current, next)) return;
+    currentRef.current = next;
+    setTarget(next);
+  }, []);
+  return [target, update] as const;
 }
 
 // 没有 props、数据全来自外部 store（useSyncExternalStore）和自身状态：memo 后 App 重渲染（连接过程中多次）不再连带它
@@ -241,8 +271,10 @@ export const FileManager = memo(function FileManager() {
   const rowDragRef = useRef<RowDrag | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const suppressClickRef = useRef(false);
-  const [rowDrag, setRowDrag] = useState<{ pane: PaneName; items: FileEntry[]; x: number; y: number; target: DropTarget | null } | null>(null);
-  const [finderTarget, setFinderTarget] = useState<DropTarget | null>(null);
+  // 指针位置只进浮层的 store；两侧列表只看放置目标（换了才重渲染）
+  const [dragPreview] = useState(createDragPreviewStore);
+  const [rowTarget, setRowTarget] = useDropTarget();
+  const [finderTarget, setFinderTarget] = useDropTarget();
   const dragContext = useRef({ dirs: { local: local.path, remote: remote.path }, sessionId, uploadItems, downloadItems, transfer });
   dragContext.current = { dirs: { local: local.path, remote: remote.path }, sessionId, uploadItems, downloadItems, transfer };
 
@@ -258,7 +290,8 @@ export const FileManager = memo(function FileManager() {
     const cancel = () => {
       if (!rowDragRef.current) return;
       rowDragRef.current = null;
-      setRowDrag(null);
+      dragPreview.set(null);
+      setRowTarget(null);
     };
     const move = (event: PointerEvent) => {
       const drag = rowDragRef.current;
@@ -281,15 +314,17 @@ export const FileManager = memo(function FileManager() {
       drag.lastY = event.clientY;
       event.preventDefault();
       const target = targetAt(event.clientX, event.clientY);
-      const ok = planDrop(drag.pane, target, dragContext.current.dirs);
-      setRowDrag({ pane: drag.pane, items: drag.items, x: event.clientX, y: event.clientY, target: ok ? target : null });
+      const action = planDrop(drag.pane, target, dragContext.current.dirs);
+      dragPreview.set({ pane: drag.pane, items: drag.items, x: event.clientX, y: event.clientY, destination: action?.directory ?? null });
+      setRowTarget(action ? target : null);
     };
     // 收尾挂 window：指针可能在面板外松开
     const finish = (event: PointerEvent) => {
       const drag = rowDragRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
       rowDragRef.current = null;
-      setRowDrag(null);
+      dragPreview.set(null);
+      setRowTarget(null);
       try { rootRef.current?.releasePointerCapture(drag.pointerId); } catch {}
       if (!drag.active || event.type === 'pointercancel') return;
       // 拖完松手别再当成点了一下这一行
@@ -310,7 +345,7 @@ export const FileManager = memo(function FileManager() {
       window.removeEventListener('pointercancel', finish, true);
       window.removeEventListener('blur', cancel);
     };
-  }, []);
+  }, [dragPreview, setRowTarget]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -338,7 +373,7 @@ export const FileManager = memo(function FileManager() {
       }
     }).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
     return () => { disposed = true; stop?.(); setFinderTarget(null); };
-  }, [enabled]);
+  }, [enabled, setFinderTarget]);
 
   const deleteItems = useCallback(async (pane: PaneName, items: FileEntry[]) => {
     if (!items.length) return;
@@ -537,8 +572,8 @@ export const FileManager = memo(function FileManager() {
             onSelectAll={() => selectAll('local')}
             onClearSelection={() => clearSelection('local')}
             onRowPointerDown={(entry, event) => beginRowDrag('local', entry, event)}
-            dropActive={rowDrag?.target?.pane === 'local'}
-            dropDirectory={rowDrag?.target?.directory}
+            dropActive={rowTarget?.pane === 'local'}
+            dropDirectory={rowTarget?.directory}
           />
         </div>
         <div id="pane-divider" className="w-2.5 shrink-0 cursor-col-resize rounded-full transition-colors hover:bg-primary/15" title="拖动调整面板宽度" />
@@ -575,8 +610,8 @@ export const FileManager = memo(function FileManager() {
             onSelectAll={() => selectAll('remote')}
             onClearSelection={() => clearSelection('remote')}
             onRowPointerDown={(entry, event) => beginRowDrag('remote', entry, event)}
-            dropActive={rowDrag?.target?.pane === 'remote' || finderTarget?.pane === 'remote'}
-            dropDirectory={(rowDrag?.target ?? finderTarget)?.directory}
+            dropActive={rowTarget?.pane === 'remote' || finderTarget?.pane === 'remote'}
+            dropDirectory={(rowTarget ?? finderTarget)?.directory}
             badge={sessionId && identity && (identity.fileUser !== identity.loginUser ? (
               <span className="flex h-6 shrink-0 items-center gap-1 rounded-md bg-primary/10 px-2 text-xs font-medium text-primary" title={`文件管理以 ${identity.fileUser} 身份运行（跟随终端）`}>
                 <UserRound className="h-3.5 w-3.5" />{identity.fileUser}
@@ -590,18 +625,7 @@ export const FileManager = memo(function FileManager() {
         </div>
       </div>
 
-      {/* 拖拽中跟着指针的提示：拖了什么、松手会传到哪 */}
-      {rowDrag && (
-        <div className="pointer-events-none fixed z-50 flex max-w-80 items-center gap-1.5 rounded-lg border border-border bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-lg" style={{ left: rowDrag.x + 14, top: rowDrag.y + 14 }}>
-          {rowDrag.items.length === 1 && !rowDrag.items[0].isDirectory ? <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />}
-          <span className="truncate font-medium">{dragLabel(rowDrag.items)}</span>
-          {rowDrag.target && (
-            <span className="shrink-0 text-muted-foreground">
-              {rowDrag.pane === 'local' ? '上传到' : '下载到'} {basename(rowDrag.target.directory || (rowDrag.target.pane === 'remote' ? remote.path : local.path)) || '/'}
-            </span>
-          )}
-        </div>
-      )}
+      <DragPreviewOverlay store={dragPreview} />
 
       <TransferStatusBar store={transfer.statusStore} />
 

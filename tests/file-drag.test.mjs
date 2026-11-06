@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove } from '../ui/src/features/files/file-drag.ts';
+import { createDragPreviewStore, dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove, sameDropTarget } from '../ui/src/features/files/file-drag.ts';
 
 // 只实现 closest / getAttribute 的假 DOM 节点
 function node(attrs, parent = null) {
@@ -60,4 +60,33 @@ test('没收到 pointerup 的松手：在最后拖拽位置附近算松手，离
   assert.equal(releasedMove(drag, 1115, 199, 5), 'drop');
   assert.equal(releasedMove(drag, 300, 600, 5), 'cancel');
   assert.equal(releasedMove({ ...drag, active: false }, 1112, 196, 5), 'cancel', '还没真正拖起来');
+});
+
+test('落点没换（同一侧、同一个文件夹行）不算变化：指针在同一落点内移动不重渲染两侧列表', () => {
+  const folder = '/home/bob/uploads/existing';
+  assert.equal(sameDropTarget({ pane: 'remote', directory: null }, { pane: 'remote', directory: null }), true, '每次移动都是新对象，内容一样就是同一落点');
+  assert.equal(sameDropTarget({ pane: 'remote', directory: folder }, { pane: 'remote', directory: folder }), true);
+  assert.equal(sameDropTarget(null, null), true);
+  assert.equal(sameDropTarget({ pane: 'remote', directory: null }, { pane: 'remote', directory: folder }), false, '移到文件夹行上');
+  assert.equal(sameDropTarget({ pane: 'remote', directory: null }, { pane: 'local', directory: null }), false, '换了一侧');
+  assert.equal(sameDropTarget(null, { pane: 'remote', directory: null }), false);
+  assert.equal(sameDropTarget({ pane: 'remote', directory: null }, null), false);
+});
+
+test('拖拽浮层 store：位置变化通知订阅者，结束时清空；取消订阅后不再通知', () => {
+  const store = createDragPreviewStore();
+  assert.equal(store.get(), null);
+  const seen = [];
+  const unsubscribe = store.subscribe(() => seen.push(store.get()));
+  const items = [{ name: 'a', path: '/x/a' }];
+  store.set({ pane: 'local', items, x: 10, y: 20, destination: null });
+  store.set({ pane: 'local', items, x: 12, y: 21, destination: '/home/bob' });
+  store.set(null);
+  unsubscribe();
+  store.set({ pane: 'local', items, x: 1, y: 1, destination: null });
+  assert.deepEqual(seen, [
+    { pane: 'local', items, x: 10, y: 20, destination: null },
+    { pane: 'local', items, x: 12, y: 21, destination: '/home/bob' },
+    null,
+  ]);
 });
