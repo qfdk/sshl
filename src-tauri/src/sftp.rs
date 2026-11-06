@@ -921,15 +921,17 @@ where
     }
 }
 
-/// 按层建目录：同层并发（父目录都在上一层），层与层之间按顺序。
-async fn create_dir_levels<'a, D, F, Fut>(levels: &'a [Vec<D>], create: F)
+/// 按层建目录：同层并发（父目录都在上一层），层与层之间按顺序；任一失败即停。
+async fn create_dir_levels<'a, D, F, Fut>(levels: &'a [Vec<D>], create: F) -> AppResult<()>
 where
     F: Fn(&'a D) -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = AppResult<()>>,
 {
+    use futures::TryStreamExt;
     for level in levels {
-        stream::iter(level).for_each_concurrent(DIR_OP_CONCURRENCY, &create).await;
+        stream::iter(level).map(Ok).try_for_each_concurrent(DIR_OP_CONCURRENCY, &create).await?;
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1206,9 +1208,14 @@ async fn upload_tree(
 ) -> AppResult<()> {
     let plan = scan_local(PathBuf::from(local_path), remote_path.to_string()).await?;
     create_dir_levels(&plan.dirs, |dir: &String| async move {
-        // 已存在不算错（mkdir -p 语义）。
-        let _ = sftp.create_dir(dir).await;
-    }).await;
+        // mkdir -p 语义：已存在的目录不算错。其他失败（如 Permission denied）要报出来，
+        // 否则后面开文件只会报 No such file，前端认不出权限问题，不会提示改用 sudo。
+        let Err(e) = sftp.create_dir(dir).await else { return Ok(()) };
+        match sftp.metadata(dir).await {
+            Ok(meta) if meta.is_dir() => Ok(()),
+            _ => Err(AppError::Sftp(format!("mkdir {dir}: {e}"))),
+        }
+    }).await?;
     let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
     let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
         emit(DirCounts { transferred, total, files_done, files_total });
@@ -2422,11 +2429,25 @@ mod tests {
             }
             probe_ref.hold().await;
             created_ref.lock().unwrap().push(dir.clone());
-        }).await;
+            Ok(())
+        }).await.unwrap();
         assert_eq!(created.lock().unwrap().len(), 81);
         // 每个 MKDIR 一个 RTT：同层必须并发。
         assert!(probe.peak() > 1, "directories were created serially");
         assert!(probe.peak() <= DIR_OP_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn create_dir_levels_stops_at_first_failing_level() {
+        let levels: Vec<Vec<String>> = vec![vec!["/r".into()], vec!["/r/a".into(), "/r/denied".into()], vec!["/r/a/sub".into()]];
+        let tried = Mutex::new(Vec::<String>::new());
+        let tried_ref = &tried;
+        let result = create_dir_levels(&levels, |dir: &String| async move {
+            tried_ref.lock().unwrap().push(dir.clone());
+            if dir.ends_with("denied") { Err(AppError::Sftp("mkdir: Permission denied".into())) } else { Ok(()) }
+        }).await;
+        assert!(result.unwrap_err().to_string().contains("Permission denied"));
+        assert!(!tried.lock().unwrap().iter().any(|d| d == "/r/a/sub"), "失败后不应再建下一层");
     }
 
     /// 跑一批 (编号, 在途字节) 的传输，返回 (同时在传的文件数峰值, 在途字节峰值, 开始顺序)。
@@ -2636,6 +2657,30 @@ mod tests {
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&src).unwrap();
             std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 目标目录没有写权限：要报出 Permission denied（前端据此提示改用 sudo），不能被吞成后面开文件的 No such file。
+        /// 目录已存在（重复上传合并）不算错。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn upload_tree_reports_permission_denied_but_merges_into_existing_dirs() {
+            let Some((h, sftp)) = connect().await else { return };
+            let src = temp_dir("perm-src");
+            write(&src.join("a/b/f.txt"), b"hello");
+            write(&src.join("top.txt"), b"top");
+
+            // 容器里 /home/bob/uploads 属 bob、755，alice 不可写
+            let err = upload_tree(&sftp, &src.to_string_lossy(), "/home/bob/uploads/perm-tree", |_| {}).await.unwrap_err();
+            assert!(err.to_string().to_lowercase().contains("permission denied"), "应报权限错误，实际: {err}");
+
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/tree");
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |_| {}).await.unwrap();
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |_| {}).await.expect("目录已存在时再次上传应合并成功");
+            assert_eq!(exec(&h, &format!("cat {remote}/a/b/f.txt")).await, "hello");
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
         }
 
         /// 能 stat 但没有读权限的大文件：报错，且不截断本地同名文件（段 0 的句柄兼作探测，开成功才建本地文件）。
