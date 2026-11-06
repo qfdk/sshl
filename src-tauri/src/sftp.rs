@@ -1342,12 +1342,16 @@ fn shell_quote(s: &str) -> String {
 /// GNU tar 解包默认会改写已存在目录的权限（合并上传时把属主原来的 755 改成 775），加 --no-overwrite-dir；
 /// BSD tar 本就不改、也不认这个参数，所以只对 GNU 加。
 /// stat 先试 GNU（-c），再回落 BSD（-f）。LC_ALL=C 让 sudo 的报错保持英文，便于识别。
+/// 管道的退出码只看解包端，打包端失败（条目读不了等）时解包端拿到空 / 不完整的归档照样返回 0。
+/// 远端 sh 可能是 dash / busybox ash，不靠 pipefail：打包端失败时经 fd 3 把退出码带出来，
+/// 解包端失败优先报解包端的退出码，其次报打包端的。
 fn sudo_extract_command(with_password: bool, staging: &str, dest_dir: &str, name: &str) -> String {
     let auth = if with_password { "-S -p \"\"" } else { "-n" };
     // 以 root 跑：$1 暂存区、$2 目标目录、$3 条目名
     let extract = "set -e; uid=$(stat -c %u -- \"$2\" 2>/dev/null || stat -f %u -- \"$2\"); \
                    keep=; tar --version 2>/dev/null | grep -q GNU && keep=--no-overwrite-dir; \
-                   tar -C \"$1\" -cf - -- \"$3\" | sudo -u \"#$uid\" tar -C \"$2\" $keep -xf -";
+                   p=$( { { tar -C \"$1\" -cf - -- \"$3\" 3>&- || echo $? >&3; } \
+                   | sudo -u \"#$uid\" tar -C \"$2\" $keep -xf - 3>&- >&2; } 3>&1 ) || exit; exit ${p:-0}";
     // 以登录用户跑，$4 是上面的脚本
     let outer = format!(
         "LC_ALL=C sudo {auth} sh -c \"$4\" sshl-sudo \"$1\" \"$2\" \"$3\"; st=$?; rm -rf -- \"$1\" 2>/dev/null; exit $st"
@@ -1501,6 +1505,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 打包端（左边的 tar -c）失败时，解包端拿到空 / 不完整的归档照样返回 0；没有 pipefail 就会误报成功。
+    #[test]
+    fn sudo_extract_reports_failure_when_packing_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("sshl-sudo-{}", uuid::Uuid::new_v4()));
+        let (staging, dest) = (root.join("staging"), root.join("dest"));
+        std::fs::create_dir_all(&dest).unwrap();
+        let run = |name: &str| {
+            let cmd = sudo_extract_command(true, &staging.to_string_lossy(), &dest.to_string_lossy(), name);
+            let out = run_with_fake_sudo(&cmd, b"secret\n");
+            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+        };
+        // 条目整个打不出来：解包端拿到空归档
+        std::fs::create_dir_all(&staging).unwrap();
+        let (code, err) = run("missing.txt");
+        assert_ne!(code, Some(0), "打包失败不能报成功：{err}");
+        assert!(err.contains("missing.txt"), "stderr 带打包端的报错：{err}");
+        assert_eq!(sudo_failure(&err), "SUDO_FAILED", "{err}");
+        assert!(!staging.exists(), "打包失败也要删暂存区");
+        // 目录里有一个读不了的文件（假 sudo 不提权，非 root 跑测试时读不了 000 的文件）：其余文件照常解出来，但要报失败
+        std::fs::create_dir_all(staging.join("dir")).unwrap();
+        std::fs::write(staging.join("dir/a.txt"), b"A").unwrap();
+        std::fs::write(staging.join("dir/b.txt"), b"B").unwrap();
+        std::fs::set_permissions(staging.join("dir/b.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(staging.join("dir/b.txt")).is_err() {
+            let (code, err) = run("dir");
+            assert_ne!(code, Some(0), "打包端部分失败不能报成功：{err}");
+            assert!(err.contains("b.txt"), "{err}");
+            assert!(!staging.exists());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn prepare_result(out: &std::process::Output) -> crate::error::AppResult<String> {
         let status = out.status.code().map_or(255, |c| c as u32);
         staging_from_prepare(status, &String::from_utf8_lossy(&out.stdout), &String::from_utf8_lossy(&out.stderr))
@@ -1634,6 +1671,13 @@ mod tests {
         assert_ne!(st, 0, "解包失败要报出来");
         assert_eq!(sudo_failure(&err), "SUDO_FAILED", "{err}");
         assert!(gone(&alice, &staging).await, "解包失败也删暂存区");
+        // 打包端失败（暂存区里没有这个条目）：GNU tar 解包空归档返回 0，不能因此报成功
+        let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
+        let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, "not-staged.txt"), Some(b"alicepw\n")).await;
+        assert_ne!(st, 0, "打包失败要报出来：{err}");
+        assert!(err.contains("not-staged.txt"), "{err}");
+        assert_eq!(sudo_failure(&err), "SUDO_FAILED", "{err}");
+        assert!(gone(&alice, &staging).await, "打包失败也删暂存区");
         for name in ["it's a.txt", "existing"] {
             let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
             let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, name), Some(b"alicepw\n")).await;
