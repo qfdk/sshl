@@ -943,26 +943,31 @@ impl<S, D> DirPlan<S, D> {
     }
 }
 
-/// 上传前遍历本地目录。目录判断沿用 DirEntry 的元数据（不跟随符号链接），
-/// 文件大小跟随符号链接取目标的，与实际传输的字节数一致。
+/// 上传前遍历本地目录。整棵树在一个阻塞任务里用 std::fs 走完（tokio::fs 每条元数据都各起一次
+/// spawn_blocking）；目录判断用 DirEntry 的类型（不跟随符号链接，多数文件系统不用额外 stat），
+/// 只对文件取大小，跟随符号链接取目标的，与实际传输的字节数一致。
 async fn scan_local(local: PathBuf, remote: String) -> AppResult<DirPlan<PathBuf, String>> {
-    let mut plan = DirPlan { dirs: vec![remote.clone()], files: Vec::new() };
-    let mut queue = VecDeque::from([(local, remote)]);
-    while let Some((dir_local, dir_remote)) = queue.pop_front() {
-        let mut rd = tokio::fs::read_dir(&dir_local).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let (child_local, child_remote) = (entry.path(), join_remote(&dir_remote, &name));
-            if entry.metadata().await?.is_dir() {
-                plan.dirs.push(child_remote.clone());
-                queue.push_back((child_local, child_remote));
-            } else {
-                let size = tokio::fs::metadata(&child_local).await.map(|m| m.len()).unwrap_or(0);
-                plan.files.push((child_local, child_remote, size));
+    tokio::task::spawn_blocking(move || {
+        let mut plan = DirPlan { dirs: vec![remote.clone()], files: Vec::new() };
+        let mut queue = VecDeque::from([(local, remote)]);
+        while let Some((dir_local, dir_remote)) = queue.pop_front() {
+            for entry in std::fs::read_dir(&dir_local)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let (child_local, child_remote) = (entry.path(), join_remote(&dir_remote, &name));
+                if entry.file_type()?.is_dir() {
+                    plan.dirs.push(child_remote.clone());
+                    queue.push_back((child_local, child_remote));
+                } else {
+                    let size = std::fs::metadata(&child_local).map(|m| m.len()).unwrap_or(0);
+                    plan.files.push((child_local, child_remote, size));
+                }
             }
         }
-    }
-    Ok(plan)
+        Ok(plan)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("scan local directory: {e}")))?
 }
 
 /// 列一个远端目录：(名称, 是否目录, 字节数)，供 scan_remote 用。
@@ -2073,6 +2078,26 @@ mod tests {
             ]
         );
         assert_eq!(plan.total_bytes(), 8);
+    }
+
+    #[tokio::test]
+    async fn scan_local_does_not_descend_into_symlinked_dirs_but_sizes_link_targets() {
+        let root = std::env::temp_dir().join(format!("sshl-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("real/inner")).unwrap();
+        std::fs::write(root.join("real/data.bin"), b"123456").unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link-dir")).unwrap();
+        std::os::unix::fs::symlink(root.join("real/data.bin"), root.join("link-file")).unwrap();
+
+        let plan = scan_local(root.clone(), "/r".to_string()).await;
+        let dir_size = std::fs::metadata(root.join("real")).unwrap().len();
+        std::fs::remove_dir_all(&root).unwrap();
+        let plan = plan.unwrap();
+
+        // 目录判断不跟随符号链接：指向目录的链接不展开、按文件列出；文件大小跟随链接取目标的。
+        assert_eq!(plan.dirs, ["/r", "/r/real", "/r/real/inner"]);
+        let mut files: Vec<(&str, u64)> = plan.files.iter().map(|(_, r, s)| (r.as_str(), *s)).collect();
+        files.sort();
+        assert_eq!(files, [("/r/link-dir", dir_size), ("/r/link-file", 6), ("/r/real/data.bin", 6)]);
     }
 
     #[tokio::test]
