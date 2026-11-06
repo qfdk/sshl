@@ -1,0 +1,275 @@
+diff --git a/src/channels/mod.rs b/src/channels/mod.rs
+index 5b095d9..60f2965 100644
+--- a/src/channels/mod.rs
++++ b/src/channels/mod.rs
+@@ -110,6 +110,10 @@ pub enum ChannelMsg {
+     /// (server only)
+     Failure,
+     OpenFailure(ChannelOpenFailure),
++    /// (client only) see [`Channel::grant_window`]
++    GrantWindow {
++        amount: u32,
++    },
+ }
+ 
+ /// A handle to a session channel.
+@@ -259,6 +263,12 @@ impl<S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static> Channel<S> {
+         .await
+     }
+ 
++    /// Allow the peer to send `amount` more bytes on a channel opened with
++    /// [`crate::client::Handle::channel_open_session_manual_window`]. No-op on other channels.
++    pub async fn grant_window(&self, amount: u32) -> Result<(), Error> {
++        self.send_msg(ChannelMsg::GrantWindow { amount }).await
++    }
++
+     /// Inform the server that our window size has changed.
+     pub async fn window_change(
+         &self,
+diff --git a/src/client/encrypted.rs b/src/client/encrypted.rs
+index 8f66078..32445e4 100644
+--- a/src/client/encrypted.rs
++++ b/src/client/encrypted.rs
+@@ -745,6 +745,7 @@ impl Session {
+                         pending_data: std::collections::VecDeque::new(),
+                         pending_eof: false,
+                         pending_close: false,
++                        manual_window: false,
+                     };
+ 
+                     let confirm = || {
+diff --git a/src/client/mod.rs b/src/client/mod.rs
+index a2f9d8c..c944f52 100644
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -132,6 +132,10 @@ pub enum Msg {
+     ChannelOpenSession {
+         channel_ref: ChannelRef,
+     },
++    ChannelOpenSessionManualWindow {
++        channel_ref: ChannelRef,
++        window_size: u32,
++    },
+     ChannelOpenX11 {
+         originator_address: String,
+         originator_port: u32,
+@@ -469,6 +473,31 @@ impl<H: Handler> Handle<H> {
+             .await
+     }
+ 
++    /// Like [`Handle::channel_open_session`], but the channel's receive window starts at
++    /// `window_size` (instead of `Config::window_size`) and is NOT refilled as data
++    /// arrives: the server can send at most `window_size` plus what
++    /// [`Channel::grant_window`] grants. A consumer that falls behind therefore pauses
++    /// this channel only, instead of growing an unbounded queue (other channels on the
++    /// connection keep flowing).
++    pub async fn channel_open_session_manual_window(
++        &self,
++        window_size: u32,
++    ) -> Result<Channel<Msg>, crate::Error> {
++        let (sender, receiver) = unbounded_channel();
++        let channel_ref = ChannelRef::new(sender);
++        let window_size_ref = channel_ref.window_size().clone();
++
++        self.sender
++            .send(Msg::ChannelOpenSessionManualWindow {
++                channel_ref,
++                window_size,
++            })
++            .await
++            .map_err(|_| crate::Error::SendError)?;
++        self.wait_channel_confirmation(receiver, window_size_ref)
++            .await
++    }
++
+     /// Request an X11 channel, on which the X11 protocol may be tunneled.
+     pub async fn channel_open_x11<A: Into<String>>(
+         &self,
+@@ -1010,6 +1039,13 @@ impl Session {
+                 let id = self.channel_open_session()?;
+                 self.channels.insert(id, channel_ref);
+             }
++            Msg::ChannelOpenSessionManualWindow {
++                channel_ref,
++                window_size,
++            } => {
++                let id = self.channel_open_session_manual_window(window_size)?;
++                self.channels.insert(id, channel_ref);
++            }
+             Msg::ChannelOpenX11 {
+                 originator_address,
+                 originator_port,
+@@ -1135,6 +1171,11 @@ impl Session {
+                 self.agent_forward(id, want_reply)
+             }
+             Msg::Channel(id, ChannelMsg::Close) => self.close(id),
++            Msg::Channel(id, ChannelMsg::GrantWindow { amount }) => {
++                if let Some(ref mut enc) = self.common.encrypted {
++                    enc.grant_window(id, amount);
++                }
++            }
+             msg => {
+                 // should be unreachable, since the receiver only gets
+                 // messages from methods implemented within russh
+diff --git a/src/client/session.rs b/src/client/session.rs
+index e068d7e..3dc344e 100644
+--- a/src/client/session.rs
++++ b/src/client/session.rs
+@@ -10,6 +10,7 @@ impl Session {
+     fn channel_open_generic<F>(
+         &mut self,
+         kind: &[u8],
++        window_size: u32,
+         write_suffix: F,
+     ) -> Result<ChannelId, crate::Error>
+     where
+@@ -18,10 +19,8 @@ impl Session {
+         let result = if let Some(ref mut enc) = self.common.encrypted {
+             match enc.state {
+                 EncryptedState::Authenticated => {
+-                    let sender_channel = enc.new_channel(
+-                        self.common.config.window_size,
+-                        self.common.config.maximum_packet_size,
+-                    );
++                    let sender_channel =
++                        enc.new_channel(window_size, self.common.config.maximum_packet_size);
+                     push_packet!(enc.write, {
+                         enc.write.push(msg::CHANNEL_OPEN);
+                         enc.write.extend_ssh_string(kind);
+@@ -30,8 +29,7 @@ impl Session {
+                         enc.write.push_u32_be(sender_channel.0);
+ 
+                         // window.
+-                        enc.write
+-                            .push_u32_be(self.common.config.as_ref().window_size);
++                        enc.write.push_u32_be(window_size);
+ 
+                         // max packet size.
+                         enc.write
+@@ -50,7 +48,20 @@ impl Session {
+     }
+ 
+     pub fn channel_open_session(&mut self) -> Result<ChannelId, crate::Error> {
+-        self.channel_open_generic(b"session", |_| ())
++        self.channel_open_generic(b"session", self.common.config.window_size, |_| ())
++    }
++
++    /// Open a session channel whose receive window starts at `window_size` and is
++    /// refilled only by explicit grants (see `Channel::grant_window`).
++    pub fn channel_open_session_manual_window(
++        &mut self,
++        window_size: u32,
++    ) -> Result<ChannelId, crate::Error> {
++        let id = self.channel_open_generic(b"session", window_size, |_| ())?;
++        if let Some(ref mut enc) = self.common.encrypted {
++            enc.set_manual_window(id);
++        }
++        Ok(id)
+     }
+ 
+     pub fn channel_open_x11(
+@@ -58,7 +69,7 @@ impl Session {
+         originator_address: &str,
+         originator_port: u32,
+     ) -> Result<ChannelId, crate::Error> {
+-        self.channel_open_generic(b"x11", |write| {
++        self.channel_open_generic(b"x11", self.common.config.window_size, |write| {
+             write.extend_ssh_string(originator_address.as_bytes());
+             write.push_u32_be(originator_port); // sender channel id.
+         })
+@@ -71,7 +82,7 @@ impl Session {
+         originator_address: &str,
+         originator_port: u32,
+     ) -> Result<ChannelId, crate::Error> {
+-        self.channel_open_generic(b"direct-tcpip", |write| {
++        self.channel_open_generic(b"direct-tcpip", self.common.config.window_size, |write| {
+             write.extend_ssh_string(host_to_connect.as_bytes());
+             write.push_u32_be(port_to_connect); // sender channel id.
+             write.extend_ssh_string(originator_address.as_bytes());
+@@ -83,7 +94,7 @@ impl Session {
+         &mut self,
+         socket_path: &str,
+     ) -> Result<ChannelId, crate::Error> {
+-        self.channel_open_generic(b"direct-streamlocal@openssh.com", |write| {
++        self.channel_open_generic(b"direct-streamlocal@openssh.com", self.common.config.window_size, |write| {
+             write.extend_ssh_string(socket_path.as_bytes());
+             write.extend_ssh_string("".as_bytes()); // reserved
+             write.push_u32_be(0); // reserved
+diff --git a/src/lib.rs b/src/lib.rs
+index accfaeb..5761650 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -525,6 +525,8 @@ pub(crate) struct ChannelParams {
+     pending_data: std::collections::VecDeque<(CryptoVec, Option<u32>, usize)>,
+     pending_eof: bool,
+     pending_close: bool,
++    /// Receive window is refilled only by explicit grants (see `Channel::grant_window`).
++    manual_window: bool,
+ }
+ 
+ impl ChannelParams {
+diff --git a/src/server/encrypted.rs b/src/server/encrypted.rs
+index db8a2e6..298bf01 100644
+--- a/src/server/encrypted.rs
++++ b/src/server/encrypted.rs
+@@ -1146,6 +1146,7 @@ impl Session {
+             pending_data: std::collections::VecDeque::new(),
+             pending_eof: false,
+             pending_close: false,
++            manual_window: false,
+         };
+ 
+         let (channel, reference) = Channel::new(
+diff --git a/src/session.rs b/src/session.rs
+index c837982..fc4bc87 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -224,6 +224,9 @@ impl Encrypted {
+             if data.len() as u32 <= channel.sender_window_size {
+                 channel.sender_window_size -= data.len() as u32;
+             }
++            if channel.manual_window {
++                return false;
++            }
+             if channel.sender_window_size < target / 2 {
+                 debug!(
+                     "sender_window_size {:?}, target {:?}",
+@@ -241,6 +244,30 @@ impl Encrypted {
+         false
+     }
+ 
++    /// Stop refilling `channel`'s receive window as data arrives; the application
++    /// grants window explicitly once it has consumed the data (`grant_window`).
++    pub fn set_manual_window(&mut self, channel: ChannelId) {
++        if let Some(channel) = self.channels.get_mut(&channel) {
++            channel.manual_window = true;
++        }
++    }
++
++    /// Send CHANNEL_WINDOW_ADJUST(`amount`) on a manual-window channel.
++    pub fn grant_window(&mut self, channel: ChannelId, amount: u32) {
++        if let Some(channel) = self.channels.get_mut(&channel) {
++            let amount = amount.min(u32::MAX - channel.sender_window_size);
++            if !channel.manual_window || !channel.confirmed || amount == 0 {
++                return;
++            }
++            push_packet!(self.write, {
++                self.write.push(msg::CHANNEL_WINDOW_ADJUST);
++                self.write.push_u32_be(channel.recipient_channel);
++                self.write.push_u32_be(amount);
++            });
++            channel.sender_window_size += amount;
++        }
++    }
++
+     fn flush_channel(write: &mut CryptoVec, channel: &mut ChannelParams) -> ChannelFlushResult {
+         let mut pending_size = 0;
+         while let Some((buf, a, from)) = channel.pending_data.pop_front() {
+@@ -457,6 +484,7 @@ impl Encrypted {
+                     pending_data: std::collections::VecDeque::new(),
+                     pending_eof: false,
+                     pending_close: false,
++                    manual_window: false,
+                 });
+                 return ChannelId(self.last_channel_id.0);
+             }

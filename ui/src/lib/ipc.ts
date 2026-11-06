@@ -50,6 +50,8 @@ export const api = {
     sendData: (sessionId: string, data: string) => call('ssh_send_data', { sessionId, data }),
     fillPassword: (sessionId: string, kind?: string) => call('ssh_fill_password', { sessionId, kind }),
     resize: (sessionId: string, cols: number, rows: number) => call('ssh_resize', { sessionId, cols, rows }),
+    // 终端输出流控：确认 xterm 已解析的原始字节数（见 lib/flow-ack.ts），后端据此补 SSH 窗口。
+    ackData: (sessionId: string, bytes: number) => call('ssh_ack_data', { sessionId, bytes }),
     refreshPrompt: (sessionId: string) => call('ssh_refresh_prompt', { sessionId }),
     // 激活后快照由后端作为首个 ssh:data 事件发出，与后续数据同通道保序。
     activateSession: (sessionId: string) => call('ssh_activate_session', { sessionId }),
