@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { Input } from '../../components/ui/input';
 import { Button } from '../../components/ui/button';
 import { UNGROUPED_LABEL, normalizeGroupName } from '../../lib/connection-groups';
+import { pointerMoveStep } from '../../lib/pointer-release';
 import { shallowEqual } from '../../lib/shallow-equal';
 import { cn } from '../../lib/utils';
 
@@ -26,8 +27,8 @@ type DropTarget =
   | { kind: 'groupOrder'; before: string | null; marker: string };
 
 type Drag =
-  | { kind: 'connection'; id: string; pointerId: number; startX: number; startY: number; active: boolean }
-  | { kind: 'group'; name: string; pointerId: number; startY: number; active: boolean };
+  | { kind: 'connection'; id: string; pointerId: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean }
+  | { kind: 'group'; name: string; pointerId: number; startY: number; lastX: number; lastY: number; active: boolean };
 
 const DRAG_THRESHOLD = 6;
 
@@ -97,13 +98,13 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
 
   const beginConnectionDrag = (event: ReactPointerEvent<HTMLElement>, id: string) => {
     if (event.button !== 0) return;
-    dragRef.current = { kind: 'connection', id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+    dragRef.current = { kind: 'connection', id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, active: false };
   };
 
   const beginGroupDrag = (event: ReactPointerEvent<HTMLElement>, name: string) => {
     if (event.button !== 0) return;
     event.preventDefault();
-    dragRef.current = { kind: 'group', name, pointerId: event.pointerId, startY: event.clientY, active: false };
+    dragRef.current = { kind: 'group', name, pointerId: event.pointerId, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, active: false };
   };
 
   const handleMove = (event: ReactPointerEvent<HTMLElement>) => {
@@ -113,14 +114,30 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
     const distance = current.kind === 'connection'
       ? Math.hypot(event.clientX - current.startX, event.clientY - current.startY)
       : Math.abs(event.clientY - current.startY);
-    if (!current.active && distance < DRAG_THRESHOLD) return;
+    const step = pointerMoveStep(current, event, distance, DRAG_THRESHOLD);
+    if (step === 'ignore') return;
+    if (step !== 'drag') {
+      // 左键已松开却没收到 pointerup（WKWebView 常丢）：见 pointerMoveStep
+      if (current.active) rootRef.current?.releasePointerCapture?.(event.pointerId);
+      if (step === 'drop') finish(event.nativeEvent);
+      else clearDrag();
+      return;
+    }
     if (!current.active) {
       current.active = true;
       setDrag(current);
       rootRef.current?.setPointerCapture?.(event.pointerId);
     }
+    current.lastX = event.clientX;
+    current.lastY = event.clientY;
     event.preventDefault();
     setDropTarget(computeDrop(event.clientX, event.clientY, current));
+  };
+
+  const clearDrag = () => {
+    dragRef.current = null;
+    setDrag(null);
+    setDropTarget(null);
   };
 
   // 收尾挂 window：指针可能在树外松开，容器级监听收不到，拖拽状态会卡住。
@@ -128,9 +145,7 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
     const current = dragRef.current;
     if (!current || current.pointerId !== event.pointerId) return;
     const target = dropRef.current;
-    dragRef.current = null;
-    setDrag(null);
-    setDropTarget(null);
+    clearDrag();
     if (!current.active || event.type === 'pointercancel' || !target) return;
 
     if (current.kind === 'connection') {
