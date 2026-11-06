@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use crate::config_store::load_secret;
 use crate::terminal_user::{self, Elevation, Via};
 use crate::error::{AppError, AppResult};
+use crate::sftp_stall::{self, Sftp};
 use crate::ssh::SshSession;
 use crate::state::AppState;
 
@@ -35,13 +36,13 @@ const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
 /// 上传时一条 SFTP 通道上同时在途的数据上限。上传方向的窗口由服务端给（OpenSSH session 通道 2MB），
 /// 与我们的 CONNECTION_WINDOW 无关；russh-sftp 的 8 路写 pipeline × 块正好填满它。再多也只是在窗口外
-/// 排队，还让排在后面的请求（OPEN / CLOSE 的回复）更晚才到，慢链路上撞 SFTP 请求超时（见 new_sftp）。
+/// 排队，还让排在后面的请求（OPEN / CLOSE 的回复）更晚才到。
 const UPLOAD_IN_FLIGHT_BYTES: u64 = 8 * TRANSFER_CHUNK as u64;
 
 /// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），开 N 个句柄读不相交区间，
 /// 在途 READ 就是 N 个。下载方向的窗口是我们给的 CONNECTION_WINDOW（8MB）。
 /// 50ms RTT、100MB 实测（bench_segment_count，release）：8 段 3.7–4.0s、16 段 2.4s、24 段 2.3s、32 段 2.2–2.4s，
-/// 16 段之后只再快几个百分点，在途量却翻倍（请求超时得跟着加长，见 SFTP_TIMEOUT_SECS），所以取 16。
+/// 16 段之后只再快几个百分点，在途量却翻倍（排在后面的请求等得更久），所以取 16。
 const DOWNLOAD_SEGMENTS: usize = 16;
 
 /// 下载时一条 SFTP 通道上同时在途的数据上限 = 分段下载的在途量（段数 × 块），
@@ -106,12 +107,14 @@ pub struct UploadProgress {
     pub files_total: Option<u64>,
 }
 
-async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
-    {
-        let cache = session.sftp.lock().await;
-        if let Some(s) = cache.as_ref() {
-            return Ok(s.clone());
-        }
+/// 缓存里还能用的会话：通道卡死 / 关闭过的（在等的请求已全部报错）不再复用，由 sftp_for 按当前身份重开。
+fn live(cache: &Option<Arc<Sftp>>) -> Option<Arc<Sftp>> {
+    cache.as_ref().filter(|s| !s.is_dead()).cloned()
+}
+
+async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<Sftp>> {
+    if let Some(s) = live(&*session.sftp.lock().await) {
+        return Ok(s);
     }
     // Open new SFTP subsystem channel and cache it.
     let channel = open_exec_channel(session).await?;
@@ -127,25 +130,28 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
     };
     let sftp = Arc::new(sftp);
     let mut cache = session.sftp.lock().await;
-    // 打开期间刚切换过身份（file_switch_user 已放好新会话）：以缓存里的为准
-    if let Some(existing) = cache.as_ref() {
-        return Ok(existing.clone());
+    // 打开期间别人已放好新会话（并发的 sftp_for，或 file_switch_user 刚切换过身份）：以缓存里的为准
+    if let Some(existing) = live(&cache) {
+        return Ok(existing);
     }
     *cache = Some(sftp.clone());
     Ok(sftp)
 }
 
-async fn new_sftp(channel: russh::Channel<russh::client::Msg>) -> AppResult<SftpSession> {
-    let sftp = SftpSession::new(channel.into_stream()).await
-        .map_err(|e| AppError::Sftp(format!("sftp init: {e}")))?;
-    sftp.set_timeout(SFTP_TIMEOUT_SECS);
-    Ok(sftp)
+async fn new_sftp(channel: russh::Channel<russh::client::Msg>) -> AppResult<Sftp> {
+    sftp_stall::open(channel.into_stream(), SFTP_STALL, SFTP_REQUEST_TIMEOUT_SECS).await
+        .map_err(|e| AppError::Sftp(format!("sftp init: {e}")))
 }
 
-/// SFTP 请求超时（秒）。russh-sftp 的请求从发出起计时，默认 10s（写请求不计时）。分段下载、目录并发传输
-/// 会让至多 DOWNLOAD_IN_FLIGHT_BYTES（16 段 ≈4MB）的数据同时在途，排在后面的请求 / 回复要等它们先过完
-/// 链路：4MB / 120s ≈ 35KB/s，链路不慢于此就不会误超时。连接真断了由 keepalive（10s）发现，不靠它。
-const SFTP_TIMEOUT_SECS: u64 = 120;
+/// SFTP 通道卡死判定（见 sftp_stall）：有请求在等、这么久一个字节都没收到，就判通道失效，在等的和之后的请求
+/// 全部报错，sftp_for 下次重开。只要还在收数据就不算，所以分段下载、目录并发传输让 DOWNLOAD_IN_FLIGHT_BYTES
+/// （≈4MB）同时在途、慢链路上排在后面的请求要等几分钟，也不会误报。上传方向收到的只有写确认，
+/// 两个确认之间隔一个块的发送时间：链路不慢于 TRANSFER_CHUNK / 60s ≈ 4.3KB/s 就不会误报。
+const SFTP_STALL: Duration = Duration::from_secs(60);
+
+/// russh-sftp 自己的单请求超时（从发出起计时，写请求不计时），只作兜底：服务端漏回某个请求、通道却一直有数据。
+/// 排在满额在途数据后面的请求在 4MB / 3600s ≈ 1.1KB/s 的链路上才会撞上它，比卡死判定能容忍的还慢。
+const SFTP_REQUEST_TIMEOUT_SECS: u64 = 3600;
 
 /// 在 exec 通道上以 `user` 身份起 sftp-server（见 terminal_user::sftp_server_script），返回 SFTP 会话。
 /// 等到 stderr 出现密码提示才写密码、出现就绪标记才开始 SFTP 协议：免密 sudo 不会把密码误当成 SFTP 数据，
@@ -155,7 +161,7 @@ async fn open_sftp_as(
     user: &str,
     via: Via,
     password: Option<&str>,
-) -> AppResult<SftpSession> {
+) -> AppResult<Sftp> {
     let ready = if via == Via::Su && password.is_none() {
         // 没密码就不跑 su：空密码同样会记一次认证失败
         Err(AppError::Other(format!("SUDO_PASSWORD_REQUIRED: 需要 {user} 的密码")))
@@ -913,7 +919,7 @@ async fn download_large(
 
 /// 目录下载的文件：小文件按在途字节预算并发（单句柄一问一答，每个文件在途至多一个块）；
 /// ≥ SEGMENTED_DOWNLOAD_MIN 的大文件在小文件之后逐个分段下载（自带 DOWNLOAD_SEGMENTS 路 READ）。
-/// 两批不重叠，在途 READ 始终 ≤ DOWNLOAD_IN_FLIGHT_BYTES，与单文件分段下载持平，SFTP 请求超时的推导不变。
+/// 两批不重叠，在途 READ 始终 ≤ DOWNLOAD_IN_FLIGHT_BYTES，与单文件分段下载持平。
 async fn download_dir_files<T, FS, FutS, FL, FutL>(
     files: Vec<(T, u64)>,
     small: FS,
@@ -1490,8 +1496,8 @@ mod tests {
         create_dir_levels, download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
         pick_sudo_password, saved_password_for, split_remote, sudo_extract_command, sudo_failure, transfer_with_budget, DirProgress,
-        DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY, DOWNLOAD_IN_FLIGHT_BYTES, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, SFTP_TIMEOUT_SECS,
-        TRANSFER_CHUNK, UPLOAD_IN_FLIGHT_BYTES,
+        DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY, DOWNLOAD_IN_FLIGHT_BYTES, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, SFTP_REQUEST_TIMEOUT_SECS,
+        SFTP_STALL, TRANSFER_CHUNK, UPLOAD_IN_FLIGHT_BYTES,
     };
     use super::{staging_from_prepare, sudo_prepare_command};
 
@@ -2222,7 +2228,7 @@ mod tests {
                 let (in_flight, seen) = (in_flight.clone(), large_seen.clone());
                 async move {
                     // 大文件自带 DOWNLOAD_SEGMENTS 路在途 READ，开始时不能还有别的文件在传，
-                    // 否则在途总量翻倍，慢链路上排在后面的 READ 会撞 SFTP 读超时。
+                    // 否则在途总量翻倍，超出下载的在途预算。
                     assert_eq!(in_flight.fetch_add(1, Ordering::SeqCst), 0, "{name} overlapped another transfer");
                     tokio::task::yield_now().await;
                     in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -2646,16 +2652,20 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_budget_fits_ssh_window_and_request_timeout() {
+    fn in_flight_budget_fits_ssh_window_and_stall_detection() {
         // 在途再多也只是在通道窗口外排队：下载方向是我们给的连接窗口；上传方向是服务端给的
         // （OpenSSH session 通道 2MB），正好是 russh-sftp 8 路写 pipeline × 块
         assert!(DOWNLOAD_IN_FLIGHT_BYTES <= crate::ssh::CONNECTION_WINDOW as u64);
         let write_pipeline = russh_sftp::client::Config::default().max_concurrent_writes as u64;
         assert_eq!(UPLOAD_IN_FLIGHT_BYTES, write_pipeline * TRANSFER_CHUNK as u64);
         assert!(UPLOAD_IN_FLIGHT_BYTES <= 2 * 1024 * 1024);
-        // 排在满额在途数据后面的请求，在 ~35KB/s 的慢链路上也要在超时前等到回复
+        // 卡死判定只看通道多久没收到数据，与在途多少无关；上传时两个写确认之间隔一个块的发送时间，
+        // 不慢于 ~5KB/s 的链路不能误判
+        let slowest_ok = TRANSFER_CHUNK as u64 / SFTP_STALL.as_secs();
+        assert!(slowest_ok <= 5 * 1024, "{slowest_ok}B/s");
+        // russh-sftp 的单请求超时只兜底：排在满额在途数据后面的请求，要在比卡死判定能容忍的还慢的链路上才会撞上它
         let most = DOWNLOAD_IN_FLIGHT_BYTES.max(UPLOAD_IN_FLIGHT_BYTES);
-        assert!(most / SFTP_TIMEOUT_SECS <= 35 * 1024, "{}B/s", most / SFTP_TIMEOUT_SECS);
+        assert!(most / SFTP_REQUEST_TIMEOUT_SECS < slowest_ok, "{}B/s", most / SFTP_REQUEST_TIMEOUT_SECS);
     }
 
     #[tokio::test]
@@ -2726,6 +2736,7 @@ mod tests {
             stream_to_remote, upload_file, upload_tree, DirCounts, DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY,
             DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
         };
+        use crate::sftp_stall::Sftp;
         use russh_sftp::client::SftpSession;
         use std::collections::BTreeMap;
         use std::path::{Path, PathBuf};
@@ -2745,7 +2756,7 @@ mod tests {
             Some(crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap())
         }
 
-        async fn connect() -> Option<(H, SftpSession)> {
+        async fn connect() -> Option<(H, Sftp)> {
             let h = login().await?;
             let ch = channel(&h).await;
             ch.request_subsystem(true, "sftp").await.unwrap();
@@ -2758,7 +2769,7 @@ mod tests {
 
         /// 起一个句柄上限为 `limit` 的 sftp-server：OpenSSH 的 limits 扩展通告 RLIMIT_NOFILE − 5（stdio、syslog、余量），
         /// russh-sftp 按它在客户端计数。上限压低后漏一个句柄就能测出来（见 assert_all_handles_released），不用真开一千多个文件。
-        async fn connect_with_handle_limit(limit: u64) -> Option<(H, SftpSession)> {
+        async fn connect_with_handle_limit(limit: u64) -> Option<(H, Sftp)> {
             assert!(limit as usize > DIR_FILE_CONCURRENCY.max(DIR_OP_CONCURRENCY).max(DOWNLOAD_SEGMENTS));
             let h = login().await?;
             let ch = channel(&h).await;
@@ -3083,6 +3094,112 @@ mod tests {
             assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
             exec(&h, &format!("chmod 755 {base}/t/d050 && rm -rf -- '{base}'")).await;
             let _ = std::fs::remove_dir_all(&dst);
+        }
+
+        /// 容器 eth0 上的 netem：读出现有参数（delay / rate 等），可以临时追加（如 loss 100%），drop 时还原。
+        struct Netem {
+            container: String,
+            params: Vec<String>,
+        }
+
+        impl Netem {
+            fn current(container: &str) -> Self {
+                let out = std::process::Command::new("docker").args(["exec", container, "tc", "qdisc", "show", "dev", "eth0"]).output().unwrap();
+                let line = String::from_utf8_lossy(&out.stdout).into_owned();
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                assert!(tokens.contains(&"netem"), "{container} 的 eth0 上要先有 netem：{line}");
+                let limit = tokens.iter().position(|t| *t == "limit").unwrap();
+                Netem { container: container.into(), params: tokens[limit + 2..].iter().map(|t| t.to_string()).collect() }
+            }
+
+            fn set(&self, extra: &[&str]) {
+                let status = std::process::Command::new("docker")
+                    .args(["exec", &self.container, "tc", "qdisc", "change", "dev", "eth0", "root", "netem"])
+                    .args(&self.params)
+                    .args(extra)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+        }
+
+        impl Drop for Netem {
+            fn drop(&mut self) {
+                self.set(&[]);
+            }
+        }
+
+        /// 卡死判定只看通道多久没收到数据：压到 5s，先在慢链路上下一个在途 ~1.5MB 的分段下载（排在后面的 READ
+        /// 要等几十秒，远超 5s，但一直在收数据）——必须下完；再下一个大文件，中途让链路完全不通（容器出方向丢包 100%）：
+        /// 在等的请求（16 段里读了一半的 READ 等）都要在判定之后不久报错返回、不能挂住，会话标记失效、之后的请求立刻失败；
+        /// 链路恢复后 sftp_for 重开一个能用的会话。5s 早于 keepalive（10s 一次、约 30s 断开）发现断线，测的是判定本身。
+        /// 需要 SSHL_STALL_CONTAINER=<容器名>：带 NET_ADMIN、装了 iproute2、eth0 上已有 netem（如 delay 100ms rate 400kbit）。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 和 SSHL_STALL_CONTAINER=<容器名>"]
+        async fn stalled_channel_fails_waiting_requests_and_reopens() {
+            use super::super::{sftp_for, SFTP_REQUEST_TIMEOUT_SECS};
+            use std::sync::Arc;
+            let Ok(container) = std::env::var("SSHL_STALL_CONTAINER") else { return };
+            let Some(h) = login().await else { return };
+            let netem = Netem::current(&container);
+            let stall = Duration::from_secs(5);
+            let session = Arc::new(crate::ssh::SshSession::for_test(h.clone(), "alice"));
+            let ch = channel(&h).await;
+            ch.request_subsystem(true, "sftp").await.unwrap();
+            let short = Arc::new(crate::sftp_stall::open(ch.into_stream(), stall, SFTP_REQUEST_TIMEOUT_SECS).await.unwrap());
+            *session.sftp.lock().await = Some(short.clone());
+
+            let chunk = TRANSFER_CHUNK as u64;
+            let (steady, big) = (6 * chunk, 40 * chunk);
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!("head -c {steady} /dev/urandom > {base}/steady.bin && head -c {big} /dev/urandom > {base}/big.bin")).await;
+            let local = temp_dir("stall");
+
+            let t = Instant::now();
+            let n = download_large(&short, &format!("{base}/steady.bin"), &local, steady, |_| {}).await
+                .expect("一直在收数据，排队再久也不算卡死");
+            assert_eq!(n, steady);
+            eprintln!("STALL-IT {steady}B 分段下载 {:?}", t.elapsed());
+            assert!(t.elapsed() > 2 * stall, "链路太快（{:?}），排队时间没超过卡死判定，测不出问题", t.elapsed());
+            assert!(!short.is_dead());
+
+            let cut_after = Duration::from_secs(3);
+            let cutter = {
+                let (container, params) = (netem.container.clone(), netem.params.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(cut_after);
+                    // 还原交给外面的 netem，这份不能在 drop 时还原
+                    let cut = std::mem::ManuallyDrop::new(Netem { container, params });
+                    cut.set(&["loss", "100%"]);
+                })
+            };
+            let t = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(90), download_large(&short, &format!("{base}/big.bin"), &local, big, |_| {})).await
+                .expect("卡死后在等的请求必须出错返回，不能挂住");
+            let elapsed = t.elapsed();
+            cutter.join().unwrap();
+            let err = result.expect_err("链路断了还下完了：文件太小或链路太快").to_string();
+            eprintln!("STALL-IT {cut_after:?} 时断开，{elapsed:?} 时报错：{err}");
+            assert!(err.contains("5 秒没有收到任何数据"), "{err}");
+            assert!(elapsed >= cut_after + stall, "断开 {cut_after:?} 后至少 {stall:?} 没数据才算卡死，实际 {elapsed:?} 就报错了");
+            assert!(short.is_dead());
+            let t = Instant::now();
+            assert!(short.metadata(base.as_str()).await.is_err());
+            assert!(t.elapsed() < Duration::from_secs(1), "失效后的请求要立刻失败");
+
+            // 恢复后，旧通道在途 READ 的回复（至多 DOWNLOAD_IN_FLIGHT_BYTES）还要先从同一条 TCP 过完，新通道才开得出来
+            drop(netem);
+            let t = Instant::now();
+            let fresh = tokio::time::timeout(Duration::from_secs(240), sftp_for(&session)).await
+                .expect("链路恢复后重开不能挂住")
+                .expect("链路恢复后 sftp_for 应重开");
+            eprintln!("STALL-IT 恢复后重开 {:?}", t.elapsed());
+            assert!(!Arc::ptr_eq(&fresh, &short), "失效的会话不能再复用");
+            assert!(fresh.metadata(base.as_str()).await.unwrap().is_dir());
+            assert!(Arc::ptr_eq(&sftp_for(&session).await.unwrap(), &fresh), "活着的会话照常复用");
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            let _ = std::fs::remove_file(&local);
         }
 
         /// 分段数对大文件下载吞吐的影响（另需 SSHL_SFTP_BENCH=1）：同一连接上 8 / 16 / 24 / 32 段交替跑几轮，

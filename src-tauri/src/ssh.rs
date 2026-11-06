@@ -90,8 +90,8 @@ pub struct SshSession {
     /// disconnect 都是 &self、各等各的通道确认，不加锁：加锁会把同一会话上的开通道串行化。
     pub handle: Arc<russh::client::Handle<ClientHandler>>,
     /// Cached SFTP session — reused across file ops to avoid sshd MaxSessions exhaustion.
-    /// Mirrors the Electron-side fix from commits 8cb552c / a819e15.
-    pub sftp: Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
+    /// Mirrors the Electron-side fix from commits 8cb552c / a819e15. 通道卡死 / 关闭后不再复用（见 sftp_for）。
+    pub sftp: Mutex<Option<Arc<crate::sftp_stall::Sftp>>>,
     /// Lazily loaded uid→username map (from /etc/passwd).
     pub passwd_cache: Mutex<Option<Arc<HashMap<u32, String>>>>,
     /// Lazily loaded gid→groupname map (from /etc/group).
@@ -138,6 +138,28 @@ impl SshSession {
             self.first_data.notify_waiters();
         }
         activated
+    }
+
+    /// 测试用：只有 SSH 连接、没有终端的会话（文件管理的命令只用到 handle、缓存和身份）。
+    #[cfg(test)]
+    pub(crate) fn for_test(handle: Arc<russh::client::Handle<ClientHandler>>, username: &str) -> Self {
+        let (outbound, _) = mpsc::unbounded_channel();
+        Self {
+            id: "test".into(),
+            host: String::new(),
+            username: username.into(),
+            connection_id: None,
+            warm_key: String::new(),
+            buffer: Mutex::new(String::new()),
+            handle,
+            sftp: Mutex::new(None),
+            passwd_cache: Mutex::new(None),
+            group_cache: Mutex::new(None),
+            elevation: Mutex::new(None),
+            activated: AtomicBool::new(false),
+            first_data: Arc::new(Notify::new()),
+            outbound,
+        }
     }
 }
 

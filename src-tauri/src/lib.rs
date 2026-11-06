@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod local_fs;
 mod sftp;
+mod sftp_stall;
 mod ssh;
 mod state;
 mod system_fonts;
