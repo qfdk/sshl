@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, AppResult};
 
@@ -21,13 +21,20 @@ pub async fn file_get_home_dir() -> AppResult<String> {
         .ok_or_else(|| AppError::Other("home dir not found".into()))
 }
 
+/// 整个目录在一个阻塞任务里用 std::fs 列完：tokio::fs 的每条 `metadata()` 都各起一次 spawn_blocking，
+/// 5000 项的目录要 ~40ms，这样 ~12ms。条目元数据不跟随符号链接（lstat）。
 #[tauri::command]
 pub async fn file_list_local(directory: String) -> AppResult<Vec<LocalEntry>> {
-    let dir = PathBuf::from(&directory);
+    tokio::task::spawn_blocking(move || list_local(&PathBuf::from(directory)))
+        .await
+        .map_err(|e| AppError::Other(format!("list local directory: {e}")))?
+}
+
+fn list_local(dir: &Path) -> AppResult<Vec<LocalEntry>> {
     let mut out = Vec::new();
-    let mut rd = tokio::fs::read_dir(&dir).await?;
-    while let Some(entry) = rd.next_entry().await? {
-        let meta = entry.metadata().await?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
         let path = entry.path();
         let modify_time = meta
             .modified()
@@ -65,4 +72,39 @@ pub async fn file_local_kinds(paths: Vec<String>) -> Vec<bool> {
         kinds.push(tokio::fs::metadata(&path).await.map(|m| m.is_dir()).unwrap_or(false));
     }
     kinds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_list_local;
+
+    #[tokio::test]
+    async fn lists_entries_without_following_symlinks() {
+        let root = std::env::temp_dir().join(format!("sshl-local-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"abc").unwrap();
+        std::os::unix::fs::symlink(root.join("sub"), root.join("link-dir")).unwrap();
+        std::os::unix::fs::symlink("a.txt", root.join("link-file")).unwrap();
+
+        let listed = file_list_local(root.to_string_lossy().into_owned()).await;
+        std::fs::remove_dir_all(&root).unwrap();
+        let mut listed = listed.unwrap();
+        listed.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a.txt", "link-dir", "link-file", "sub"]);
+        for e in &listed {
+            assert_eq!(e.path, root.join(&e.name).to_string_lossy());
+            assert!(e.modify_time.is_some(), "{} 缺修改时间", e.name);
+        }
+        let kind = |i: usize| (listed[i].is_directory, listed[i].size);
+        assert_eq!(kind(0), (false, 3));
+        assert!(listed[3].is_directory);
+        // 符号链接取链接本身（lstat）：指向目录的不算目录，大小是链接内容（目标路径）的长度。
+        assert!(!listed[1].is_directory);
+        assert_eq!(listed[1].size, root.join("sub").to_string_lossy().len() as u64);
+        assert_eq!(kind(2), (false, "a.txt".len() as u64));
+
+        assert!(file_list_local(root.to_string_lossy().into_owned()).await.is_err(), "目录不存在要报错");
+    }
 }

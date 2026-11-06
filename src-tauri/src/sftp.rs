@@ -2,7 +2,7 @@
 // Per-session SftpSession is cached on SshSession.sftp to avoid Channel accumulation
 // (mirrors Electron-side fix in commits 8cb552c / a819e15).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,16 +33,30 @@ const TRANSFER_CHUNK: usize = 255 * 1024;
 /// 串行时 /usr/lib 这类几百个 .so 链接的目录要几百个 RTT。
 const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
-/// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），
-/// 开 N 个句柄读不相交区间，在途 READ 就是 N 个。
-const DOWNLOAD_SEGMENTS: usize = 4;
+/// 一条 SFTP 通道上同时在途的数据上限 ≈ SSH 默认通道窗口（russh 2MB）：再多也只是在窗口外排队，
+/// 还让排在后面的请求（OPEN / CLOSE / READ 的回复）更晚才到，慢链路上撞 SFTP 请求超时（见 new_sftp）。
+const IN_FLIGHT_BYTES: u64 = 8 * TRANSFER_CHUNK as u64;
 
-/// 小于此大小走单句柄流式下载：多开句柄的 open/close 往返抵不过并发收益。
+/// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），
+/// 开 N 个句柄读不相交区间，在途 READ 就是 N 个：8 × 255KB = IN_FLIGHT_BYTES ≈ SSH 通道窗口，
+/// 与上传的 8 路写 pipeline 在途量持平。
+const DOWNLOAD_SEGMENTS: usize = (IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64) as usize;
+
+/// 小于此大小走单句柄流式下载。按 RTT 算（块 = TRANSFER_CHUNK）：单句柄 = open + ⌈S/块⌉ 个 READ
+/// + 1 个读到 EOF 的 READ；分段 = 段 0 open → 其余段 open → 每段 ⌈S/(段数·块)⌉ 个 READ（只有最后一段
+/// 多读一次 EOF）。2 块时两者打平、分段还多开句柄；4 块时分段 4 个 RTT 对单句柄 6 个。再往上调
+/// 只会让 1–2MB 的文件白等往返，所以保持 4 块（≈1MB）。
 const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
 
-/// 目录传输时同一层文件的并发数。小文件的耗时主要是 open/close 各一个 RTT，
-/// 串行时几百个小文件就是几百轮往返。子目录仍逐个递归，避免并发数随深度相乘。
-const DIR_FILE_CONCURRENCY: usize = 4;
+/// 目录传输同时在传的文件数上限。小文件的耗时几乎全是 open / 读写 / close 的往返（各一个 RTT），
+/// 串行时几千个小文件就是几千轮往返；数据量另由 IN_FLIGHT_BYTES 限，这里限的是同时开着的句柄数
+/// （远端远低于 OpenSSH 的 1019，本地远低于 macOS 默认 256 个 fd）。50ms RTT、3000 个小文件实测：
+/// 16 路上传 / 下载 33s / 36s，32 路 17s / 19s。
+const DIR_FILE_CONCURRENCY: usize = 32;
+
+/// 目录传输时同一层内建目录 / 列目录的并发度。每个 MKDIR 一个 RTT，每次列目录至少三个
+/// （opendir、readdir、close），请求和回复都很小。
+const DIR_OP_CONCURRENCY: usize = 32;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,11 +132,14 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
 async fn new_sftp(channel: russh::Channel<russh::client::Msg>) -> AppResult<SftpSession> {
     let sftp = SftpSession::new(channel.into_stream()).await
         .map_err(|e| AppError::Sftp(format!("sftp init: {e}")))?;
-    // russh-sftp 的读请求从发出起计时，默认 10s 超时（写请求不计时）。分段下载 / 目录并发下载
-    // 会同时挂约 1MB 的 READ，链路慢于 ~100KB/s 时排在后面的回复会超时；放宽到 30s（≥ ~35KB/s）。
-    sftp.set_timeout(30);
+    sftp.set_timeout(SFTP_TIMEOUT_SECS);
     Ok(sftp)
 }
+
+/// SFTP 请求超时（秒）。russh-sftp 的请求从发出起计时，默认 10s（写请求不计时）。分段下载、目录并发传输
+/// 会让至多 IN_FLIGHT_BYTES（≈2MB）的数据同时在途，排在后面的请求 / 回复要等它们先过完链路：
+/// 2MB / 60s ≈ 35KB/s，链路不慢于此就不会误超时。
+const SFTP_TIMEOUT_SECS: u64 = 60;
 
 /// 在 exec 通道上以 `user` 身份起 sftp-server（见 terminal_user::sftp_server_script），返回 SFTP 会话。
 /// 等到 stderr 出现密码提示才写密码、出现就绪标记才开始 SFTP 协议：免密 sudo 不会把密码误当成 SFTP 数据，
@@ -699,6 +716,32 @@ where
     Ok(transferred)
 }
 
+/// 关掉读完的远端句柄，不等回复。只 drop 也会发 CLOSE，但 russh-sftp 只有等到 CLOSE 的回复才给已开句柄
+/// 计数减一，drop 掉的句柄永远占着计数：服务端声明了句柄上限（OpenSSH limits 扩展为 1019）时，同一 SFTP
+/// 会话累计下载约一千个文件后，open / 列目录全部报 "handle limit reached"，只能重连。
+fn close_in_background(mut file: russh_sftp::client::fs::File) {
+    tokio::spawn(async move {
+        let _ = file.shutdown().await;
+    });
+}
+
+/// 单句柄流式下载到 `local_path`（小文件），返回累计字节数。
+async fn download_small(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &Path,
+    on_progress: impl FnMut(u64),
+) -> AppResult<u64> {
+    let mut remote = sftp.open(remote_path).await
+        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
+    let result = async {
+        let mut local = tokio::fs::File::create(local_path).await?;
+        stream_to_local(&mut remote, &mut local, remote_path, on_progress).await
+    }.await;
+    close_in_background(remote);
+    result
+}
+
 /// 把 [0, total) 切成至多 `segments` 段，段长按 TRANSFER_CHUNK 对齐，让每个 READ 都是整块。
 fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
     let chunk = TRANSFER_CHUNK as u64;
@@ -709,15 +752,17 @@ fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// 分段并发下载：每段用 `open_remote` / `open_local` 各开一个独立句柄，seek 到段首后
-/// 顺序读写，返回累计字节数。本地文件不预分配长度——各段写到自己的偏移，最终长度
-/// 自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，直接报错，
-/// 不留下零填充的空洞；最后一段不设上界读到 EOF。
+/// 分段并发下载：段 0 用调用方已打开的远端句柄 `first`，其余段用 `open_remote` 各开一个；
+/// 本地各段都用 `open_local` 开独立句柄。seek 到段首后顺序读写，返回累计字节数。本地文件不预分配长度——
+/// 各段写到自己的偏移，最终长度自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，
+/// 直接报错，不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
 async fn download_segmented<R, W, OR, ORF, OL, OLF>(
     total: u64,
     segments: usize,
+    first: R,
     open_remote: OR,
     open_local: OL,
+    release: impl Fn(R),
     remote_path: &str,
     on_progress: impl Fn(u64),
 ) -> AppResult<u64>
@@ -736,46 +781,62 @@ where
     let ranges = segment_ranges(total, segments);
     let last = ranges.len().saturating_sub(1);
     let transferred = AtomicU64::new(0);
-    let (open_remote, open_local, transferred_ref, on_progress) =
-        (&open_remote, &open_local, &transferred, &on_progress);
-    let workers = ranges.into_iter().enumerate().map(|(i, (start, end))| async move {
-        let mut remote = open_remote().await?;
-        let mut local = open_local().await?;
-        remote.seek(SeekFrom::Start(start)).await
-            .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
-        local.seek(SeekFrom::Start(start)).await?;
-        let mut buf = vec![0u8; TRANSFER_CHUNK];
-        let mut pos = start;
-        loop {
-            let want = if i == last {
-                TRANSFER_CHUNK
-            } else {
-                (end - pos).min(TRANSFER_CHUNK as u64) as usize
+    let (open_remote, open_local, release, transferred_ref, on_progress) =
+        (&open_remote, &open_local, &release, &transferred, &on_progress);
+    let mut first = Some(first);
+    let workers: Vec<_> = ranges.into_iter().enumerate().map(|(i, (start, end))| {
+        let opened = first.take();
+        async move {
+            let mut remote = match opened {
+                Some(remote) => remote,
+                None => open_remote().await?,
             };
-            if want == 0 { break; }
-            let n = remote.read(&mut buf[..want]).await
-                .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
-            if n == 0 {
-                if i != last {
-                    return Err(AppError::Sftp(format!(
-                        "{remote_path} shrank during download (EOF at {pos}, expected {end})"
-                    )));
+            let result = async {
+                let mut local = open_local().await?;
+                remote.seek(SeekFrom::Start(start)).await
+                    .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
+                local.seek(SeekFrom::Start(start)).await?;
+                let mut buf = vec![0u8; TRANSFER_CHUNK];
+                let mut pos = start;
+                loop {
+                    let want = if i == last {
+                        TRANSFER_CHUNK
+                    } else {
+                        (end - pos).min(TRANSFER_CHUNK as u64) as usize
+                    };
+                    if want == 0 { break; }
+                    let n = remote.read(&mut buf[..want]).await
+                        .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
+                    if n == 0 {
+                        if i != last {
+                            return Err(AppError::Sftp(format!(
+                                "{remote_path} shrank during download (EOF at {pos}, expected {end})"
+                            )));
+                        }
+                        break;
+                    }
+                    local.write_all(&buf[..n]).await?;
+                    pos += n as u64;
+                    on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
                 }
-                break;
-            }
-            local.write_all(&buf[..n]).await?;
-            pos += n as u64;
-            on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
+                local.flush().await?;
+                Ok::<(), AppError>(())
+            }.await;
+            release(remote);
+            result
         }
-        local.flush().await?;
-        Ok::<(), AppError>(())
-    });
+    }).collect();
+    // 没有段（total = 0）时段 0 的句柄没人用
+    if let Some(unused) = first {
+        release(unused);
+    }
     futures::future::try_join_all(workers).await?;
     Ok(transferred.into_inner())
 }
 
-/// 大文件分段下载到 `local_path`。先确认远端可读再创建/截断本地文件：能 stat 但没有读权限
-/// （如 root 的大日志）时，不留下 0 字节文件、也不截断同名的已有文件。之后各段再各自以写模式打开。
+/// 大文件分段下载到 `local_path`。先开段 0 的远端句柄，成功了才创建 / 截断本地文件：能 stat 但
+/// 没有读权限（如 root 的大日志）时，不留下 0 字节文件、也不截断同名的已有文件。这个句柄就是
+/// 段 0，不再单独探测一次（省一对 open / close）；其余段之后各自打开。
 async fn download_large(
     sftp: &SftpSession,
     remote_path: &str,
@@ -783,12 +844,16 @@ async fn download_large(
     total: u64,
     on_progress: impl Fn(u64),
 ) -> AppResult<u64> {
-    drop(sftp.open(remote_path).await
-        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?);
-    tokio::fs::File::create(local_path).await?;
+    let first = sftp.open(remote_path).await
+        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
+    if let Err(e) = tokio::fs::File::create(local_path).await {
+        close_in_background(first);
+        return Err(e.into());
+    }
     download_segmented(
         total,
         DOWNLOAD_SEGMENTS,
+        first,
         move || async move {
             sftp.open(remote_path).await
                 .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))
@@ -796,14 +861,15 @@ async fn download_large(
         move || async move {
             Ok(tokio::fs::OpenOptions::new().write(true).open(local_path).await?)
         },
+        close_in_background,
         remote_path,
         on_progress,
     ).await
 }
 
-/// 目录下载的同层文件：小文件按 DIR_FILE_CONCURRENCY 并发；≥ SEGMENTED_DOWNLOAD_MIN 的大文件
-/// 在小文件之后逐个分段下载。两批不重叠，在途 READ 至多 max(DIR_FILE_CONCURRENCY, DOWNLOAD_SEGMENTS)
-/// 个，与单文件分段下载持平，SFTP 30s 读超时的余量不变。
+/// 目录下载的文件：小文件按在途字节预算并发（单句柄一问一答，每个文件在途至多一个块）；
+/// ≥ SEGMENTED_DOWNLOAD_MIN 的大文件在小文件之后逐个分段下载（自带 DOWNLOAD_SEGMENTS 路 READ）。
+/// 两批不重叠，在途 READ 始终 ≤ IN_FLIGHT_BYTES，与单文件分段下载持平，SFTP 请求超时的推导不变。
 async fn download_dir_files<T, FS, FutS, FL, FutL>(
     files: Vec<(T, u64)>,
     small: FS,
@@ -817,23 +883,53 @@ where
 {
     let (large_files, small_files): (Vec<_>, Vec<_>) =
         files.into_iter().partition(|(_, size)| *size >= SEGMENTED_DOWNLOAD_MIN);
-    transfer_files_concurrently(small_files.into_iter().map(|(item, _)| item).collect(), small).await?;
+    let small_files = small_files.into_iter().map(|(item, size)| (item, size.min(TRANSFER_CHUNK as u64))).collect();
+    transfer_with_budget(small_files, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, small).await?;
     for (item, size) in large_files {
         large(item, size).await?;
     }
     Ok(())
 }
 
-/// 按 DIR_FILE_CONCURRENCY 并发处理同一层的一批文件，遇到第一个错误即返回。
-async fn transfer_files_concurrently<T, F, Fut>(items: Vec<T>, transfer: F) -> AppResult<()>
+/// 并发处理一批 (文件, 在途字节)，按原顺序放行：同时在传的不超过 `max_files` 个，在途字节之和不超过
+/// `budget`（超过 budget 的按 budget 计，即独占）；队首放不下就等前面的传完。遇到第一个错误即返回。
+async fn transfer_with_budget<T, F, Fut>(
+    items: Vec<(T, u64)>,
+    max_files: usize,
+    budget: u64,
+    transfer: F,
+) -> AppResult<()>
 where
     F: Fn(T) -> Fut,
     Fut: Future<Output = AppResult<()>>,
 {
-    use futures::TryStreamExt;
-    stream::iter(items.into_iter().map(Ok))
-        .try_for_each_concurrent(DIR_FILE_CONCURRENCY, transfer)
-        .await
+    let transfer = &transfer;
+    let mut queue = items.into_iter().map(|(item, cost)| (item, cost.min(budget))).peekable();
+    let mut running = stream::FuturesUnordered::new();
+    let mut used = 0;
+    loop {
+        // 没有在传的时候队首一定放得下（cost 已截到 budget），所以不会空转
+        while running.len() < max_files.max(1) && queue.peek().is_some_and(|(_, cost)| used + cost <= budget) {
+            let (item, cost) = queue.next().unwrap();
+            used += cost;
+            running.push(async move { transfer(item).await.map(|()| cost) });
+        }
+        match running.next().await {
+            Some(done) => used -= done?,
+            None => return Ok(()),
+        }
+    }
+}
+
+/// 按层建目录：同层并发（父目录都在上一层），层与层之间按顺序。
+async fn create_dir_levels<'a, D, F, Fut>(levels: &'a [Vec<D>], create: F)
+where
+    F: Fn(&'a D) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    for level in levels {
+        stream::iter(level).for_each_concurrent(DIR_OP_CONCURRENCY, &create).await;
+    }
 }
 
 #[tauri::command]
@@ -875,10 +971,7 @@ pub async fn file_download(
     let transferred = if total >= SEGMENTED_DOWNLOAD_MIN {
         download_large(&sftp, &remote_path, Path::new(&local_path), total, &on_progress).await?
     } else {
-        let mut remote = sftp.open(&remote_path).await
-            .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
-        let mut local = tokio::fs::File::create(&local_path).await?;
-        stream_to_local(&mut remote, &mut local, &remote_path, &on_progress).await?
+        download_small(&sftp, &remote_path, Path::new(&local_path), &on_progress).await?
     };
     // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
     emit_download_progress(&app, DownloadProgress {
@@ -916,10 +1009,11 @@ pub async fn file_create_remote_directory(
 /// 目录传输进度事件的节流间隔（与单文件传输一致）。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// 目录传输计划：先完整遍历，拿到全部子目录（父目录在前）和每个文件的大小，才有总量和百分比；
-/// 遍历结果直接用于传输，不重复列目录。files 为 (源, 目标, 字节数)。
+/// 目录传输计划：先完整遍历，拿到全部子目录和每个文件的大小，才有总量和百分比；
+/// 遍历结果直接用于传输，不重复列目录。dirs 按层分组（第 0 层是根，每层的父目录都在上一层），
+/// files 为 (源, 目标, 字节数)，顺序同逐层遍历。
 struct DirPlan<S, D> {
-    dirs: Vec<D>,
+    dirs: Vec<Vec<D>>,
     files: Vec<(S, D, u64)>,
 }
 
@@ -929,47 +1023,82 @@ impl<S, D> DirPlan<S, D> {
     }
 }
 
-/// 上传前遍历本地目录。目录判断沿用 DirEntry 的元数据（不跟随符号链接），
-/// 文件大小跟随符号链接取目标的，与实际传输的字节数一致。
+/// 上传前遍历本地目录。整棵树在一个阻塞任务里用 std::fs 走完（tokio::fs 每条元数据都各起一次
+/// spawn_blocking）；目录判断用 DirEntry 的类型（不跟随符号链接，多数文件系统不用额外 stat），
+/// 只对文件取大小，跟随符号链接取目标的，与实际传输的字节数一致。
 async fn scan_local(local: PathBuf, remote: String) -> AppResult<DirPlan<PathBuf, String>> {
-    let mut plan = DirPlan { dirs: vec![remote.clone()], files: Vec::new() };
-    let mut queue = VecDeque::from([(local, remote)]);
-    while let Some((dir_local, dir_remote)) = queue.pop_front() {
-        let mut rd = tokio::fs::read_dir(&dir_local).await?;
-        while let Some(entry) = rd.next_entry().await? {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let (child_local, child_remote) = (entry.path(), join_remote(&dir_remote, &name));
-            if entry.metadata().await?.is_dir() {
-                plan.dirs.push(child_remote.clone());
-                queue.push_back((child_local, child_remote));
-            } else {
-                let size = tokio::fs::metadata(&child_local).await.map(|m| m.len()).unwrap_or(0);
-                plan.files.push((child_local, child_remote, size));
+    tokio::task::spawn_blocking(move || {
+        let mut plan = DirPlan { dirs: vec![vec![remote.clone()]], files: Vec::new() };
+        let mut level = vec![(local, remote)];
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            for (dir_local, dir_remote) in &level {
+                for entry in std::fs::read_dir(dir_local)? {
+                    let entry = entry?;
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let (child_local, child_remote) = (entry.path(), join_remote(dir_remote, &name));
+                    if entry.file_type()?.is_dir() {
+                        next.push((child_local, child_remote));
+                    } else {
+                        let size = std::fs::metadata(&child_local).map(|m| m.len()).unwrap_or(0);
+                        plan.files.push((child_local, child_remote, size));
+                    }
+                }
             }
+            if !next.is_empty() {
+                plan.dirs.push(next.iter().map(|(_, remote)| remote.clone()).collect());
+            }
+            level = next;
         }
-    }
-    Ok(plan)
+        Ok(plan)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("scan local directory: {e}")))?
+}
+
+/// 列一个远端目录：(名称, 是否目录, 字节数)，供 scan_remote 用。
+async fn list_remote_dir(sftp: &SftpSession, dir: String) -> AppResult<Vec<(String, bool, u64)>> {
+    let entries = sftp.read_dir(&dir).await
+        .map_err(|e| AppError::Sftp(format!("read_dir {dir}: {e}")))?;
+    Ok(entries.into_iter().map(|e| {
+        let meta = e.metadata();
+        (e.file_name(), meta.is_dir(), meta.size.unwrap_or(0))
+    }).collect())
 }
 
 /// 下载前遍历远端目录。`list` 列出一个远端目录的 (名称, 是否目录, 字节数)。
+/// 逐层遍历，同层各目录并发列（每次至少三个 RTT），结果仍按列表顺序处理，与逐个遍历的顺序一致。
 async fn scan_remote<L, Fut>(remote: String, local: PathBuf, list: L) -> AppResult<DirPlan<String, PathBuf>>
 where
     L: Fn(String) -> Fut,
     Fut: Future<Output = AppResult<Vec<(String, bool, u64)>>>,
 {
-    let mut plan = DirPlan { dirs: vec![local.clone()], files: Vec::new() };
-    let mut queue = VecDeque::from([(remote, local)]);
-    while let Some((dir_remote, dir_local)) = queue.pop_front() {
-        for (name, is_dir, size) in list(dir_remote.clone()).await? {
-            if name == "." || name == ".." { continue; }
-            let (child_remote, child_local) = (join_remote(&dir_remote, &name), dir_local.join(&name));
-            if is_dir {
-                plan.dirs.push(child_local.clone());
-                queue.push_back((child_remote, child_local));
-            } else {
-                plan.files.push((child_remote, child_local, size));
+    use futures::TryStreamExt;
+    let mut plan = DirPlan { dirs: vec![vec![local.clone()]], files: Vec::new() };
+    let mut level = vec![(remote, local)];
+    while !level.is_empty() {
+        let dirs: Vec<String> = level.iter().map(|(dir_remote, _)| dir_remote.clone()).collect();
+        let listings: Vec<_> = stream::iter(dirs)
+            .map(&list)
+            .buffered(DIR_OP_CONCURRENCY)
+            .try_collect()
+            .await?;
+        let mut next = Vec::new();
+        for ((dir_remote, dir_local), entries) in level.iter().zip(listings) {
+            for (name, is_dir, size) in entries {
+                if name == "." || name == ".." { continue; }
+                let (child_remote, child_local) = (join_remote(dir_remote, &name), dir_local.join(&name));
+                if is_dir {
+                    next.push((child_remote, child_local));
+                } else {
+                    plan.files.push((child_remote, child_local, size));
+                }
             }
         }
+        if !next.is_empty() {
+            plan.dirs.push(next.iter().map(|(_, local)| local.clone()).collect());
+        }
+        level = next;
     }
     Ok(plan)
 }
@@ -1038,6 +1167,15 @@ pub async fn file_upload_directory(
     upload_tree_to(&app, &sftp, &session_id, &local_path, &remote_path, &remote_path).await
 }
 
+/// 目录传输的进度快照，交给调用方转成上传 / 下载进度事件。
+#[derive(Debug, Clone, Copy)]
+struct DirCounts {
+    transferred: u64,
+    total: u64,
+    files_done: u64,
+    files_total: u64,
+}
+
 /// 上传整个本地目录到 `remote_path`；进度事件按 `progress_path` 上报。
 async fn upload_tree_to(
     app: &AppHandle,
@@ -1047,24 +1185,38 @@ async fn upload_tree_to(
     remote_path: &str,
     progress_path: &str,
 ) -> AppResult<()> {
-    let plan = scan_local(PathBuf::from(local_path), remote_path.to_string()).await?;
-    for dir in &plan.dirs {
-        // 已存在不算错（mkdir -p 语义）。
-        let _ = sftp.create_dir(dir).await;
-    }
-    let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
-    let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
+    upload_tree(sftp, local_path, remote_path, |c| {
         emit_upload_progress(app, UploadProgress {
             session_id: session_id.to_string(),
             remote_path: progress_path.to_string(),
-            transferred,
-            total,
-            files_done: Some(files_done),
-            files_total: Some(files_total),
+            transferred: c.transferred,
+            total: c.total,
+            files_done: Some(c.files_done),
+            files_total: Some(c.files_total),
         });
+    }).await
+}
+
+/// 上传整个本地目录到 `remote_path`，进度按 PROGRESS_INTERVAL 节流交给 `emit`。
+async fn upload_tree(
+    sftp: &SftpSession,
+    local_path: &str,
+    remote_path: &str,
+    emit: impl Fn(DirCounts),
+) -> AppResult<()> {
+    let plan = scan_local(PathBuf::from(local_path), remote_path.to_string()).await?;
+    create_dir_levels(&plan.dirs, |dir: &String| async move {
+        // 已存在不算错（mkdir -p 语义）。
+        let _ = sftp.create_dir(dir).await;
+    }).await;
+    let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
+    let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
+        emit(DirCounts { transferred, total, files_done, files_total });
     });
     let (sftp_ref, progress_ref) = (&sftp, &progress);
-    transfer_files_concurrently(plan.files, |(local, remote, _): (PathBuf, String, u64)| async move {
+    // 一个文件的在途写入至多 russh-sftp 的 8 路 pipeline × 块 ≈ IN_FLIGHT_BYTES，按文件大小计（大文件独占）
+    let files = plan.files.into_iter().map(|(local, remote, size)| ((local, remote), size)).collect();
+    transfer_with_budget(files, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |(local, remote): (PathBuf, String)| async move {
         let mut f = sftp_ref.open_with_flags(
             &remote,
             OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
@@ -1090,37 +1242,39 @@ pub async fn file_download_directory(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    let sftp_ref = &sftp;
-    let plan = scan_remote(remote_path.clone(), PathBuf::from(local_path), |dir| async move {
-        let entries = sftp_ref.read_dir(&dir).await
-            .map_err(|e| AppError::Sftp(format!("read_dir {dir}: {e}")))?;
-        Ok(entries.into_iter().map(|e| {
-            let meta = e.metadata();
-            (e.file_name(), meta.is_dir(), meta.size.unwrap_or(0))
-        }).collect())
-    }).await?;
-    for dir in &plan.dirs {
+    download_tree(&sftp, &remote_path, &local_path, |c| {
+        emit_download_progress(&app, DownloadProgress {
+            session_id: session_id.clone(),
+            remote_path: remote_path.clone(),
+            transferred: c.transferred,
+            total: c.total,
+            files_done: Some(c.files_done),
+            files_total: Some(c.files_total),
+        });
+    }).await
+}
+
+/// 下载整个远端目录到 `local_path`，进度按 PROGRESS_INTERVAL 节流交给 `emit`。
+async fn download_tree(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &str,
+    emit: impl Fn(DirCounts),
+) -> AppResult<()> {
+    let sftp_ref = sftp;
+    let plan = scan_remote(remote_path.to_string(), PathBuf::from(local_path), |dir| list_remote_dir(sftp_ref, dir)).await?;
+    for dir in plan.dirs.iter().flatten() {
         tokio::fs::create_dir_all(dir).await?;
     }
     let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
     let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
-        emit_download_progress(&app, DownloadProgress {
-            session_id: session_id.clone(),
-            remote_path: remote_path.clone(),
-            transferred,
-            total,
-            files_done: Some(files_done),
-            files_total: Some(files_total),
-        });
+        emit(DirCounts { transferred, total, files_done, files_total });
     });
     let progress_ref = &progress;
     download_dir_files(
         plan.files.into_iter().map(|(remote, local, size)| ((remote, local), size)).collect(),
         |(remote, local): (String, PathBuf)| async move {
-            let mut rf = sftp_ref.open(&remote).await
-                .map_err(|e| AppError::Sftp(format!("open {remote}: {e}")))?;
-            let mut lf = tokio::fs::File::create(&local).await?;
-            stream_to_local(&mut rf, &mut lf, &remote, progress_ref.file()).await?;
+            download_small(sftp_ref, &remote, &local, progress_ref.file()).await?;
             progress_ref.file_done();
             Ok(())
         },
@@ -1262,10 +1416,10 @@ pub fn emit_upload_progress(app: &AppHandle, payload: UploadProgress) {
 #[cfg(test)]
 mod tests {
     use super::{
-        download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
+        create_dir_levels, download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        pick_sudo_password, saved_password_for, split_remote, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
-        DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
+        pick_sudo_password, saved_password_for, split_remote, sudo_extract_command, sudo_failure, transfer_with_budget, DirProgress,
+        DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY, DOWNLOAD_SEGMENTS, IN_FLIGHT_BYTES, SEGMENTED_DOWNLOAD_MIN, SFTP_TIMEOUT_SECS, TRANSFER_CHUNK,
     };
     use super::{staging_from_prepare, sudo_prepare_command};
 
@@ -1746,35 +1900,61 @@ mod tests {
         }
     }
 
+    struct SegmentedRun {
+        result: AppResult<u64>,
+        bytes: Vec<u8>,
+        /// READ 在途峰值。
+        peak: usize,
+        last_progress: u64,
+        /// 远端句柄总数（调用方预先开好的段 0 句柄 + open_remote 新开的）。
+        opened: usize,
+        /// 其中经 open_remote 新开的。
+        reopened: usize,
+        released: usize,
+    }
+
     /// 用 DOWNLOAD_SEGMENTS 跑一次分段下载：远端内容是 `remote`，按 `total` 切段。
-    async fn run_segmented(remote: Vec<u8>, total: u64) -> (AppResult<u64>, Vec<u8>, usize, u64) {
+    async fn run_segmented(remote: Vec<u8>, total: u64) -> SegmentedRun {
         let data = Arc::new(remote);
         let local = Arc::new(Mutex::new(Vec::new()));
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let last_progress = AtomicU64::new(0);
+        let (reopened, released) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let new_remote = || MockRemote {
+            data: data.clone(),
+            pos: 0,
+            waiting: false,
+            in_flight: in_flight.clone(),
+            peak: peak.clone(),
+        };
         let result = download_segmented(
             total,
             DOWNLOAD_SEGMENTS,
+            new_remote(),
             || {
-                let remote = MockRemote {
-                    data: data.clone(),
-                    pos: 0,
-                    waiting: false,
-                    in_flight: in_flight.clone(),
-                    peak: peak.clone(),
-                };
+                reopened.fetch_add(1, Ordering::SeqCst);
+                let remote = new_remote();
                 async move { Ok(remote) }
             },
             || {
                 let file = MockLocal { buf: local.clone(), pos: 0 };
                 async move { Ok(file) }
             },
+            |_: MockRemote| { released.fetch_add(1, Ordering::SeqCst); },
             "/r",
             |t| last_progress.store(t, Ordering::SeqCst),
         ).await;
         let bytes = local.lock().unwrap().clone();
-        (result, bytes, peak.load(Ordering::SeqCst), last_progress.load(Ordering::SeqCst))
+        SegmentedRun {
+            result,
+            bytes,
+            peak: peak.load(Ordering::SeqCst),
+            last_progress: last_progress.load(Ordering::SeqCst),
+            opened: 1 + reopened.load(Ordering::SeqCst),
+            reopened: reopened.into_inner(),
+            released: released.into_inner(),
+        }
     }
 
     /// 非常量的字节模式：周期 251 与块大小互质，段错位或重叠时一定比对不上。
@@ -1804,50 +1984,67 @@ mod tests {
     async fn segmented_download_runs_segments_concurrently_and_reassembles_bytes() {
         let source = pattern(3 * TRANSFER_CHUNK + 4321);
         let total = source.len() as u64;
-        let (result, bytes, peak, last_progress) = run_segmented(source.clone(), total).await;
-        assert_eq!(result.unwrap(), total);
+        let run = run_segmented(source.clone(), total).await;
+        assert_eq!(run.result.unwrap(), total);
         // 各段 READ 必须同时在途，串行时吞吐仍是单句柄的块大小 / RTT。
-        assert!(peak > 1, "segments were read serially (peak in-flight = {peak})");
-        assert!(bytes == source, "reassembled bytes differ from the remote file");
-        assert_eq!(last_progress, total);
+        assert!(run.peak > 1, "segments were read serially (peak in-flight = {})", run.peak);
+        assert!(run.bytes == source, "reassembled bytes differ from the remote file");
+        assert_eq!(run.last_progress, total);
+    }
+
+    #[tokio::test]
+    async fn segmented_download_releases_every_remote_handle() {
+        let source = pattern(5 * TRANSFER_CHUNK);
+        let run = run_segmented(source.clone(), source.len() as u64).await;
+        run.result.unwrap();
+        // 只 drop 不关，russh-sftp 的已开句柄计数不会减，累计到服务端上限（1019）后 open 全部失败。
+        assert!(run.opened > 1);
+        assert_eq!(run.released, run.opened, "every segment handle must be closed");
+    }
+
+    #[tokio::test]
+    async fn segmented_download_reuses_the_probe_handle_for_segment_zero() {
+        let source = pattern(5 * TRANSFER_CHUNK);
+        let segments = segment_ranges(source.len() as u64, DOWNLOAD_SEGMENTS).len();
+        let run = run_segmented(source.clone(), source.len() as u64).await;
+        run.result.unwrap();
+        assert!(run.bytes == source);
+        // 探测可读用的句柄就是段 0：不再先 open 一次、关掉、再给每段各 open 一次
+        assert_eq!(run.reopened, segments - 1);
+        assert_eq!(run.released, segments);
+    }
+
+    #[tokio::test]
+    async fn segmented_download_keeps_a_window_of_reads_in_flight() {
+        let source = pattern(16 * TRANSFER_CHUNK);
+        let run = run_segmented(source.clone(), source.len() as u64).await;
+        run.result.unwrap();
+        // 上传有 russh-sftp 的 8 路写 pipeline（8 × 块 ≈ 2MB 通道窗口），下载靠分段补齐同样的在途量：
+        // 50ms RTT 下 4 段只有 ~20MB/s。
+        let upload_pipeline = russh_sftp::client::Config::default().max_concurrent_writes;
+        assert_eq!(run.peak, upload_pipeline);
+        assert_eq!(run.peak as u64 * TRANSFER_CHUNK as u64, IN_FLIGHT_BYTES);
     }
 
     #[tokio::test]
     async fn segmented_download_errors_when_file_shrinks_mid_transfer() {
         // stat 时 4 块多，读的时候只剩 1 块：中间段会提前 EOF。
         let total = 4 * TRANSFER_CHUNK as u64 + 10;
-        let (result, _, _, _) = run_segmented(pattern(TRANSFER_CHUNK), total).await;
-        assert!(matches!(result, Err(AppError::Sftp(_))), "shrunk file must not download silently");
+        let run = run_segmented(pattern(TRANSFER_CHUNK), total).await;
+        assert!(matches!(run.result, Err(AppError::Sftp(_))), "shrunk file must not download silently");
     }
 
     #[tokio::test]
-    async fn directory_files_transfer_concurrently_and_propagate_errors() {
-        let in_flight = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let done = Arc::new(AtomicUsize::new(0));
-        let run = |fail_on: Option<usize>| {
-            let (in_flight, peak, done) = (in_flight.clone(), peak.clone(), done.clone());
-            transfer_files_concurrently((0..8).collect(), move |i: usize| {
-                let (in_flight, peak, done) = (in_flight.clone(), peak.clone(), done.clone());
-                async move {
-                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    tokio::task::yield_now().await;
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                    if Some(i) == fail_on {
-                        return Err(AppError::Sftp(format!("file {i} failed")));
-                    }
-                    done.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }
-            })
+    async fn directory_download_small_files_share_the_in_flight_budget() {
+        // 单句柄下载每个文件在途至多一个块：小于一块的文件按自身大小计，接近一块的按一块计。
+        let peak_for = |size: u64| async move {
+            let probe = Concurrency::default();
+            let files: Vec<(usize, u64)> = (0..40).map(|i| (i, size)).collect();
+            download_dir_files(files, |_| async { probe.hold().await; Ok(()) }, |_, _| async { Ok(()) }).await.unwrap();
+            probe.peak()
         };
-
-        run(None).await.unwrap();
-        assert_eq!(done.load(Ordering::SeqCst), 8);
-        // 同层文件必须并发：每个小文件的 open/close 各一个 RTT，串行就是 N 轮往返。
-        assert!(peak.load(Ordering::SeqCst) > 1, "directory files were transferred serially");
-        assert!(matches!(run(Some(3)).await, Err(AppError::Sftp(_))));
+        assert_eq!(peak_for(1000).await, DIR_FILE_CONCURRENCY);
+        assert_eq!(peak_for(SEGMENTED_DOWNLOAD_MIN - 1).await as u64, IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64);
     }
 
     #[tokio::test]
@@ -2086,7 +2283,7 @@ mod tests {
         let plan = plan.unwrap();
 
         // 先建父目录再建子目录，否则远端 mkdir 子目录会失败。
-        assert_eq!(plan.dirs, ["/r", "/r/sub", "/r/sub/deeper"]);
+        assert_eq!(plan.dirs, [vec!["/r"], vec!["/r/sub"], vec!["/r/sub/deeper"]]);
         let mut files = plan.files.clone();
         files.sort();
         assert_eq!(
@@ -2097,6 +2294,26 @@ mod tests {
             ]
         );
         assert_eq!(plan.total_bytes(), 8);
+    }
+
+    #[tokio::test]
+    async fn scan_local_does_not_descend_into_symlinked_dirs_but_sizes_link_targets() {
+        let root = std::env::temp_dir().join(format!("sshl-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("real/inner")).unwrap();
+        std::fs::write(root.join("real/data.bin"), b"123456").unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link-dir")).unwrap();
+        std::os::unix::fs::symlink(root.join("real/data.bin"), root.join("link-file")).unwrap();
+
+        let plan = scan_local(root.clone(), "/r".to_string()).await;
+        let dir_size = std::fs::metadata(root.join("real")).unwrap().len();
+        std::fs::remove_dir_all(&root).unwrap();
+        let plan = plan.unwrap();
+
+        // 目录判断不跟随符号链接：指向目录的链接不展开、按文件列出；文件大小跟随链接取目标的。
+        assert_eq!(plan.dirs, [vec!["/r"], vec!["/r/real"], vec!["/r/real/inner"]]);
+        let mut files: Vec<(&str, u64)> = plan.files.iter().map(|(_, r, s)| (r.as_str(), *s)).collect();
+        files.sort();
+        assert_eq!(files, [("/r/link-dir", dir_size), ("/r/link-file", 6), ("/r/real/data.bin", 6)]);
     }
 
     #[tokio::test]
@@ -2115,7 +2332,7 @@ mod tests {
         };
 
         let plan = scan_remote("/r".to_string(), PathBuf::from("/l"), list).await.unwrap();
-        assert_eq!(plan.dirs, [PathBuf::from("/l"), PathBuf::from("/l/sub"), PathBuf::from("/l/sub/deeper")]);
+        assert_eq!(plan.dirs, [vec![PathBuf::from("/l")], vec![PathBuf::from("/l/sub")], vec![PathBuf::from("/l/sub/deeper")]]);
         assert_eq!(
             plan.files,
             [
@@ -2127,5 +2344,438 @@ mod tests {
 
         let missing = scan_remote("/nope".to_string(), PathBuf::from("/l"), list).await;
         assert!(matches!(missing, Err(AppError::Sftp(msg)) if msg.contains("/nope")));
+    }
+
+    /// 并发度探针：进入时计数、让出一轮、退出时减计数，记录峰值。
+    #[derive(Default)]
+    struct Concurrency {
+        now: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Concurrency {
+        async fn hold(&self) {
+            let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            self.now.fetch_sub(1, Ordering::SeqCst);
+        }
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    fn parent_of(path: &str) -> &str {
+        &path[..path.rfind('/').unwrap()]
+    }
+
+    #[tokio::test]
+    async fn scan_remote_lists_each_level_concurrently() {
+        // /r 下 40 个子目录，每个子目录下 1 个文件和 1 个孙目录。
+        let mut tree: HashMap<String, Vec<(String, bool, u64)>> = HashMap::new();
+        tree.insert("/r".into(), (0..40).map(|i| (format!("d{i:02}"), true, 0)).collect());
+        for i in 0..40 {
+            tree.insert(format!("/r/d{i:02}"), vec![(format!("f{i}"), false, i), ("g".into(), true, 0)]);
+            tree.insert(format!("/r/d{i:02}/g"), vec![]);
+        }
+        let probe = Concurrency::default();
+        let listed = Mutex::new(Vec::<String>::new());
+        let (tree, probe_ref, listed_ref) = (&tree, &probe, &listed);
+        let plan = scan_remote("/r".to_string(), PathBuf::from("/l"), |dir: String| async move {
+            // 列子目录时父目录一定已经列完（子目录名就是从父目录的列表里来的）。
+            if dir != "/r" {
+                assert!(listed_ref.lock().unwrap().iter().any(|d| d == parent_of(&dir)), "{dir} listed before its parent");
+            }
+            probe_ref.hold().await;
+            listed_ref.lock().unwrap().push(dir.clone());
+            Ok(tree[&dir].clone())
+        }).await.unwrap();
+
+        // 每次列目录至少 opendir / readdir / close 三个 RTT：同层必须并发，但不超过上限。
+        assert!(probe.peak() > 1, "directories were listed serially");
+        assert!(probe.peak() <= DIR_OP_CONCURRENCY, "peak {} > {DIR_OP_CONCURRENCY}", probe.peak());
+        // 结果与逐个 BFS 的顺序一致：按层分组，层内保持列表顺序。
+        let level = |f: &dyn Fn(usize) -> String| (0..40).map(|i| PathBuf::from(f(i))).collect::<Vec<_>>();
+        assert_eq!(plan.dirs, [
+            vec![PathBuf::from("/l")],
+            level(&|i| format!("/l/d{i:02}")),
+            level(&|i| format!("/l/d{i:02}/g")),
+        ]);
+        let files: Vec<(String, u64)> = plan.files.iter().map(|(r, _, s)| (r.clone(), *s)).collect();
+        assert_eq!(files, (0..40).map(|i| (format!("/r/d{i:02}/f{i}"), i)).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn create_dir_levels_runs_each_level_concurrently_after_its_parents() {
+        let levels: Vec<Vec<String>> = vec![
+            vec!["/r".into()],
+            (0..40).map(|i| format!("/r/d{i}")).collect(),
+            (0..40).map(|i| format!("/r/d{i}/sub")).collect(),
+        ];
+        let probe = Concurrency::default();
+        let created = Mutex::new(Vec::<String>::new());
+        let (probe_ref, created_ref) = (&probe, &created);
+        create_dir_levels(&levels, |dir: &String| async move {
+            if dir != "/r" {
+                assert!(created_ref.lock().unwrap().iter().any(|d| d == parent_of(dir)), "{dir} created before its parent");
+            }
+            probe_ref.hold().await;
+            created_ref.lock().unwrap().push(dir.clone());
+        }).await;
+        assert_eq!(created.lock().unwrap().len(), 81);
+        // 每个 MKDIR 一个 RTT：同层必须并发。
+        assert!(probe.peak() > 1, "directories were created serially");
+        assert!(probe.peak() <= DIR_OP_CONCURRENCY);
+    }
+
+    /// 跑一批 (编号, 在途字节) 的传输，返回 (同时在传的文件数峰值, 在途字节峰值, 开始顺序)。
+    async fn run_budgeted(items: Vec<(usize, u64)>, fail_on: Option<usize>) -> (AppResult<()>, usize, u64, Vec<usize>) {
+        let costs: HashMap<usize, u64> = items.iter().copied().collect();
+        let probe = Concurrency::default();
+        let (bytes_now, bytes_peak) = (AtomicU64::new(0), AtomicU64::new(0));
+        let started = Mutex::new(Vec::new());
+        let (costs, probe_ref, bytes_now_ref, bytes_peak_ref, started_ref) = (&costs, &probe, &bytes_now, &bytes_peak, &started);
+        let result = transfer_with_budget(items, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |i: usize| async move {
+            started_ref.lock().unwrap().push(i);
+            let cost = costs[&i].min(IN_FLIGHT_BYTES);
+            let now = bytes_now_ref.fetch_add(cost, Ordering::SeqCst) + cost;
+            bytes_peak_ref.fetch_max(now, Ordering::SeqCst);
+            probe_ref.hold().await;
+            bytes_now_ref.fetch_sub(cost, Ordering::SeqCst);
+            if Some(i) == fail_on {
+                return Err(AppError::Sftp(format!("file {i} failed")));
+            }
+            Ok(())
+        }).await;
+        let started = started.into_inner().unwrap();
+        (result, probe.peak(), bytes_peak.into_inner(), started)
+    }
+
+    #[tokio::test]
+    async fn budgeted_transfer_runs_many_tiny_files_at_once() {
+        let (result, peak, _, started) = run_budgeted((0..60).map(|i| (i, 100)).collect(), None).await;
+        result.unwrap();
+        assert_eq!(started.len(), 60);
+        // 小文件的耗时几乎全是 open / 读写 / close 的往返（约 3 RTT），并发数直接决定速度：
+        // 50ms RTT 下 4 路只有 ~27 个文件 / 秒。
+        assert_eq!(peak, DIR_FILE_CONCURRENCY);
+        assert!(peak >= 16, "tiny files ran only {peak} at a time");
+    }
+
+    #[tokio::test]
+    async fn budgeted_transfer_caps_bytes_in_flight() {
+        let chunk = TRANSFER_CHUNK as u64;
+        let (result, peak, bytes_peak, _) = run_budgeted((0..30).map(|i| (i, chunk)).collect(), None).await;
+        result.unwrap();
+        assert_eq!(peak as u64, IN_FLIGHT_BYTES / chunk);
+        assert!(bytes_peak <= IN_FLIGHT_BYTES);
+
+        // 超过预算的文件独占：不和别的文件同时传，也不会因为超预算卡死。
+        let items = vec![(0, 10), (1, 10), (2, 3 * IN_FLIGHT_BYTES), (3, 10), (4, IN_FLIGHT_BYTES), (5, 10)];
+        let (result, _, bytes_peak, started) = run_budgeted(items, None).await;
+        result.unwrap();
+        assert_eq!(bytes_peak, IN_FLIGHT_BYTES);
+        // 按原顺序放行，队首放不下就等。
+        assert_eq!(started, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn in_flight_budget_fits_ssh_window_and_request_timeout() {
+        // 在途再多也只是在通道窗口外排队
+        assert!(IN_FLIGHT_BYTES <= russh::client::Config::default().window_size as u64);
+        // 排在满额在途数据后面的请求，在 ~35KB/s 的慢链路上也要在超时前等到回复
+        assert!(IN_FLIGHT_BYTES / SFTP_TIMEOUT_SECS <= 35 * 1024, "{}B/s", IN_FLIGHT_BYTES / SFTP_TIMEOUT_SECS);
+    }
+
+    #[tokio::test]
+    async fn budgeted_transfer_propagates_errors() {
+        let (result, _, _, _) = run_budgeted((0..20).map(|i| (i, 1)).collect(), Some(7)).await;
+        assert!(matches!(result, Err(AppError::Sftp(msg)) if msg.contains("file 7")));
+    }
+
+    /// 真实 sshd 上的目录 / 大文件传输。容器同 sudo_upload_against_real_linux（以 alice 登录）：
+    /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
+    mod real_sftp {
+        use super::super::{
+            download_large, download_tree, exec_capture, list_remote_dir, new_sftp, scan_remote,
+            stream_to_remote, upload_tree, DirCounts, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
+        };
+        use russh_sftp::client::SftpSession;
+        use std::collections::BTreeMap;
+        use std::path::{Path, PathBuf};
+        use std::sync::Mutex;
+        use std::time::Instant;
+        use tokio::io::AsyncWriteExt;
+
+        type H = std::sync::Arc<russh::client::Handle<crate::ssh::ClientHandler>>;
+
+        async fn channel(h: &H) -> russh::Channel<russh::client::Msg> {
+            h.channel_open_session().await.unwrap()
+        }
+
+        async fn connect() -> Option<(H, SftpSession)> {
+            let target = std::env::var("SSHL_SFTP_IT").ok()?;
+            let (host, port) = target.split_once(':').unwrap();
+            let h = crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap();
+            let ch = channel(&h).await;
+            ch.request_subsystem(true, "sftp").await.unwrap();
+            let sftp = new_sftp(ch).await.unwrap();
+            Some((h, sftp))
+        }
+
+        async fn exec(h: &H, cmd: &str) -> String {
+            let (status, out, err) = exec_capture(channel(h).await, cmd, None).await.unwrap();
+            assert_eq!(status, 0, "`{cmd}`: {err}");
+            out
+        }
+
+        fn temp_dir(tag: &str) -> PathBuf {
+            std::env::temp_dir().join(format!("sshl-{tag}-{}", uuid::Uuid::new_v4()))
+        }
+
+        fn bytes(len: usize, seed: usize) -> Vec<u8> {
+            (0..len).map(|i| ((i * 31 + seed) % 251) as u8).collect()
+        }
+
+        fn write(path: &Path, data: &[u8]) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, data).unwrap();
+        }
+
+        /// 目录树快照：相对路径 → None（目录）/ Some(内容)。
+        fn snapshot(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+            fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Option<Vec<u8>>>) {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                    if path.is_dir() {
+                        out.insert(rel, None);
+                        walk(root, &path, out);
+                    } else {
+                        out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                    }
+                }
+            }
+            let mut out = BTreeMap::new();
+            walk(root, root, &mut out);
+            out
+        }
+
+        fn files_equal(a: &Path, b: &Path) -> bool {
+            use std::io::Read;
+            let (mut fa, mut fb) = (std::fs::File::open(a).unwrap(), std::fs::File::open(b).unwrap());
+            let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+            loop {
+                let na = fa.read(&mut ba).unwrap();
+                let mut nb = 0;
+                while nb < na {
+                    let n = fb.read(&mut bb[nb..na]).unwrap();
+                    if n == 0 { return false; }
+                    nb += n;
+                }
+                if na == 0 { return fb.read(&mut bb).unwrap() == 0; }
+                if ba[..na] != bb[..na] { return false; }
+            }
+        }
+
+        /// 最后一次进度回报必须走到终点（字节和文件数都满）。
+        fn assert_finished(last: &Mutex<Option<DirCounts>>) {
+            let c = last.lock().unwrap().expect("没有进度回报");
+            assert_eq!((c.transferred, c.files_done), (c.total, c.files_total), "{c:?}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn directory_round_trip_keeps_tree_and_bytes() {
+            let Some((h, sftp)) = connect().await else { return };
+            let chunk = TRANSFER_CHUNK;
+            let src = temp_dir("rt-src");
+            let files: Vec<(&str, usize)> = vec![
+                ("zero.txt", 0),
+                ("it's ü name.bin", 1000),
+                ("l1/chunk-1.bin", chunk - 1),
+                ("l1/chunk.bin", chunk),
+                ("l1/l2/chunk+1.bin", chunk + 1),
+                ("l1/l2/three.bin", 3 * chunk),
+                ("l1/l2/l3/seg-min.bin", SEGMENTED_DOWNLOAD_MIN as usize),
+                ("l1/l2/l3/big.bin", 9 * chunk + 7),
+            ];
+            for (i, (name, len)) in files.iter().enumerate() {
+                write(&src.join(name), &bytes(*len, i));
+            }
+            for i in 0..60 {
+                write(&src.join(format!("many/f{i:02}.txt")), &bytes(1 + i * 67, i));
+            }
+            for dir in ["empty", "l1/l2/l3/empty-deep", "many/empty"] {
+                std::fs::create_dir_all(src.join(dir)).unwrap();
+            }
+
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/tree");
+            let last = Mutex::new(None);
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |c| *last.lock().unwrap() = Some(c)).await.unwrap();
+            assert_finished(&last);
+
+            let dst = temp_dir("rt-dst");
+            let last = Mutex::new(None);
+            download_tree(&sftp, &remote, &dst.to_string_lossy(), |c| *last.lock().unwrap() = Some(c)).await.unwrap();
+            assert_finished(&last);
+            let (before, after) = (snapshot(&src), snapshot(&dst));
+            assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>(), "目录结构（含空目录）要一致");
+            for (path, content) in &before {
+                assert!(after[path] == *content, "{path} 内容不一致");
+            }
+
+            // 单文件分段下载
+            let single = dst.join("single.bin");
+            let n = download_large(&sftp, &format!("{remote}/l1/l2/l3/big.bin"), &single, 9 * chunk as u64 + 7, |_| {}).await.unwrap();
+            assert_eq!(n, 9 * chunk as u64 + 7);
+            assert!(files_equal(&single, &src.join("l1/l2/l3/big.bin")));
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
+            std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 能 stat 但没有读权限的大文件：报错，且不截断本地同名文件（段 0 的句柄兼作探测，开成功才建本地文件）。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn unreadable_large_file_leaves_local_file_untouched() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/secret.bin");
+            exec(&h, &format!("truncate -s {SEGMENTED_DOWNLOAD_MIN} {remote} && chmod 000 {remote}")).await;
+            let local = temp_dir("unreadable");
+            write(&local, b"keep me");
+            let result = download_large(&sftp, &remote, &local, SEGMENTED_DOWNLOAD_MIN, |_| {}).await;
+            assert!(result.is_err(), "没有读权限应当报错");
+            assert_eq!(std::fs::read(&local).unwrap(), b"keep me", "本地已有文件不能被截断");
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_file(&local).unwrap();
+        }
+
+        /// OpenSSH 的 limits 扩展声明句柄上限 1019，russh-sftp 按它在客户端计数、只有等到 CLOSE 回复才减一：
+        /// 下载完只 drop 不关的只读句柄会一直占着计数，同一会话下载约一千个文件后 open / 列目录全部失败。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn downloading_many_files_does_not_exhaust_handle_limit() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!(
+                "mkdir {base}/many && cd {base}/many && seq -f f%04g 1 1100 | xargs touch && for i in 1 2 3; do truncate -s {SEGMENTED_DOWNLOAD_MIN} big$i; done"
+            )).await;
+            let dst = temp_dir("many");
+            download_tree(&sftp, &format!("{base}/many"), &dst.to_string_lossy(), |_| {}).await.unwrap();
+            assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 1103);
+            sftp.read_dir(base.as_str()).await.expect("下载之后还能列目录");
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 分段数对大文件下载吞吐的影响（另需 SSHL_SFTP_BENCH=1）：同一连接上 4 / 8 / 16 段交替跑几轮，
+        /// 排除机器负载、网络抖动对单次结果的干扰。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 和 SSHL_SFTP_BENCH=1"]
+        async fn bench_segment_count() {
+            use super::super::{close_in_background, download_segmented};
+            if std::env::var("SSHL_SFTP_BENCH").is_err() { return; }
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-bench.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/big.bin");
+            exec(&h, &format!("head -c 100M /dev/urandom > {remote}")).await;
+            let size = 100 * 1024 * 1024u64;
+            let local = temp_dir("segments");
+            let mut results: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            for _ in 0..3 {
+                for segments in [4, 8, 16] {
+                    let t = Instant::now();
+                    let first = sftp.open(remote.as_str()).await.unwrap();
+                    tokio::fs::File::create(&local).await.unwrap();
+                    let (sftp, remote, local) = (&sftp, remote.as_str(), local.as_path());
+                    let n = download_segmented(
+                        size,
+                        segments,
+                        first,
+                        || async move { Ok(sftp.open(remote).await.unwrap()) },
+                        || async move { Ok(tokio::fs::OpenOptions::new().write(true).open(local).await?) },
+                        close_in_background,
+                        remote,
+                        |_| {},
+                    ).await.unwrap();
+                    assert_eq!(n, size);
+                    results.entry(segments).or_default().push(t.elapsed().as_secs_f64());
+                }
+            }
+            for (segments, secs) in &results {
+                let list: Vec<String> = secs.iter().map(|s| format!("{s:.2}s")).collect();
+                let best = secs.iter().cloned().fold(f64::MAX, f64::min);
+                eprintln!("BENCH 100MB download, {segments:>2} segments: {} (best {:.1} MB/s)", list.join(" "), 100.0 / best);
+            }
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_file(&local).unwrap();
+        }
+
+        /// 耗时基准（另需 SSHL_SFTP_BENCH=1）：300 个目录 / 3000 个小文件的上传、遍历、下载，100MB 单文件上传、下载。
+        /// 模拟 WAN：容器里 `apt-get install -y iproute2 && tc qdisc add dev eth0 root netem delay 50ms`。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 和 SSHL_SFTP_BENCH=1"]
+        async fn bench_directory_and_large_file() {
+            if std::env::var("SSHL_SFTP_BENCH").is_err() { return; }
+            let Some((h, sftp)) = connect().await else { return };
+            let src = temp_dir("bench-src");
+            let mut n = 0usize;
+            for top in 0..10 {
+                for sub in 0..29 {
+                    for f in 0..10 {
+                        write(&src.join(format!("d{top}/s{sub}/f{f}.txt")), &bytes((n * 7919) % 16384, n));
+                        n += 1;
+                    }
+                }
+                for f in 0..10 {
+                    write(&src.join(format!("d{top}/f{f}.txt")), &bytes((n * 7919) % 16384, n));
+                    n += 1;
+                }
+            }
+            assert_eq!(n, 3000);
+            let base = exec(&h, "mktemp -d /home/alice/sshl-bench.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/tree");
+
+            let t = Instant::now();
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |_| {}).await.unwrap();
+            eprintln!("BENCH upload tree (300 dirs / 3000 files): {:.2}s", t.elapsed().as_secs_f64());
+
+            let t = Instant::now();
+            let plan = scan_remote(remote.clone(), PathBuf::from("/unused"), |d| list_remote_dir(&sftp, d)).await.unwrap();
+            eprintln!("BENCH scan remote tree ({} files): {:.2}s", plan.files.len(), t.elapsed().as_secs_f64());
+
+            let dst = temp_dir("bench-dst");
+            let t = Instant::now();
+            download_tree(&sftp, &remote, &dst.to_string_lossy(), |_| {}).await.unwrap();
+            eprintln!("BENCH download tree: {:.2}s", t.elapsed().as_secs_f64());
+            assert!(snapshot(&src) == snapshot(&dst), "目录往返后内容不一致");
+
+            let big = src.join("big.bin");
+            let size = 100 * 1024 * 1024;
+            std::fs::write(&big, bytes(size, 1)).unwrap();
+            let remote_big = format!("{base}/big.bin");
+            let t = Instant::now();
+            let mut f = sftp.create(remote_big.as_str()).await.unwrap();
+            stream_to_remote(&big.to_string_lossy(), &mut f, &remote_big, |_| {}).await.unwrap();
+            f.shutdown().await.unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            eprintln!("BENCH upload 100MB: {secs:.2}s ({:.1} MB/s)", 100.0 / secs);
+
+            let got = dst.join("big.bin");
+            let t = Instant::now();
+            download_large(&sftp, &remote_big, &got, size as u64, |_| {}).await.unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            eprintln!("BENCH download 100MB: {secs:.2}s ({:.1} MB/s)", 100.0 / secs);
+            assert!(files_equal(&big, &got));
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
+            std::fs::remove_dir_all(&dst).unwrap();
+        }
     }
 }
