@@ -54,29 +54,34 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
     applyMark({ id: targetId, side: event.clientX < rect.left + rect.width / 2 ? 'before' : 'after' });
   };
 
+  const finishDrag = (event: PointerEvent) => {
+    const pointer = pointerRef.current;
+    if (!pointer || pointer.pointerId !== event.pointerId) return;
+    pointerRef.current = null;
+    const target = markRef.current;
+    setDraggingId(null);
+    applyMark(null);
+    if (!pointer.active) return;
+    // 拖完松手紧接着的 click 不算切换会话
+    suppressClickRef.current = true;
+    setTimeout(() => { suppressClickRef.current = false; }, 0);
+    if (event.type === 'pointercancel' || !target) return;
+    setOrder(moveTabId(tabs.map(tab => tab.sessionId), pointer.id, target.id, target.side));
+  };
+  // 监听只挂一次，经 ref 调到最新一次渲染的 finishDrag（要用当时的 tabs），不必每次渲染都拆了重挂
+  const finishDragRef = useRef(finishDrag);
+  finishDragRef.current = finishDrag;
+
   // 收尾挂在 window 上：指针可能在标签栏外松开，否则拖拽状态会卡住。
   useEffect(() => {
-    const finish = (event: PointerEvent) => {
-      const pointer = pointerRef.current;
-      if (!pointer || pointer.pointerId !== event.pointerId) return;
-      pointerRef.current = null;
-      const target = markRef.current;
-      setDraggingId(null);
-      applyMark(null);
-      if (!pointer.active) return;
-      // 拖完松手紧接着的 click 不算切换会话
-      suppressClickRef.current = true;
-      setTimeout(() => { suppressClickRef.current = false; }, 0);
-      if (event.type === 'pointercancel' || !target) return;
-      setOrder(moveTabId(tabs.map(tab => tab.sessionId), pointer.id, target.id, target.side));
-    };
+    const finish = (event: PointerEvent) => finishDragRef.current(event);
     window.addEventListener('pointerup', finish, true);
     window.addEventListener('pointercancel', finish, true);
     return () => {
       window.removeEventListener('pointerup', finish, true);
       window.removeEventListener('pointercancel', finish, true);
     };
-  });
+  }, []);
 
   return (
     <div ref={listRef} data-tauri-drag-region role="tablist" aria-label="已打开的会话" className="flex min-w-0 select-none flex-wrap items-center gap-1.5" onPointerMove={moveDrag}>

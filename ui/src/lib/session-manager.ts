@@ -8,6 +8,7 @@ export type Session = {
 
 class SessionManager {
   sessions = new Map<string, Session>();
+  private removedListeners = new Set<(sessionId: string) => void>();
 
   addSession(sessionId: string, connectionId: string, data: Partial<Session> = {}) {
     this.sessions.set(sessionId, {
@@ -41,17 +42,13 @@ class SessionManager {
 
   removeSession(sessionId: string) {
     this.sessions.delete(sessionId);
+    this.removedListeners.forEach(listener => listener(sessionId));
   }
 
-  updateSessionId(oldSessionId: string, newSessionId: string) {
-    if (this.sessions.has(oldSessionId)) {
-      this.sessions.set(newSessionId, this.sessions.get(oldSessionId)!);
-      this.sessions.delete(oldSessionId);
-    }
-  }
-
-  hasActiveSession(sessionId: string) {
-    return this.sessions.has(sessionId) && this.sessions.get(sessionId)!.active;
+  /** 会话被移除（主动断开、远端关闭、失效丢弃都走 removeSession）时通知，用来清掉按 sessionId 记的状态。 */
+  onSessionRemoved(listener: (sessionId: string) => void) {
+    this.removedListeners.add(listener);
+    return () => { this.removedListeners.delete(listener); };
   }
 
   getAllSessions() {
@@ -66,30 +63,6 @@ class SessionManager {
       this.sessions.set(sessionId, session);
     } else {
       console.warn(`[sessionManager] 尝试设置不存在的会话 ${sessionId} 的活跃状态`);
-    }
-  }
-
-  addToBuffer(sessionId: string, data: string) {
-    if (this.sessions.has(sessionId)) {
-      const session = this.sessions.get(sessionId)!;
-      if (session.active) {
-        const maxBufferSize = 100000;
-        session.buffer = (session.buffer || '') + data;
-        if (session.buffer.length > maxBufferSize) session.buffer = session.buffer.slice(-maxBufferSize);
-        this.sessions.set(sessionId, session);
-      }
-    } else {
-      console.warn(`[sessionManager] 尝试向不存在的会话 ${sessionId} 添加数据`);
-    }
-  }
-
-  clearBuffer(sessionId: string) {
-    if (this.sessions.has(sessionId)) {
-      const session = this.sessions.get(sessionId)!;
-      session.buffer = '';
-      this.sessions.set(sessionId, session);
-    } else {
-      console.warn(`[sessionManager] 尝试清除不存在的会话 ${sessionId} 的缓冲区`);
     }
   }
 

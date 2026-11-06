@@ -66,6 +66,12 @@ async function withTerminalSize(details: unknown) {
   return size ? { ...(details as Record<string, unknown>), cols: size.cols, rows: size.rows } : details;
 }
 
+// 连接列表已在内存里（loadConnections 维护，库一改后端就发 connections:updated 重新加载），先查内存，
+// 不再为取一条连接走一趟 IPC 读库；找不到（刚建、列表还没刷新）再回落读库。
+export async function findConnection(connections: Connection[], id: string, load: () => Promise<Connection[]>) {
+  return connections.find(item => item.id === id) || (await load()).find(item => item.id === id) || null;
+}
+
 export function useConnections(): ConnectionManager {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
@@ -264,8 +270,7 @@ export function useConnections(): ConnectionManager {
           console.warn(`[switchToSession] 加载缓冲区数据失败:`, err);
         }
       }
-      const currentConnections = await appWindow().api.config.getConnections();
-      const connection = currentConnections.find((item: Connection) => item.id === connectionId);
+      const connection = await findConnection(connectionsRef.current, connectionId, () => appWindow().api.config.getConnections());
       if (connection) updateConnectionStatus(true, connection.name, connection.host);
       setRevision(value => value + 1);
       return true;
@@ -279,9 +284,7 @@ export function useConnections(): ConnectionManager {
     if (activeAttempt.current || isConnecting) return;
     let attempt: Attempt | null = null;
     try {
-      // 列表已在内存里（loadConnections 维护），双击不再先走一趟 IPC 读库；找不到再回落读库。
-      const connection = connectionsRef.current.find(item => item.id === id)
-        || (await appWindow().api.config.getConnections()).find((item: Connection) => item.id === id);
+      const connection = await findConnection(connectionsRef.current, id, () => appWindow().api.config.getConnections());
       if (!connection) return;
       const sessionInfo = sessionManager.getSessionByConnectionId(connection.id);
       if (sessionInfo) {

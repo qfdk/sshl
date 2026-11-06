@@ -207,15 +207,19 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
     const beforeId = target.kind === 'item' ? target.beforeId : null;
     manager.move(pointer.connectionId, group, beforeId);
   };
+  // 监听只挂一次，经 ref 调到最新一次渲染的 finishDrag（要用当时的 manager），不必每次渲染都拆了重挂
+  const finishDragRef = useRef(finishDrag);
+  finishDragRef.current = finishDrag;
 
   useEffect(() => {
-    window.addEventListener('pointerup', finishDrag, true);
-    window.addEventListener('pointercancel', finishDrag, true);
+    const finish = (event: PointerEvent) => finishDragRef.current(event);
+    window.addEventListener('pointerup', finish, true);
+    window.addEventListener('pointercancel', finish, true);
     return () => {
-      window.removeEventListener('pointerup', finishDrag, true);
-      window.removeEventListener('pointercancel', finishDrag, true);
+      window.removeEventListener('pointerup', finish, true);
+      window.removeEventListener('pointercancel', finish, true);
     };
-  });
+  }, []);
 
   const visible = manager.connections.filter(connection => matchesConnection(connection, query));
   if (!visible.length) return <div className="p-4 text-center text-xs text-muted-foreground">{manager.connections.length ? '没有匹配的连接' : '没有保存的连接'}</div>;
