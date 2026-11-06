@@ -1341,6 +1341,8 @@ fn shell_quote(s: &str) -> String {
 /// 目录里已有文件的属主不变。只打包条目本身（不带 "."），否则解包会把目标目录权限改成暂存区的 0700。
 /// GNU tar 解包默认会改写已存在目录的权限（合并上传时把属主原来的 755 改成 775），加 --no-overwrite-dir；
 /// BSD tar 本就不改、也不认这个参数，所以只对 GNU 加。
+/// 属主是 root 时解包端的 tar 以 root 跑，GNU / BSD / busybox tar 对 root 默认还原归档里的属主（暂存区属登录用户）
+/// 和原样权限；--no-same-owner --no-same-permissions（三者都认）让结果等同属主自己建：归属主、权限按 umask。
 /// stat 先试 GNU（-c），再回落 BSD（-f）。LC_ALL=C 让 sudo 的报错保持英文，便于识别。
 /// 管道的退出码只看解包端，打包端失败（条目读不了等）时解包端拿到空 / 不完整的归档照样返回 0。
 /// 远端 sh 可能是 dash / busybox ash，不靠 pipefail：打包端失败时经 fd 3 把退出码带出来，
@@ -1351,7 +1353,8 @@ fn sudo_extract_command(with_password: bool, staging: &str, dest_dir: &str, name
     let extract = "set -e; uid=$(stat -c %u -- \"$2\" 2>/dev/null || stat -f %u -- \"$2\"); \
                    keep=; tar --version 2>/dev/null | grep -q GNU && keep=--no-overwrite-dir; \
                    p=$( { { tar -C \"$1\" -cf - -- \"$3\" 3>&- || echo $? >&3; } \
-                   | sudo -u \"#$uid\" tar -C \"$2\" $keep -xf - 3>&- >&2; } 3>&1 ) || exit; exit ${p:-0}";
+                   | sudo -u \"#$uid\" tar -C \"$2\" --no-same-owner --no-same-permissions $keep -xf - 3>&- >&2; } 3>&1 ) \
+                   || exit; exit ${p:-0}";
     // 以登录用户跑，$4 是上面的脚本
     let outer = format!(
         "LC_ALL=C sudo {auth} sh -c \"$4\" sshl-sudo \"$1\" \"$2\" \"$3\"; st=$?; rm -rf -- \"$1\" 2>/dev/null; exit $st"
@@ -1692,7 +1695,23 @@ mod tests {
         assert!(lines[3].starts_with("bob ") && lines[4].starts_with("bob ") && lines[5].starts_with("bob "), "新文件归目录属主：{out}");
         assert_eq!(lines[6], "hinew", "{out}");
 
-        let carol = crate::ssh::do_handshake(host, port, "carol", Some("carolpw"), None, None).await.unwrap();
+        // 目标目录属 root：解包端的 tar 以 root 跑，GNU tar 对 root 默认还原归档里的属主（暂存区是 alice 的）和原样权限。
+        // 结果要等同于 root 自己建的：全归 root，权限按 umask（0666 → 644、0777 → 755）
+        let root_dest = "/srv/sshl-root-dest";
+        let (st, _, err) = exec(&alice, &format!(
+            "sudo -S -p '' sh -c 'rm -rf {root_dest} && install -d -m 755 -o root -g root {root_dest}'"), Some(b"alicepw\n")).await;
+        assert_eq!(st, 0, "{err}");
+        let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
+        let (st, _, err) = exec(&alice, &format!("cd {} && chmod 666 existing/sub/new.txt && chmod 777 existing/sub", shell_quote(&staging)), None).await;
+        assert_eq!(st, 0, "{err}");
+        let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, root_dest, "existing"), Some(b"alicepw\n")).await;
+        assert_eq!(st, 0, "{err}");
+        assert!(gone(&alice, &staging).await);
+        let (_, out, _) = exec(&alice, &format!("cd {root_dest} && stat -c '%U:%G %a %n' . existing existing/sub existing/sub/new.txt"), None).await;
+        assert_eq!(out, "root:root 755 .\nroot:root 755 existing\nroot:root 755 existing/sub\nroot:root 644 existing/sub/new.txt\n",
+            "目标目录属 root 时上传的条目全归 root、权限按 umask");
+
+        let carol =crate::ssh::do_handshake(host, port, "carol", Some("carolpw"), None, None).await.unwrap();
         let (st, out, err) = exec(&carol, &sudo_prepare_command(true), Some(b"carolpw\n")).await;
         assert!(staging_from_prepare(st, &out, &err).unwrap_err().to_string().starts_with("SUDO_NOT_ALLOWED: "), "{err}");
         let (_, staging, _) = exec(&carol, "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX", None).await;
