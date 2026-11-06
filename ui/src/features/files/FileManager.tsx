@@ -340,7 +340,18 @@ export const FileManager = memo(function FileManager() {
     window.addEventListener('pointercancel', finish, true);
     // 切到别的应用（窗口失焦）时拖拽作废
     window.addEventListener('blur', cancel);
+    // 新的按下说明上一次按下已经结束。WKWebView 丢了 pointerup 时内部仍当左键按着，之后的移动带着按下状态，
+    // 行拖拽会被激活并一路跟到另一侧，下一次点击的松开就成了落点、误传一次（真机实测）。按下时先作废残留的拖拽；
+    // window 捕获阶段先于行自己的 onPointerDown，作废后再由它记新的按下。
+    const press = () => {
+      const drag = rowDragRef.current;
+      if (!drag) return;
+      try { rootRef.current?.releasePointerCapture(drag.pointerId); } catch {}
+      cancel();
+    };
+    window.addEventListener('pointerdown', press, true);
     return () => {
+      window.removeEventListener('pointerdown', press, true);
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', finish, true);
       window.removeEventListener('pointercancel', finish, true);
