@@ -65,7 +65,10 @@ pnpm build             # Tauri application build
   waiting `sudo` holds the user's timestamp lock).
 - **Drag and drop** — Tauri's drag-drop handler is on (Finder drops need local paths) and swallows
   WKWebView drag callbacks, so in-page HTML5 drop events never fire. Drags inside the app use
-  pointer events (`file-drag.ts`, session tabs, connection tree).
+  pointer events (`file-drag.ts`, session tabs, connection tree). WKWebView often drops pointerup
+  (e.g. the first click after the app is activated), so every pointer drag must handle a move with the
+  left button released (`releasedMove` / `pointerMoveStep` in `ui/src/lib/pointer-release.ts`: drop in
+  place or cancel, never start a drag) and clear stale press state on the next window pointerdown.
 - **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` loads the GPU renderer
   (WebglAddon, falling back to CanvasAddon on failure or context loss) after `term.open()`,
   Unicode11 registration, bottom alignment, ANSI background sampling, and PTY resize
