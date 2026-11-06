@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use crate::ssh::{ClientHandler, SshSession};
 
 pub struct WarmConn {
-    pub handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    pub handle: Arc<russh::client::Handle<ClientHandler>>,
 }
 
 #[derive(Default)]
@@ -75,7 +75,7 @@ impl AppState {
         let mut pool = self.warm_pool.lock().await;
         let mut unwanted = Vec::new();
         for (key, conn) in pool.iter() {
-            if !saved.contains(key) || conn.handle.lock().await.is_closed() {
+            if !saved.contains(key) || conn.handle.is_closed() {
                 unwanted.push(key.clone());
             }
         }

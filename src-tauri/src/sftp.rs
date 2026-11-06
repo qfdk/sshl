@@ -93,7 +93,7 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
             return Ok(s.clone());
         }
     }
-    // Open new SFTP subsystem channel and cache it. Handle 锁只覆盖开通道（同 ssh_execute）。
+    // Open new SFTP subsystem channel and cache it.
     let channel = open_exec_channel(session).await?;
     let elevation = session.elevation.lock().await.clone();
     let sftp = match elevation {
@@ -564,15 +564,38 @@ pub async fn file_shell(state: State<'_, AppState>, session_id: String, command:
     run_as_file_user(&session, &command).await
 }
 
-/// 只验 sudo 能不能用（密码对不对、有没有权限），不做任何事。放在上传之前：密码错不会白传一遍大文件。
-fn sudo_check_command(with_password: bool) -> String {
-    let auth = if with_password { "-S -p ''" } else { "-n" };
-    format!("LC_ALL=C sudo {auth} true")
+/// sudo_prepare_command 建暂存区失败时的退出码（`sudo true` 自身失败只会是 1，sh 找不到命令是 126/127）。
+const STAGING_FAILED: u32 = 3;
+
+/// sudo 上传第一步，一条 exec：先验 sudo 能不能用（密码对不对、有没有权限；`sudo true` 不做任何事，
+/// 放在上传之前，密码错不会白传一遍大文件），过了再以登录用户身份建暂存区，stdout 即其路径。
+/// /var/tmp 落盘（/tmp 常是内存盘，大文件会撑满），不可用再退回 /tmp。mktemp -d 建出来即 0700。
+/// sudo 失败按 sudo 的退出码退出，建暂存区失败退出 STAGING_FAILED，见 staging_from_prepare。
+/// 包一层 sh：登录 shell 不一定是 POSIX sh。
+fn sudo_prepare_command(with_password: bool) -> String {
+    let auth = if with_password { "-S -p \"\"" } else { "-n" };
+    format!(
+        "sh -c 'LC_ALL=C sudo {auth} true || exit; \
+         mktemp -d /var/tmp/.sshl-upload.XXXXXXXX 2>/dev/null || mktemp -d /tmp/.sshl-upload.XXXXXXXX || exit {STAGING_FAILED}'"
+    )
+}
+
+/// sudo_prepare_command 的结果 → 暂存区路径。sudo 失败带上前端认的 SUDO_* 标记，建暂存区失败不带。
+fn staging_from_prepare(status: u32, out: &str, err: &str) -> AppResult<String> {
+    let staging = out.trim();
+    if status == STAGING_FAILED || (status == 0 && staging.is_empty()) {
+        return Err(AppError::Other(format!("创建暂存目录失败: {}", err.trim())));
+    }
+    if status != 0 {
+        return Err(AppError::Other(format!("{}: {}", sudo_failure(err), err.trim())));
+    }
+    Ok(staging.to_string())
 }
 
 /// 登录用户没有目标目录写权限时的上传（前端在普通上传报 Permission denied 后、用户确认才调用）：
-/// 0) 先验 sudo；1) 以登录用户身份传到 0700 暂存区；2) sudo 以目标目录属主身份解包到位（见 sudo_extract_command）；
-/// 3) 无论成败都删暂存区。sudo 密码：前端传入 > 连接保存的登录密码 > 免密 sudo（-n）。
+/// 1) 先验 sudo、建 0700 暂存区（sudo_prepare_command）；2) 以登录用户身份传到暂存区；
+/// 3) sudo 以目标目录属主身份解包到位，无论成败都删暂存区（sudo_extract_command）。共两条 exec。
+/// sudo 密码：前端传入 > 连接保存的登录密码 > 免密 sudo（-n）。
 #[tauri::command]
 pub async fn file_upload_sudo(
     app: AppHandle,
@@ -593,23 +616,10 @@ pub async fn file_upload_sudo(
     let input = password.as_ref().map(|p| format!("{p}\n"));
     let stdin = input.as_deref().map(str::as_bytes);
 
-    let (status, _, err) = exec_capture(open_exec_channel(&session).await?, &sudo_check_command(password.is_some()), stdin).await?;
-    if status != 0 {
-        return Err(AppError::Other(format!("{}: {}", sudo_failure(&err), err.trim())));
-    }
+    let (status, out, err) = exec_capture(open_exec_channel(&session).await?, &sudo_prepare_command(password.is_some()), stdin).await?;
+    let staging = staging_from_prepare(status, &out, &err)?;
 
-    // /var/tmp 落盘（/tmp 常是内存盘，大文件会撑满），不可用再退回 /tmp。mktemp -d 建出来即 0700。
-    let (status, out, err) = exec_capture(
-        open_exec_channel(&session).await?,
-        "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX 2>/dev/null || mktemp -d /tmp/.sshl-upload.XXXXXXXX",
-        None,
-    ).await?;
-    let staging = out.trim().to_string();
-    if status != 0 || staging.is_empty() {
-        return Err(AppError::Other(format!("创建暂存目录失败: {}", err.trim())));
-    }
-
-    let result = async {
+    let extracted = async {
         let staged = join_remote(&staging, &name);
         if is_directory {
             upload_tree_to(&app, &sftp, &session_id, &local_path, &staged, &remote_path).await?;
@@ -617,17 +627,22 @@ pub async fn file_upload_sudo(
             upload_file_to(&app, &sftp, &session_id, &local_path, &staged, &remote_path).await?;
         }
         let cmd = sudo_extract_command(password.is_some(), &staging, &dest_dir, &name);
-        let (status, _, err) = exec_capture(open_exec_channel(&session).await?, &cmd, stdin).await?;
-        if status != 0 {
-            return Err(AppError::Other(format!("{}: {}", sudo_failure(&err), err.trim())));
-        }
-        Ok(())
+        exec_capture(open_exec_channel(&session).await?, &cmd, stdin).await
     }.await;
-
-    if let Ok(channel) = open_exec_channel(&session).await {
-        let _ = exec_capture(channel, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
+    let (status, _, err) = match extracted {
+        Ok(done) => done,
+        Err(e) => {
+            // 没走到「解包 + 删暂存区」那条命令（上传失败 / 通道出错）：单独删暂存区
+            if let Ok(channel) = open_exec_channel(&session).await {
+                let _ = exec_capture(channel, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
+            }
+            return Err(e);
+        }
+    };
+    if status != 0 {
+        return Err(AppError::Other(format!("{}: {}", sudo_failure(&err), err.trim())));
     }
-    result
+    Ok(())
 }
 
 /// 分块从本地文件流式写入 SFTP 远端句柄，避免大文件一次性读进内存。
@@ -1159,19 +1174,25 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", escaped)
 }
 
-/// sudo 上传第二步：把暂存区里的条目 `name` 以**目标目录属主**的身份解包进 `dest_dir`。
+/// sudo 上传最后一步，一条 exec：把暂存区里的条目 `name` 以**目标目录属主**的身份解包进 `dest_dir`，
+/// 然后无论成败（含 sudo 认证失败）都以登录用户身份删掉暂存区，退出码和 stderr 仍是解包那一步的。
 /// root 读暂存区（0700，属于登录用户），`sudo -u #<属主 uid> tar x` 写入：新文件直接归属主、
 /// 目录里已有文件的属主不变。只打包条目本身（不带 "."），否则解包会把目标目录权限改成暂存区的 0700。
 /// GNU tar 解包默认会改写已存在目录的权限（合并上传时把属主原来的 755 改成 775），加 --no-overwrite-dir；
 /// BSD tar 本就不改、也不认这个参数，所以只对 GNU 加。
 /// stat 先试 GNU（-c），再回落 BSD（-f）。LC_ALL=C 让 sudo 的报错保持英文，便于识别。
 fn sudo_extract_command(with_password: bool, staging: &str, dest_dir: &str, name: &str) -> String {
-    let auth = if with_password { "-S -p ''" } else { "-n" };
-    let script = "set -e; uid=$(stat -c %u -- \"$2\" 2>/dev/null || stat -f %u -- \"$2\"); \
-                  keep=; tar --version 2>/dev/null | grep -q GNU && keep=--no-overwrite-dir; \
-                  tar -C \"$1\" -cf - -- \"$3\" | sudo -u \"#$uid\" tar -C \"$2\" $keep -xf -";
+    let auth = if with_password { "-S -p \"\"" } else { "-n" };
+    // 以 root 跑：$1 暂存区、$2 目标目录、$3 条目名
+    let extract = "set -e; uid=$(stat -c %u -- \"$2\" 2>/dev/null || stat -f %u -- \"$2\"); \
+                   keep=; tar --version 2>/dev/null | grep -q GNU && keep=--no-overwrite-dir; \
+                   tar -C \"$1\" -cf - -- \"$3\" | sudo -u \"#$uid\" tar -C \"$2\" $keep -xf -";
+    // 以登录用户跑，$4 是上面的脚本
+    let outer = format!(
+        "LC_ALL=C sudo {auth} sh -c \"$4\" sshl-sudo \"$1\" \"$2\" \"$3\"; st=$?; rm -rf -- \"$1\" 2>/dev/null; exit $st"
+    );
     format!(
-        "LC_ALL=C sudo {auth} sh -c '{script}' sshl-sudo {} {} {}",
+        "sh -c '{outer}' sshl-upload {} {} {} '{extract}'",
         shell_quote(staging),
         shell_quote(dest_dir),
         shell_quote(name),
@@ -1226,9 +1247,7 @@ async fn exec_capture(
 }
 
 async fn open_exec_channel(session: &SshSession) -> AppResult<russh::Channel<russh::client::Msg>> {
-    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
-    let handle = session.handle.lock().await;
-    handle.channel_open_session().await
+    session.handle.channel_open_session().await
         .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))
 }
 
@@ -1245,20 +1264,31 @@ mod tests {
     use super::{
         download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        pick_sudo_password, saved_password_for, split_remote, sudo_check_command, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
+        pick_sudo_password, saved_password_for, split_remote, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
         DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
     };
+    use super::{staging_from_prepare, sudo_prepare_command};
 
-    /// 假 sudo：按真 sudo 的参数形态吃掉 -S（读一行密码）/-p ''/-n/-u 用户，然后原样执行命令。
-    /// 用来在本机跑通 sudo_extract_command 生成的整条 shell（引号、tar、stat 回落）。
+    /// 假 sudo：按真 sudo 的参数形态吃掉 -S（读一行密码，"wrong" 按密码错处理）/-p ''/-n/-u 用户，然后原样执行命令。
+    /// 用来在本机跑通 sudo_prepare_command / sudo_extract_command 生成的整条 shell（引号、tar、stat 回落）。
     fn run_with_fake_sudo(cmd: &str, stdin: &[u8]) -> std::process::Output {
+        run_with_fakes(cmd, stdin, &[])
+    }
+
+    /// 同 run_with_fake_sudo，另把 `fakes`（命令名, sh 脚本体）作为假命令放进 PATH。
+    fn run_with_fakes(cmd: &str, stdin: &[u8], fakes: &[(&str, &str)]) -> std::process::Output {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let bin = std::env::temp_dir().join(format!("sshl-fake-sudo-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&bin).unwrap();
-        let sudo = bin.join("sudo");
-        std::fs::write(&sudo, "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -S) read -r _pw; shift;; -p|-u) shift 2;; -n) shift;; *) break;; esac; done\nexec \"$@\"\n").unwrap();
-        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sudo = "while [ $# -gt 0 ]; do case \"$1\" in \
+                    -S) read -r _pw; if [ \"$_pw\" = wrong ]; then printf 'Sorry, try again.\\nsudo: 1 incorrect password attempt\\n' >&2; exit 1; fi; shift;; \
+                    -p|-u) shift 2;; -n) shift;; *) break;; esac; done\nexec \"$@\"";
+        for (name, body) in [("sudo", sudo)].iter().chain(fakes) {
+            let file = bin.join(name);
+            std::fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         let mut child = std::process::Command::new("sh").arg("-c").arg(cmd).env("PATH", path)
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
@@ -1280,7 +1310,70 @@ mod tests {
         let out = run_with_fake_sudo(&cmd, b"secret\n");
         assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(std::fs::read(dest.join("it's a file.txt")).unwrap(), b"hello");
+        assert!(!staging.exists(), "解包后同一条命令删掉暂存区");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sudo_extract_removes_staging_even_when_sudo_or_extract_fails() {
+        let root = std::env::temp_dir().join(format!("sshl-sudo-{}", uuid::Uuid::new_v4()));
+        let (staging, dest) = (root.join("staging"), root.join("dest"));
+        std::fs::create_dir_all(&dest).unwrap();
+        let run = |dest: &std::path::Path, stdin: &[u8]| {
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::write(staging.join("f.txt"), b"x").unwrap();
+            let cmd = sudo_extract_command(true, &staging.to_string_lossy(), &dest.to_string_lossy(), "f.txt");
+            let out = run_with_fake_sudo(&cmd, stdin);
+            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+        };
+        // sudo 认证失败：解包没跑，暂存区照样删，报错仍能认出是密码错
+        let (code, err) = run(&dest, b"wrong\n");
+        assert_ne!(code, Some(0));
+        assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_INCORRECT", "{err}");
+        assert!(!staging.exists(), "sudo 失败也要删暂存区");
+        assert!(!dest.join("f.txt").exists());
+        // sudo 过了、解包失败（目标目录不存在）：暂存区照样删，退出码仍是失败
+        let (code, err) = run(&root.join("missing"), b"secret\n");
+        assert_ne!(code, Some(0), "{err}");
+        assert_eq!(sudo_failure(&err), "SUDO_FAILED", "{err}");
+        assert!(!staging.exists(), "解包失败也要删暂存区");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn prepare_result(out: &std::process::Output) -> crate::error::AppResult<String> {
+        let status = out.status.code().map_or(255, |c| c as u32);
+        staging_from_prepare(status, &String::from_utf8_lossy(&out.stdout), &String::from_utf8_lossy(&out.stderr))
+    }
+
+    #[test]
+    fn sudo_prepare_checks_sudo_then_creates_private_staging_in_var_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+        let out = run_with_fake_sudo(&sudo_prepare_command(true), b"secret\n");
+        let staging = prepare_result(&out).unwrap();
+        assert!(staging.starts_with("/var/tmp/.sshl-upload."), "{staging}");
+        let mode = std::fs::metadata(&staging).unwrap().permissions().mode();
+        std::fs::remove_dir(&staging).unwrap();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn sudo_prepare_tells_sudo_failure_from_staging_failure() {
+        let ran = std::env::temp_dir().join(format!("sshl-mktemp-ran-{}", uuid::Uuid::new_v4()));
+        let fake_mktemp = format!("touch {}; echo /var/tmp/.sshl-upload.fake", shell_quote(&ran.to_string_lossy()));
+        // sudo 没过：不建暂存区，报 sudo 的错
+        let out = run_with_fakes(&sudo_prepare_command(true), b"wrong\n", &[("mktemp", &fake_mktemp)]);
+        let err = prepare_result(&out).unwrap_err().to_string();
+        assert!(err.starts_with("SUDO_PASSWORD_INCORRECT: "), "{err}");
+        assert!(!ran.exists(), "sudo 没过就不该建暂存区");
+        let out = run_with_fakes(&sudo_prepare_command(false), b"", &[("mktemp", &fake_mktemp)]);
+        assert_eq!(prepare_result(&out).unwrap(), "/var/tmp/.sshl-upload.fake");
+        assert!(ran.exists());
+        let _ = std::fs::remove_file(&ran);
+        // sudo 过了、/var/tmp 和 /tmp 都建不了：报建暂存区失败，不带 SUDO_ 标记（前端不会当成要密码）
+        let out = run_with_fakes(&sudo_prepare_command(true), b"secret\n", &[("mktemp", "echo 'mktemp: boom' >&2; exit 1")]);
+        let err = prepare_result(&out).unwrap_err().to_string();
+        assert!(err.starts_with("创建暂存目录失败: ") && err.contains("mktemp: boom"), "{err}");
+        assert!(!err.contains("SUDO_"), "{err}");
     }
 
     #[test]
@@ -1302,17 +1395,20 @@ mod tests {
         // 合并进已有目录：原有文件保留；只打包条目本身，不带 "."，目标目录的权限不会被改成暂存区的 0700。
         assert_eq!(std::fs::read(dest.join("my dir/keep.txt")).unwrap(), b"K");
         assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!staging.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn sudo_extract_uses_non_interactive_sudo_without_password() {
-        let cmd = sudo_extract_command(false, "/tmp/s", "/home/bob", "f");
-        assert!(cmd.contains("sudo -n "));
-        assert!(!cmd.contains("-S"));
-        assert!(sudo_extract_command(true, "/tmp/s", "/home/bob", "f").contains("sudo -S -p ''"));
-        assert_eq!(sudo_check_command(false), "LC_ALL=C sudo -n true");
-        assert_eq!(sudo_check_command(true), "LC_ALL=C sudo -S -p '' true");
+        for cmd in [sudo_extract_command(false, "/tmp/s", "/home/bob", "f"), sudo_prepare_command(false)] {
+            assert!(cmd.contains("sudo -n "), "{cmd}");
+            assert!(!cmd.contains("-S"), "{cmd}");
+        }
+        // 密码经 stdin 只给一次 sudo -S（root 里那层 sudo -u 不要密码）
+        for cmd in [sudo_extract_command(true, "/tmp/s", "/home/bob", "f"), sudo_prepare_command(true)] {
+            assert_eq!(cmd.matches("sudo -S -p \"\" ").count(), 1, "{cmd}");
+        }
     }
 
     /// 真实 Linux（GNU tar/stat + 真 sudo）上的 sudo 上传：
@@ -1325,43 +1421,63 @@ mod tests {
         let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
         let port: u16 = port.parse().unwrap();
-        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+        type H = std::sync::Arc<russh::client::Handle<crate::ssh::ClientHandler>>;
         async fn exec(h: &H, cmd: &str, stdin: Option<&[u8]>) -> (u32, String, String) {
-            let ch = h.lock().await.channel_open_session().await.unwrap();
+            let ch = h.channel_open_session().await.unwrap();
             exec_capture(ch, cmd, stdin).await.unwrap()
         }
-        async fn stage(h: &H) -> String {
-            let (st, out, _) = exec(h, "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX", None).await;
-            assert_eq!(st, 0);
-            let s = out.trim().to_string();
+        async fn fill(h: &H, staging: &str) {
             let (st, _, err) = exec(h, &format!(
                 "cd {0} && printf hi > \"it's a.txt\" && mkdir -p existing/sub && printf new > existing/sub/new.txt",
-                shell_quote(&s)), None).await;
+                shell_quote(staging)), None).await;
             assert_eq!(st, 0, "{err}");
+        }
+        // 第一步（同 file_upload_sudo）：sudo 预检 + 以登录用户建 0700 暂存区，再放进要上传的东西
+        async fn stage(h: &H, user: &str, stdin: Option<&[u8]>) -> String {
+            let (st, out, err) = exec(h, &sudo_prepare_command(stdin.is_some()), stdin).await;
+            let s = staging_from_prepare(st, &out, &err).unwrap();
+            assert!(s.starts_with("/var/tmp/.sshl-upload."), "/var/tmp 优先：{s}");
+            let (_, owner, _) = exec(h, &format!("stat -c '%U %a' {}", shell_quote(&s)), None).await;
+            assert_eq!(owner.trim(), format!("{user} 700"));
+            fill(h, &s).await;
             s
+        }
+        async fn gone(h: &H, path: &str) -> bool {
+            exec(h, &format!("test -e {}", shell_quote(path)), None).await.0 != 0
         }
         let dest = "/home/bob/uploads";
         let alice = crate::ssh::do_handshake(host, port, "alice", Some("alicepw"), None, None).await.unwrap();
         assert_ne!(exec(&alice, "touch /home/bob/uploads/x", None).await.0, 0, "前提：alice 不能直接写 bob 的目录");
 
-        // 上传前的 sudo 预检：密码错 / 没给密码在传文件之前就能识别
-        let (st, _, err) = exec(&alice, &sudo_check_command(true), Some(b"wrong\n")).await;
-        assert_ne!(st, 0);
+        // 上传前的 sudo 预检：密码错 / 没给密码在传文件之前就能识别，且不建暂存区
+        let (st, out, err) = exec(&alice, &sudo_prepare_command(true), Some(b"wrong\n")).await;
         assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_INCORRECT", "{err}");
-        let (_, _, err) = exec(&alice, &sudo_check_command(false), None).await;
-        assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_REQUIRED", "{err}");
-        assert_eq!(exec(&alice, &sudo_check_command(true), Some(b"alicepw\n")).await.0, 0);
+        assert!(staging_from_prepare(st, &out, &err).unwrap_err().to_string().starts_with("SUDO_PASSWORD_INCORRECT: "));
+        assert_eq!(out, "", "sudo 没过不建暂存区");
+        let (st, out, err) = exec(&alice, &sudo_prepare_command(false), None).await;
+        assert!(staging_from_prepare(st, &out, &err).unwrap_err().to_string().starts_with("SUDO_PASSWORD_REQUIRED: "), "{err}");
 
-        let staging = stage(&alice).await;
+        // 解包和删暂存区是同一条命令：sudo 失败、解包失败、成功，暂存区都会被删
+        let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
         let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, "it's a.txt"), Some(b"wrong\n")).await;
         assert_ne!(st, 0);
         assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_INCORRECT", "{err}");
+        assert!(gone(&alice, &staging).await, "sudo 失败也删暂存区");
+        let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
         let (st, _, err) = exec(&alice, &sudo_extract_command(false, &staging, dest, "it's a.txt"), None).await;
         assert_ne!(st, 0);
         assert_eq!(sudo_failure(&err), "SUDO_PASSWORD_REQUIRED", "{err}");
+        assert!(gone(&alice, &staging).await);
+        let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
+        let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, "/home/bob/missing", "it's a.txt"), Some(b"alicepw\n")).await;
+        assert_ne!(st, 0, "解包失败要报出来");
+        assert_eq!(sudo_failure(&err), "SUDO_FAILED", "{err}");
+        assert!(gone(&alice, &staging).await, "解包失败也删暂存区");
         for name in ["it's a.txt", "existing"] {
+            let staging = stage(&alice, "alice", Some(b"alicepw\n")).await;
             let (st, _, err) = exec(&alice, &sudo_extract_command(true, &staging, dest, name), Some(b"alicepw\n")).await;
             assert_eq!(st, 0, "{name}: {err}");
+            assert!(gone(&alice, &staging).await);
         }
         let (_, out, _) = exec(&alice, "cd /home/bob/uploads && stat -c '%U %a %n' . existing existing/keep.txt existing/sub existing/sub/new.txt \"it's a.txt\" && cat \"it's a.txt\" existing/sub/new.txt", None).await;
         let lines: Vec<&str> = out.lines().collect();
@@ -1370,22 +1486,22 @@ mod tests {
         assert!(lines[2].starts_with("bob ") && lines[2].ends_with(" existing/keep.txt"), "{out}");
         assert!(lines[3].starts_with("bob ") && lines[4].starts_with("bob ") && lines[5].starts_with("bob "), "新文件归目录属主：{out}");
         assert_eq!(lines[6], "hinew", "{out}");
-        exec(&alice, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
 
         let carol = crate::ssh::do_handshake(host, port, "carol", Some("carolpw"), None, None).await.unwrap();
-        let staging = stage(&carol).await;
+        let (st, out, err) = exec(&carol, &sudo_prepare_command(true), Some(b"carolpw\n")).await;
+        assert!(staging_from_prepare(st, &out, &err).unwrap_err().to_string().starts_with("SUDO_NOT_ALLOWED: "), "{err}");
+        let (_, staging, _) = exec(&carol, "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX", None).await;
+        let staging = staging.trim().to_string();
+        fill(&carol, &staging).await;
         let (_, _, err) = exec(&carol, &sudo_extract_command(true, &staging, dest, "it's a.txt"), Some(b"carolpw\n")).await;
         assert_eq!(sudo_failure(&err), "SUDO_NOT_ALLOWED", "{err}");
-        let (_, _, err) = exec(&carol, &sudo_check_command(true), Some(b"carolpw\n")).await;
-        assert_eq!(sudo_failure(&err), "SUDO_NOT_ALLOWED", "{err}");
-        exec(&carol, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
+        assert!(gone(&carol, &staging).await);
 
         let dave = crate::ssh::do_handshake(host, port, "dave", Some("davepw"), None, None).await.unwrap();
-        let staging = stage(&dave).await;
+        let staging = stage(&dave, "dave", None).await;
         let (st, _, err) = exec(&dave, &sudo_extract_command(false, &staging, dest, "existing"), None).await;
         assert_eq!(st, 0, "免密 sudo 走 -n：{err}");
-        assert_eq!(exec(&dave, &sudo_check_command(false), None).await.0, 0);
-        exec(&dave, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
+        assert!(gone(&dave, &staging).await);
     }
 
     /// 真实 Linux 上「文件管理跟随终端用户」：终端（带 pty 的交互 shell，同应用）里 su / sudo -i 之后，
@@ -1400,10 +1516,10 @@ mod tests {
         let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
         let port: u16 = port.parse().unwrap();
-        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+        type H = std::sync::Arc<russh::client::Handle<crate::ssh::ClientHandler>>;
         type Ch = russh::Channel<russh::client::Msg>;
         async fn channel(h: &H) -> Ch {
-            h.lock().await.channel_open_session().await.unwrap()
+            h.channel_open_session().await.unwrap()
         }
         async fn exec(h: &H, cmd: &str, stdin: Option<&[u8]>) -> (u32, String, String) {
             exec_capture(channel(h).await, cmd, stdin).await.unwrap()
