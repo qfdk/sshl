@@ -97,12 +97,7 @@ export const api = {
     saveConnection: (connection: unknown) => call('config_save_connection', { connection }),
     deleteConnection: (id: string) => call('config_delete_connection', { id }),
     applyConnectionLayout: (layout: unknown, groups?: string[]) => call('config_apply_connection_layout', { layout, groups: groups ?? null }),
-    onConnectionsUpdated: (callback: () => void) => {
-      let unlisten: (() => void) | null = null;
-      void listen('connections:updated', () => { try { callback(); } catch (error) { console.error(error); } })
-        .then(stop => { unlisten = stop; }).catch(error => console.error('[ipc] listen connections:updated:', error));
-      return () => { try { unlisten?.(); } catch {} };
-    },
+    onConnectionsUpdated: (callback: () => void) => onEvent('connections:updated')(() => callback()),
   },
   cred: {
     list: (connectionId: string) => invoke<any>('cred_list', { connectionId }),

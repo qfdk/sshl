@@ -57,3 +57,16 @@ test('ssh:closed 走同一套注册：提前取消同样不泄漏', async () => 
   await flush();
   assert.equal(registration.stopped, 1);
 });
+
+test('connections:updated 提前取消同样不泄漏', async () => {
+  let calls = 0;
+  const stop = api.config.onConnectionsUpdated(() => { calls += 1; });
+  const registration = registrations.at(-1);
+  assert.equal(registration.name, 'connections:updated');
+  stop();
+  registration.handler({ payload: null });
+  registration.resolve();
+  await flush();
+  assert.equal(registration.stopped, 1);
+  assert.equal(calls, 0);
+});
