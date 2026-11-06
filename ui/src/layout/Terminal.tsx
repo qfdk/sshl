@@ -1,11 +1,12 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { memo, useEffect, useRef, useSyncExternalStore } from 'react';
 import { getCurrentSessionId, subscribe } from '../lib/app-state';
 import { useTerminal } from '../features/terminal/useTerminal';
 import sessionManager from '../lib/session-manager';
 
 const subscribeCurrentSessionId = (callback: () => void) => subscribe('currentSessionId', callback);
 
-export function Terminal() {
+// 没有 props、终端实例全在 useTerminal 的 ref 里：memo 后 App 重渲染不再连带它
+export const Terminal = memo(function Terminal() {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalManager = useTerminal(containerRef);
   const sessionId = useSyncExternalStore(subscribeCurrentSessionId, getCurrentSessionId, () => null);
@@ -27,4 +28,4 @@ export function Terminal() {
       </div>
     </div>
   );
-}
+});

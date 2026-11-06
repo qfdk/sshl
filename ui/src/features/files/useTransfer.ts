@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
-import { describeProgress, type TransferProgress } from './transfer-progress';
+import { createTransferStatusStore, describeProgress, type TransferProgress } from './transfer-progress';
 import { savedPasswordChoices, sudoErrorMessage, uploadWithSudoFallback } from './sudo-upload';
 import sessionManager from '../../lib/session-manager';
 import { getFileIdentity } from './file-user';
@@ -49,17 +49,13 @@ function uploadWithSudo(sessionId: string, localPath: string, remotePath: string
 
 type AppWindow = Window & { api?: any };
 
-type TransferStatus = {
-  active: boolean;
-  progress: number;
-  info: string;
-};
-
 export function useTransfer(sessionId: string | null, onUploadComplete: () => void, onDownloadComplete: () => void) {
   const [activeTransfers, setActiveTransfers] = useState(0);
   const activeRef = useRef(0);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [status, setStatus] = useState<TransferStatus>({ active: false, progress: 0, info: '' });
+  // 进度条状态不进 React state（见 createTransferStatusStore）：只有订阅它的进度条重渲染
+  const [statusStore] = useState(createTransferStatusStore);
+  const setStatus = statusStore.set;
 
   useEffect(() => {
     const api = (window as AppWindow).api?.file;
@@ -138,5 +134,5 @@ export function useTransfer(sessionId: string | null, onUploadComplete: () => vo
     return run('下载文件夹', remotePath.split('/').pop() || remotePath, () => (window as AppWindow).api.file.downloadDirectory(sessionId, remotePath, localPath), onDownloadComplete);
   }, [onDownloadComplete, run, sessionId]);
 
-  return { activeTransfers, status, uploadFile, downloadFile, uploadDirectory, downloadDirectory };
+  return { activeTransfers, statusStore, uploadFile, downloadFile, uploadDirectory, downloadDirectory };
 }

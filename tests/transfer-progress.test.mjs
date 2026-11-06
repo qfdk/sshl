@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeProgress } from '../ui/src/features/files/transfer-progress.ts';
+import { createTransferStatusStore, describeProgress } from '../ui/src/features/files/transfer-progress.ts';
 
 test('单文件进度：百分比与字节数，不带文件计数', () => {
   assert.deepEqual(describeProgress('下载', { remotePath: '/srv/app.log', transferred: 512 * 1024, total: 1024 * 1024 }), {
@@ -23,4 +23,21 @@ test('目录路径以 / 结尾时仍取到目录名', () => {
 test('总量为 0 不出 NaN，超出总量封顶 100%', () => {
   assert.equal(describeProgress('下载', { remotePath: '/e', transferred: 0, total: 0, filesDone: 0, filesTotal: 0 }).progress, 0);
   assert.equal(describeProgress('下载', { remotePath: '/f', transferred: 20, total: 10 }).progress, 100);
+});
+
+test('进度条状态 store：初始空闲；整体替换与按当前值更新都通知订阅者，取消订阅后不再通知', () => {
+  const store = createTransferStatusStore();
+  assert.deepEqual(store.get(), { active: false, progress: 0, info: '' });
+  const seen = [];
+  const unsubscribe = store.subscribe(() => seen.push(store.get()));
+  store.set({ active: true, progress: 40, info: '正在上传: a' });
+  // 传输结束 3 秒后收起：只改 active / progress，保留最后一条文字
+  store.set(current => ({ ...current, active: false, progress: 0 }));
+  unsubscribe();
+  store.set({ active: true, progress: 1, info: 'x' });
+  assert.deepEqual(seen, [
+    { active: true, progress: 40, info: '正在上传: a' },
+    { active: false, progress: 0, info: '正在上传: a' },
+  ]);
+  assert.equal(store.get().info, 'x');
 });

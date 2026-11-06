@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { ArrowDownUp, Download, FileText, Folder, FolderPlus, RefreshCw, Trash2, Upload, UserRound } from 'lucide-react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
@@ -17,6 +17,7 @@ import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
+import type { TransferStatusStore } from './transfer-progress';
 import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove, type DropTarget } from './file-drag';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
@@ -65,7 +66,21 @@ function checksToPermissions(checks: boolean[]) {
   return [0, 1, 2].map(group => (checks[group * 3] ? 4 : 0) + (checks[group * 3 + 1] ? 2 : 0) + (checks[group * 3 + 2] ? 1 : 0)).join('');
 }
 
-export function FileManager() {
+// 传输进度条自己订阅进度：传输期间约每 100ms 一次的进度只重渲染这一条，不连带两侧文件列表
+function TransferStatusBar({ store }: { store: TransferStatusStore }) {
+  const status = useSyncExternalStore(store.subscribe, store.get);
+  if (!status.active) return null;
+  return (
+    <div className="flex h-11 shrink-0 items-center gap-3 rounded-xl border border-border bg-card px-3.5 text-xs">
+      <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg bg-accent text-primary" aria-hidden="true"><ArrowDownUp className="h-3.5 w-3.5" /></span>
+      <span className="min-w-0 flex-1 truncate">{status.info}</span>
+      <Progress value={status.progress} className="h-1.5 w-48 shrink-0" />
+    </div>
+  );
+}
+
+// 没有 props、数据全来自外部 store（useSyncExternalStore）和自身状态：memo 后 App 重渲染（连接过程中多次）不再连带它
+export const FileManager = memo(function FileManager() {
   const activeTabId = useSyncExternalStore(subscribeActiveTabId, getActiveTabId, () => 'terminal');
   const sessionId = useSyncExternalStore(subscribeCurrentSessionId, getCurrentSessionId, () => null);
   const enabled = activeTabId === 'file-manager';
@@ -590,13 +605,7 @@ export function FileManager() {
         </div>
       )}
 
-      {transfer.status.active && (
-        <div className="flex h-11 shrink-0 items-center gap-3 rounded-xl border border-border bg-card px-3.5 text-xs">
-          <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-lg bg-accent text-primary" aria-hidden="true"><ArrowDownUp className="h-3.5 w-3.5" /></span>
-          <span className="min-w-0 flex-1 truncate">{transfer.status.info}</span>
-          <Progress value={transfer.status.progress} className="h-1.5 w-48 shrink-0" />
-        </div>
-      )}
+      <TransferStatusBar store={transfer.statusStore} />
 
       <Dialog open={Boolean(permissionTarget)} onOpenChange={open => { if (!open) setPermissionTarget(null); }}>
         <DialogContent>
@@ -643,4 +652,4 @@ export function FileManager() {
       </Dialog>
     </div>
   );
-}
+});
