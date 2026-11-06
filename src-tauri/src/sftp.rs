@@ -684,6 +684,32 @@ where
     Ok(transferred)
 }
 
+/// 关掉读完的远端句柄，不等回复。只 drop 也会发 CLOSE，但 russh-sftp 只有等到 CLOSE 的回复才给已开句柄
+/// 计数减一，drop 掉的句柄永远占着计数：服务端声明了句柄上限（OpenSSH limits 扩展为 1019）时，同一 SFTP
+/// 会话累计下载约一千个文件后，open / 列目录全部报 "handle limit reached"，只能重连。
+fn close_in_background(mut file: russh_sftp::client::fs::File) {
+    tokio::spawn(async move {
+        let _ = file.shutdown().await;
+    });
+}
+
+/// 单句柄流式下载到 `local_path`（小文件），返回累计字节数。
+async fn download_small(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &Path,
+    on_progress: impl FnMut(u64),
+) -> AppResult<u64> {
+    let mut remote = sftp.open(remote_path).await
+        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
+    let result = async {
+        let mut local = tokio::fs::File::create(local_path).await?;
+        stream_to_local(&mut remote, &mut local, remote_path, on_progress).await
+    }.await;
+    close_in_background(remote);
+    result
+}
+
 /// 把 [0, total) 切成至多 `segments` 段，段长按 TRANSFER_CHUNK 对齐，让每个 READ 都是整块。
 fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
     let chunk = TRANSFER_CHUNK as u64;
@@ -697,12 +723,13 @@ fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
 /// 分段并发下载：每段用 `open_remote` / `open_local` 各开一个独立句柄，seek 到段首后
 /// 顺序读写，返回累计字节数。本地文件不预分配长度——各段写到自己的偏移，最终长度
 /// 自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，直接报错，
-/// 不留下零填充的空洞；最后一段不设上界读到 EOF。
+/// 不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
 async fn download_segmented<R, W, OR, ORF, OL, OLF>(
     total: u64,
     segments: usize,
     open_remote: OR,
     open_local: OL,
+    release: impl Fn(R),
     remote_path: &str,
     on_progress: impl Fn(u64),
 ) -> AppResult<u64>
@@ -721,39 +748,43 @@ where
     let ranges = segment_ranges(total, segments);
     let last = ranges.len().saturating_sub(1);
     let transferred = AtomicU64::new(0);
-    let (open_remote, open_local, transferred_ref, on_progress) =
-        (&open_remote, &open_local, &transferred, &on_progress);
+    let (open_remote, open_local, release, transferred_ref, on_progress) =
+        (&open_remote, &open_local, &release, &transferred, &on_progress);
     let workers = ranges.into_iter().enumerate().map(|(i, (start, end))| async move {
         let mut remote = open_remote().await?;
-        let mut local = open_local().await?;
-        remote.seek(SeekFrom::Start(start)).await
-            .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
-        local.seek(SeekFrom::Start(start)).await?;
-        let mut buf = vec![0u8; TRANSFER_CHUNK];
-        let mut pos = start;
-        loop {
-            let want = if i == last {
-                TRANSFER_CHUNK
-            } else {
-                (end - pos).min(TRANSFER_CHUNK as u64) as usize
-            };
-            if want == 0 { break; }
-            let n = remote.read(&mut buf[..want]).await
-                .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
-            if n == 0 {
-                if i != last {
-                    return Err(AppError::Sftp(format!(
-                        "{remote_path} shrank during download (EOF at {pos}, expected {end})"
-                    )));
+        let result = async {
+            let mut local = open_local().await?;
+            remote.seek(SeekFrom::Start(start)).await
+                .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
+            local.seek(SeekFrom::Start(start)).await?;
+            let mut buf = vec![0u8; TRANSFER_CHUNK];
+            let mut pos = start;
+            loop {
+                let want = if i == last {
+                    TRANSFER_CHUNK
+                } else {
+                    (end - pos).min(TRANSFER_CHUNK as u64) as usize
+                };
+                if want == 0 { break; }
+                let n = remote.read(&mut buf[..want]).await
+                    .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
+                if n == 0 {
+                    if i != last {
+                        return Err(AppError::Sftp(format!(
+                            "{remote_path} shrank during download (EOF at {pos}, expected {end})"
+                        )));
+                    }
+                    break;
                 }
-                break;
+                local.write_all(&buf[..n]).await?;
+                pos += n as u64;
+                on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
             }
-            local.write_all(&buf[..n]).await?;
-            pos += n as u64;
-            on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
-        }
-        local.flush().await?;
-        Ok::<(), AppError>(())
+            local.flush().await?;
+            Ok::<(), AppError>(())
+        }.await;
+        release(remote);
+        result
     });
     futures::future::try_join_all(workers).await?;
     Ok(transferred.into_inner())
@@ -768,7 +799,7 @@ async fn download_large(
     total: u64,
     on_progress: impl Fn(u64),
 ) -> AppResult<u64> {
-    drop(sftp.open(remote_path).await
+    close_in_background(sftp.open(remote_path).await
         .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?);
     tokio::fs::File::create(local_path).await?;
     download_segmented(
@@ -781,6 +812,7 @@ async fn download_large(
         move || async move {
             Ok(tokio::fs::OpenOptions::new().write(true).open(local_path).await?)
         },
+        close_in_background,
         remote_path,
         on_progress,
     ).await
@@ -860,10 +892,7 @@ pub async fn file_download(
     let transferred = if total >= SEGMENTED_DOWNLOAD_MIN {
         download_large(&sftp, &remote_path, Path::new(&local_path), total, &on_progress).await?
     } else {
-        let mut remote = sftp.open(&remote_path).await
-            .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
-        let mut local = tokio::fs::File::create(&local_path).await?;
-        stream_to_local(&mut remote, &mut local, &remote_path, &on_progress).await?
+        download_small(&sftp, &remote_path, Path::new(&local_path), &on_progress).await?
     };
     // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
     emit_download_progress(&app, DownloadProgress {
@@ -1138,10 +1167,7 @@ async fn download_tree(
     download_dir_files(
         plan.files.into_iter().map(|(remote, local, size)| ((remote, local), size)).collect(),
         |(remote, local): (String, PathBuf)| async move {
-            let mut rf = sftp_ref.open(&remote).await
-                .map_err(|e| AppError::Sftp(format!("open {remote}: {e}")))?;
-            let mut lf = tokio::fs::File::create(&local).await?;
-            stream_to_local(&mut rf, &mut lf, &remote, progress_ref.file()).await?;
+            download_small(sftp_ref, &remote, &local, progress_ref.file()).await?;
             progress_ref.file_done();
             Ok(())
         },
@@ -1666,17 +1692,29 @@ mod tests {
         }
     }
 
+    struct SegmentedRun {
+        result: AppResult<u64>,
+        bytes: Vec<u8>,
+        /// READ 在途峰值。
+        peak: usize,
+        last_progress: u64,
+        opened: usize,
+        released: usize,
+    }
+
     /// 用 DOWNLOAD_SEGMENTS 跑一次分段下载：远端内容是 `remote`，按 `total` 切段。
-    async fn run_segmented(remote: Vec<u8>, total: u64) -> (AppResult<u64>, Vec<u8>, usize, u64) {
+    async fn run_segmented(remote: Vec<u8>, total: u64) -> SegmentedRun {
         let data = Arc::new(remote);
         let local = Arc::new(Mutex::new(Vec::new()));
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let last_progress = AtomicU64::new(0);
+        let (opened, released) = (AtomicUsize::new(0), AtomicUsize::new(0));
         let result = download_segmented(
             total,
             DOWNLOAD_SEGMENTS,
             || {
+                opened.fetch_add(1, Ordering::SeqCst);
                 let remote = MockRemote {
                     data: data.clone(),
                     pos: 0,
@@ -1690,11 +1728,19 @@ mod tests {
                 let file = MockLocal { buf: local.clone(), pos: 0 };
                 async move { Ok(file) }
             },
+            |_: MockRemote| { released.fetch_add(1, Ordering::SeqCst); },
             "/r",
             |t| last_progress.store(t, Ordering::SeqCst),
         ).await;
         let bytes = local.lock().unwrap().clone();
-        (result, bytes, peak.load(Ordering::SeqCst), last_progress.load(Ordering::SeqCst))
+        SegmentedRun {
+            result,
+            bytes,
+            peak: peak.load(Ordering::SeqCst),
+            last_progress: last_progress.load(Ordering::SeqCst),
+            opened: opened.into_inner(),
+            released: released.into_inner(),
+        }
     }
 
     /// 非常量的字节模式：周期 251 与块大小互质，段错位或重叠时一定比对不上。
@@ -1724,20 +1770,30 @@ mod tests {
     async fn segmented_download_runs_segments_concurrently_and_reassembles_bytes() {
         let source = pattern(3 * TRANSFER_CHUNK + 4321);
         let total = source.len() as u64;
-        let (result, bytes, peak, last_progress) = run_segmented(source.clone(), total).await;
-        assert_eq!(result.unwrap(), total);
+        let run = run_segmented(source.clone(), total).await;
+        assert_eq!(run.result.unwrap(), total);
         // 各段 READ 必须同时在途，串行时吞吐仍是单句柄的块大小 / RTT。
-        assert!(peak > 1, "segments were read serially (peak in-flight = {peak})");
-        assert!(bytes == source, "reassembled bytes differ from the remote file");
-        assert_eq!(last_progress, total);
+        assert!(run.peak > 1, "segments were read serially (peak in-flight = {})", run.peak);
+        assert!(run.bytes == source, "reassembled bytes differ from the remote file");
+        assert_eq!(run.last_progress, total);
+    }
+
+    #[tokio::test]
+    async fn segmented_download_releases_every_remote_handle() {
+        let source = pattern(5 * TRANSFER_CHUNK);
+        let run = run_segmented(source.clone(), source.len() as u64).await;
+        run.result.unwrap();
+        // 只 drop 不关，russh-sftp 的已开句柄计数不会减，累计到服务端上限（1019）后 open 全部失败。
+        assert!(run.opened > 1);
+        assert_eq!(run.released, run.opened, "every segment handle must be closed");
     }
 
     #[tokio::test]
     async fn segmented_download_errors_when_file_shrinks_mid_transfer() {
         // stat 时 4 块多，读的时候只剩 1 块：中间段会提前 EOF。
         let total = 4 * TRANSFER_CHUNK as u64 + 10;
-        let (result, _, _, _) = run_segmented(pattern(TRANSFER_CHUNK), total).await;
-        assert!(matches!(result, Err(AppError::Sftp(_))), "shrunk file must not download silently");
+        let run = run_segmented(pattern(TRANSFER_CHUNK), total).await;
+        assert!(matches!(run.result, Err(AppError::Sftp(_))), "shrunk file must not download silently");
     }
 
     #[tokio::test]
@@ -2190,6 +2246,24 @@ mod tests {
 
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&src).unwrap();
+            std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// OpenSSH 的 limits 扩展声明句柄上限 1019，russh-sftp 按它在客户端计数、只有等到 CLOSE 回复才减一：
+        /// 下载完只 drop 不关的只读句柄会一直占着计数，同一会话下载约一千个文件后 open / 列目录全部失败。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn downloading_many_files_does_not_exhaust_handle_limit() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!(
+                "mkdir {base}/many && cd {base}/many && seq -f f%04g 1 1100 | xargs touch && for i in 1 2 3; do truncate -s {SEGMENTED_DOWNLOAD_MIN} big$i; done"
+            )).await;
+            let dst = temp_dir("many");
+            download_tree(&sftp, &format!("{base}/many"), &dst.to_string_lossy(), |_| {}).await.unwrap();
+            assert_eq!(std::fs::read_dir(&dst).unwrap().count(), 1103);
+            sftp.read_dir(base.as_str()).await.expect("下载之后还能列目录");
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&dst).unwrap();
         }
 
