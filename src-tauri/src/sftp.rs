@@ -763,7 +763,49 @@ fn close_in_background(mut file: russh_sftp::client::fs::File) {
     });
 }
 
-/// 单句柄流式下载到 `local_path`（小文件），返回累计字节数。
+/// 下载的临时文件：与目标同目录的隐藏文件 `.<名字>.<随机>.sshl-part`，写完（各写句柄都已 flush）commit 时才
+/// rename 成最终名（同目录 rename 原子，覆盖已有的同名文件）。没 commit 就被丢弃——读写出错、通道卡死报错、
+/// 下载 future 被取消——时删掉它：失败的下载不留下和完整文件同名的残片，原有的同名文件也原样保留。
+/// 名字总带随机段（O_EXCL 新建，撞了再换）：固定的 `.<名字>.sshl-part` 可能正好是目录下载里另一个远端文件的名字，
+/// 那个文件下完 rename 过来会顶掉正在写的临时文件。
+struct PartFile {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PartFile {
+    async fn create(target: &Path) -> AppResult<(Self, tokio::fs::File)> {
+        let name = target.file_name()
+            .ok_or_else(|| AppError::Other(format!("无效的下载路径: {}", target.display())))?;
+        loop {
+            let mut part = std::ffi::OsString::from(".");
+            part.push(name);
+            part.push(format!(".{:08x}.sshl-part", rand::random::<u32>()));
+            let path = target.with_file_name(part);
+            match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&path).await {
+                Ok(file) => return Ok((Self { path, committed: false }, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    async fn commit(mut self, target: &Path) -> AppResult<()> {
+        tokio::fs::rename(&self.path, target).await?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for PartFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// 单句柄流式下载到 `local_path`（小文件），返回累计字节数。先写临时文件，下完才换成最终名（见 PartFile）。
 async fn download_small(
     sftp: &SftpSession,
     remote_path: &str,
@@ -773,8 +815,10 @@ async fn download_small(
     let mut remote = sftp.open(remote_path).await
         .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
     let result = async {
-        let mut local = tokio::fs::File::create(local_path).await?;
-        stream_to_local(&mut remote, &mut local, remote_path, on_progress).await
+        let (part, mut local) = PartFile::create(local_path).await?;
+        let transferred = stream_to_local(&mut remote, &mut local, remote_path, on_progress).await?;
+        part.commit(local_path).await?;
+        Ok(transferred)
     }.await;
     close_in_background(remote);
     result
@@ -884,9 +928,9 @@ where
     Ok(transferred.into_inner())
 }
 
-/// 大文件分段下载到 `local_path`。先开段 0 的远端句柄，成功了才创建 / 截断本地文件：能 stat 但
-/// 没有读权限（如 root 的大日志）时，不留下 0 字节文件、也不截断同名的已有文件。这个句柄就是
-/// 段 0，不再单独探测一次（省一对 open / close）；其余段之后各自打开。
+/// 大文件分段下载到 `local_path`。先开段 0 的远端句柄，成功了才建本地的临时文件：能 stat 但没有读权限
+/// （如 root 的大日志）时本地什么都不动。这个句柄就是段 0，不再单独探测一次（省一对 open / close）；
+/// 其余段之后各自打开。各段并发写同一个临时文件，全部下完才换成最终名（见 PartFile）。
 async fn download_large(
     sftp: &SftpSession,
     remote_path: &str,
@@ -896,11 +940,15 @@ async fn download_large(
 ) -> AppResult<u64> {
     let first = sftp.open(remote_path).await
         .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
-    if let Err(e) = tokio::fs::File::create(local_path).await {
-        close_in_background(first);
-        return Err(e.into());
-    }
-    download_segmented(
+    let part = match PartFile::create(local_path).await {
+        Ok((part, _)) => part,
+        Err(e) => {
+            close_in_background(first);
+            return Err(e);
+        }
+    };
+    let part_path = part.path.as_path();
+    let transferred = download_segmented(
         total,
         DOWNLOAD_SEGMENTS,
         first,
@@ -909,12 +957,14 @@ async fn download_large(
                 .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))
         },
         move || async move {
-            Ok(tokio::fs::OpenOptions::new().write(true).open(local_path).await?)
+            Ok(tokio::fs::OpenOptions::new().write(true).open(part_path).await?)
         },
         close_in_background,
         remote_path,
         on_progress,
-    ).await
+    ).await?;
+    part.commit(local_path).await?;
+    Ok(transferred)
 }
 
 /// 目录下载的文件：小文件按在途字节预算并发（单句柄一问一答，每个文件在途至多一个块）；
@@ -2728,14 +2778,248 @@ mod tests {
         assert!(started.len() - 1 <= DIR_OP_CONCURRENCY, "no new listings may start after the failure");
     }
 
+    /// 目录里的全部条目名（含隐藏的临时文件），排好序。
+    fn dir_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 下载中途失败 / 被取消时不留残片：用进程内的 SFTP 服务端跑真实的下载函数（download_small / download_large / download_tree）。
+    mod atomic_download {
+        use super::super::{download_large, download_small, download_tree, PartFile, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK};
+        use super::{dir_names, pattern};
+        use russh_sftp::client::SftpSession;
+        use russh_sftp::protocol::{Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode};
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::sync::Notify;
+
+        #[derive(Clone, Copy)]
+        enum ReadFault {
+            /// 从这个偏移起的 READ 回 FAILURE（读出错；通道卡死后 sftp_stall 替在等的请求合成的也是错误回复）。
+            Fail(u64),
+            /// 从这个偏移起的 READ 永远不回（卡住）。服务端逐个处理请求，之后整个会话都不再回复。
+            Hang(u64),
+        }
+
+        /// 进程内的 SFTP 服务端（russh-sftp 的 server 端，经内存管道接到客户端）。文件放在内存里，只有一层目录。
+        struct MemSftp {
+            files: HashMap<String, (Vec<u8>, Option<ReadFault>)>,
+            listed: HashSet<String>,
+        }
+
+        impl russh_sftp::server::Handler for MemSftp {
+            type Error = StatusCode;
+
+            fn unimplemented(&self) -> StatusCode {
+                StatusCode::OpUnsupported
+            }
+
+            async fn open(&mut self, id: u32, filename: String, _: OpenFlags, _: FileAttributes) -> Result<Handle, StatusCode> {
+                if !self.files.contains_key(&filename) {
+                    return Err(StatusCode::NoSuchFile);
+                }
+                Ok(Handle { id, handle: filename })
+            }
+
+            async fn close(&mut self, id: u32, handle: String) -> Result<Status, StatusCode> {
+                self.listed.remove(&handle);
+                Ok(Status { id, status_code: StatusCode::Ok, error_message: "Ok".into(), language_tag: "en-US".into() })
+            }
+
+            async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, StatusCode> {
+                let (data, fault) = &self.files[&handle];
+                match *fault {
+                    Some(ReadFault::Fail(at)) if offset >= at => return Err(StatusCode::Failure),
+                    Some(ReadFault::Hang(at)) if offset >= at => std::future::pending::<()>().await,
+                    _ => {}
+                }
+                let start = (offset as usize).min(data.len());
+                if start == data.len() {
+                    return Err(StatusCode::Eof);
+                }
+                let end = (start + len as usize).min(data.len());
+                Ok(Data { id, data: data[start..end].to_vec() })
+            }
+
+            async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
+                Ok(Handle { id, handle: path })
+            }
+
+            async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, StatusCode> {
+                if !self.listed.insert(handle.clone()) {
+                    return Err(StatusCode::Eof);
+                }
+                let prefix = format!("{handle}/");
+                let files = self.files.iter().filter_map(|(path, (data, _))| {
+                    let name = path.strip_prefix(&prefix)?;
+                    let mut attrs = FileAttributes::empty();
+                    attrs.size = Some(data.len() as u64);
+                    attrs.permissions = Some(0o100644);
+                    Some(File::new(name, attrs))
+                }).collect();
+                Ok(Name { id, files })
+            }
+        }
+
+        async fn serve(files: Vec<(&str, Vec<u8>, Option<ReadFault>)>) -> SftpSession {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let files = files.into_iter().map(|(path, data, fault)| (path.to_string(), (data, fault))).collect();
+            russh_sftp::server::run(server, MemSftp { files, listed: HashSet::new() }).await;
+            SftpSession::new(client).await.unwrap()
+        }
+
+        fn local_dir() -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("sshl-atomic-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        /// 临时文件是目标同目录下的隐藏文件，每次名字都不同；没 commit 就丢弃会删掉，commit 换成最终名。
+        #[tokio::test]
+        async fn part_file_is_a_unique_hidden_sibling_removed_unless_committed() {
+            let dir = local_dir();
+            let target = dir.join("big300.bin");
+            let (a, _) = PartFile::create(&target).await.unwrap();
+            let (b, _) = PartFile::create(&target).await.unwrap();
+            assert_ne!(a.path, b.path);
+            for part in [&a.path, &b.path] {
+                assert_eq!(part.parent(), Some(dir.as_path()));
+                let name = part.file_name().unwrap().to_string_lossy();
+                assert!(name.starts_with(".big300.bin.") && name.ends_with(".sshl-part"), "{name}");
+            }
+            assert_eq!(dir_names(&dir).len(), 2);
+            drop(b);
+            assert_eq!(dir_names(&dir), [a.path.file_name().unwrap().to_string_lossy()]);
+            a.commit(&target).await.unwrap();
+            assert_eq!(dir_names(&dir), ["big300.bin"]);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 读到一半出错：最终路径上不出现残缺的同名文件（真机上卡死报错后留下了 282MB 的 big300.bin），
+        /// 原有的同名文件原样保留，同目录下也不留临时文件。
+        #[tokio::test]
+        async fn failed_download_leaves_no_partial_file_and_keeps_the_existing_one() {
+            let chunk = TRANSFER_CHUNK as u64;
+            let large_len = 2 * DOWNLOAD_SEGMENTS as u64 * chunk;
+            let sftp = serve(vec![
+                ("/small", pattern(3 * TRANSFER_CHUNK), Some(ReadFault::Fail(2 * chunk))),
+                // 最后一段读完第一块后出错：出错前一定已经写了数据
+                ("/large", pattern(large_len as usize), Some(ReadFault::Fail(large_len - chunk))),
+            ]).await;
+            let dir = local_dir();
+            std::fs::write(dir.join("existing"), b"keep me").unwrap();
+            for target in ["fresh", "existing"] {
+                let written = AtomicU64::new(0);
+                let err = download_small(&sftp, "/small", &dir.join(target), |t| written.store(t, Ordering::SeqCst)).await.unwrap_err();
+                assert!(err.to_string().contains("read /small"), "{err}");
+                assert_eq!(written.into_inner(), 2 * chunk, "前提：出错前已经写了一部分");
+                assert_eq!(dir_names(&dir), ["existing"], "小文件下载失败后：{target}");
+                assert!(std::fs::read(dir.join("existing")).unwrap() == b"keep me", "原有的同名文件被改了");
+
+                let written = AtomicU64::new(0);
+                let err = download_large(&sftp, "/large", &dir.join(target), large_len, |t| { written.store(t, Ordering::SeqCst); }).await.unwrap_err();
+                assert!(err.to_string().contains("read /large"), "{err}");
+                assert!(written.into_inner() >= chunk, "前提：出错前已经写了一部分");
+                assert_eq!(dir_names(&dir), ["existing"], "分段下载失败后：{target}");
+                assert!(std::fs::read(dir.join("existing")).unwrap() == b"keep me", "原有的同名文件被改了");
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 下载卡住时 future 被丢弃（取消）：临时文件随之删掉，原有的同名文件不变。
+        #[tokio::test]
+        async fn dropped_download_leaves_no_partial_file_and_keeps_the_existing_one() {
+            let chunk = TRANSFER_CHUNK as u64;
+            let large_len = 2 * DOWNLOAD_SEGMENTS as u64 * chunk;
+            let dir = local_dir();
+            std::fs::write(dir.join("existing"), b"keep me").unwrap();
+            for target in ["fresh", "existing"] {
+                let target_path = dir.join(target);
+                // 卡住后整个会话不再回复，每次都要新的服务端
+                let sftp = serve(vec![("/small", pattern(3 * TRANSFER_CHUNK), Some(ReadFault::Hang(chunk)))]).await;
+                let reached = Notify::new();
+                tokio::select! {
+                    r = download_small(&sftp, "/small", &target_path, |t| if t >= chunk { reached.notify_one() }) => panic!("应当卡住：{r:?}"),
+                    () = reached.notified() => {}
+                }
+                assert_eq!(dir_names(&dir), ["existing"], "小文件下载取消后：{target}");
+                assert!(std::fs::read(dir.join("existing")).unwrap() == b"keep me", "原有的同名文件被改了");
+
+                // 最后一段读完第一块后卡住：卡住前一定已经写了数据
+                let sftp = serve(vec![("/large", pattern(large_len as usize), Some(ReadFault::Hang(large_len - chunk)))]).await;
+                let reached = Notify::new();
+                tokio::select! {
+                    r = download_large(&sftp, "/large", &target_path, large_len, |t| if t >= chunk { reached.notify_one() }) => panic!("应当卡住：{r:?}"),
+                    () = reached.notified() => {}
+                }
+                assert_eq!(dir_names(&dir), ["existing"], "分段下载取消后：{target}");
+                assert!(std::fs::read(dir.join("existing")).unwrap() == b"keep me", "原有的同名文件被改了");
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 下载成功：覆盖原有的同名文件（原文件更长也不留尾巴），不留临时文件。
+        #[tokio::test]
+        async fn successful_download_replaces_the_existing_file() {
+            let small = pattern(3 * TRANSFER_CHUNK + 5);
+            let large = pattern(3 * SEGMENTED_DOWNLOAD_MIN as usize + 7);
+            let sftp = serve(vec![("/small", small.clone(), None), ("/large", large.clone(), None)]).await;
+            let dir = local_dir();
+            let longer = vec![b'x'; large.len() + 1000];
+            std::fs::write(dir.join("small"), &longer).unwrap();
+            std::fs::write(dir.join("large"), &longer).unwrap();
+            assert_eq!(download_small(&sftp, "/small", &dir.join("small"), |_| {}).await.unwrap(), small.len() as u64);
+            assert_eq!(download_large(&sftp, "/large", &dir.join("large"), large.len() as u64, |_| {}).await.unwrap(), large.len() as u64);
+            assert_eq!(dir_names(&dir), ["large", "small"]);
+            assert!(std::fs::read(dir.join("small")).unwrap() == small);
+            assert!(std::fs::read(dir.join("large")).unwrap() == large);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 目录下载中途有一个文件（小文件 / 分段下载的大文件）读出错：已下完的保留且完整，失败的那个不留残片、不留临时文件。
+        #[tokio::test]
+        async fn failed_directory_download_keeps_finished_files_only() {
+            let chunk = TRANSFER_CHUNK as u64;
+            let large_len = 2 * DOWNLOAD_SEGMENTS as u64 * chunk;
+            for (bad, fault) in [
+                (pattern(3 * TRANSFER_CHUNK), ReadFault::Fail(chunk)),
+                (pattern(large_len as usize), ReadFault::Fail(large_len - chunk)),
+            ] {
+                let good: Vec<(String, Vec<u8>)> = (0..20).map(|i| (format!("f{i:02}"), pattern(1000 + i * 7000))).collect();
+                let mut files: Vec<(String, Vec<u8>, Option<ReadFault>)> =
+                    good.iter().map(|(name, data)| (format!("/d/{name}"), data.clone(), None)).collect();
+                files.push(("/d/zz-bad".into(), bad, Some(fault)));
+                let sftp = serve(files.iter().map(|(p, d, f)| (p.as_str(), d.clone(), *f)).collect()).await;
+                let root = local_dir();
+                let dst = root.join("d");
+                let err = download_tree(&sftp, "/d", &dst.to_string_lossy(), |_| {}).await.unwrap_err();
+                assert!(err.to_string().contains("/d/zz-bad"), "{err}");
+                assert_eq!(dir_names(&root), ["d"]);
+                // 这几个小文件都和失败的那个同批开始（或在它之前下完），都应下完
+                let names = dir_names(&dst);
+                assert_eq!(names, good.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(), "失败的那个不留残片、不留临时文件");
+                for (name, data) in &good {
+                    assert!(std::fs::read(dst.join(name)).unwrap() == *data, "{name} 不完整");
+                }
+                std::fs::remove_dir_all(&root).unwrap();
+            }
+        }
+    }
+
     /// 真实 sshd 上的目录 / 大文件传输。容器同 sudo_upload_against_real_linux（以 alice 登录）：
     /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
     mod real_sftp {
         use super::super::{
-            download_large, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, scan_remote,
+            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, scan_remote,
             stream_to_remote, upload_file, upload_tree, DirCounts, DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY,
             DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
         };
+        use super::dir_names;
         use crate::sftp_stall::Sftp;
         use russh_sftp::client::SftpSession;
         use std::collections::BTreeMap;
@@ -2968,6 +3252,122 @@ mod tests {
             std::fs::remove_file(&local).unwrap();
         }
 
+        /// 远端稀疏大文件的大小（读起来快、不占容器磁盘）：中途截短前下不完。
+        const CUT_FILE_SIZE: u64 = 1 << 30;
+
+        /// 下载过程中（`started` 被通知后）在服务器上把 `remote` 截到 1MB：分段下载里位置已过 1MB 的中间段读到 EOF，报 shrank。
+        /// 返回截短任务，下载结束后 await 它，确认截短确实发生了。
+        fn cut_when(h: &H, remote: &str, started: std::sync::Arc<tokio::sync::Notify>) -> tokio::task::JoinHandle<()> {
+            let (h, cmd) = (h.clone(), format!("truncate -s 1M {remote}"));
+            tokio::spawn(async move {
+                started.notified().await;
+                exec(&h, &cmd).await;
+            })
+        }
+
+        async fn cut_done(cutter: tokio::task::JoinHandle<()>) {
+            tokio::time::timeout(Duration::from_secs(30), cutter).await.expect("下载结束了还没截短：没下到触发点就失败了？").unwrap();
+        }
+
+        /// 下载中途失败（服务器上把远端文件截短 / 读的是目录）：不留下和完整文件同名的残片（真机上卡死报错后留下了
+        /// 282MB 的 big300.bin），不留临时文件，原有的同名文件原样保留；成功时覆盖原有文件。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn interrupted_download_leaves_no_partial_file_and_keeps_existing_one() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let dir = temp_dir("atomic");
+            write(&dir.join("existing.bin"), b"keep me");
+
+            // 大文件（分段）：下了 8MB 后在服务器上截短
+            let big = format!("{base}/big.bin");
+            for target in ["existing.bin", "fresh.bin"] {
+                exec(&h, &format!("rm -f {big} && truncate -s {CUT_FILE_SIZE} {big}")).await;
+                let started = std::sync::Arc::new(tokio::sync::Notify::new());
+                let cutter = cut_when(&h, &big, started.clone());
+                let result = download_large(&sftp, &big, &dir.join(target), CUT_FILE_SIZE, |t| if t >= 8 << 20 { started.notify_one() }).await;
+                cut_done(cutter).await;
+                let err = result.expect_err("截短后还下完了：链路太快").to_string();
+                assert!(err.contains("shrank"), "{err}");
+                assert_eq!(dir_names(&dir), ["existing.bin"], "分段下载失败后：{target}");
+                assert!(std::fs::read(dir.join("existing.bin")).unwrap() == b"keep me", "原有的同名文件被改了");
+            }
+
+            // 小文件（单句柄）：读的是目录，open 成功、READ 报错
+            for target in ["existing.bin", "fresh.bin"] {
+                let err = download_small(&sftp, &base, &dir.join(target), |_| {}).await.unwrap_err();
+                assert!(err.to_string().contains(&format!("read {base}")), "{err}");
+                assert_eq!(dir_names(&dir), ["existing.bin"], "小文件下载失败后：{target}");
+                assert!(std::fs::read(dir.join("existing.bin")).unwrap() == b"keep me", "原有的同名文件被改了");
+            }
+
+            // 成功：覆盖原有文件（原文件更长也不留尾巴）
+            let small = bytes(3 * TRANSFER_CHUNK + 5, 1);
+            let large = bytes(3 * SEGMENTED_DOWNLOAD_MIN as usize + 7, 2);
+            for (name, data) in [("small.bin", &small), ("large.bin", &large)] {
+                let src = dir.join("src").join(name);
+                write(&src, data);
+                upload_file(&sftp, &src.to_string_lossy(), &format!("{base}/{name}"), |_| {}).await.unwrap();
+                write(&dir.join(name), &vec![b'x'; large.len() + 1000]);
+            }
+            std::fs::remove_dir_all(dir.join("src")).unwrap();
+            download_small(&sftp, &format!("{base}/small.bin"), &dir.join("small.bin"), |_| {}).await.unwrap();
+            download_large(&sftp, &format!("{base}/large.bin"), &dir.join("large.bin"), large.len() as u64, |_| {}).await.unwrap();
+            assert_eq!(dir_names(&dir), ["existing.bin", "large.bin", "small.bin"]);
+            assert!(std::fs::read(dir.join("small.bin")).unwrap() == small);
+            assert!(std::fs::read(dir.join("large.bin")).unwrap() == large);
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 目录下载中途有文件失败：已下完的文件保留且完整，失败的那个不留残片，不留临时文件；目录照常建好。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn failed_directory_download_keeps_finished_files_without_partial_ones() {
+            let Some((h, sftp)) = connect().await else { return };
+            let src = temp_dir("dl-partial-src");
+            for i in 0..30 {
+                write(&src.join(format!("f{i:02}.bin")), &bytes(1000 + i * 5000, i));
+            }
+            std::fs::create_dir_all(src.join("sub")).unwrap();
+            let small_total: u64 = (0..30).map(|i| 1000 + i * 5000).sum();
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/t");
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |_| {}).await.unwrap();
+
+            // 小文件失败：指向目录的符号链接，遍历时按文件列出（READDIR 给的是 lstat），打开时跟随到目录，READ 报错
+            exec(&h, &format!("ln -s /home/alice {remote}/zz-link")).await;
+            let dst = temp_dir("dl-partial");
+            let err = download_tree(&sftp, &remote, &dst.to_string_lossy(), |_| {}).await.unwrap_err();
+            assert!(err.to_string().contains("zz-link"), "{err}");
+            let (want, got) = (snapshot(&src), snapshot(&dst));
+            assert!(got.contains_key("sub"), "目录照常建好");
+            for (path, content) in &got {
+                assert!(want.get(path) == Some(content), "{path}：不是完整下完的文件（残片 / 临时文件）");
+            }
+
+            // 大文件失败：小文件都下完后才下大文件，下了 8MB 后在服务器上截短
+            exec(&h, &format!("rm {remote}/zz-link && truncate -s {CUT_FILE_SIZE} {remote}/zz-big.bin")).await;
+            let dst_big = temp_dir("dl-partial-big");
+            let started = std::sync::Arc::new(tokio::sync::Notify::new());
+            let cutter = cut_when(&h, &format!("{remote}/zz-big.bin"), started.clone());
+            let result = download_tree(&sftp, &remote, &dst_big.to_string_lossy(), |c| {
+                if c.transferred >= small_total + (8 << 20) {
+                    started.notify_one();
+                }
+            }).await;
+            cut_done(cutter).await;
+            let err = result.expect_err("截短后还下完了：链路太快").to_string();
+            assert!(err.contains("shrank"), "{err}");
+            assert!(snapshot(&dst_big) == snapshot(&src), "小文件都完整保留，大文件不留残片、不留临时文件");
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
+            std::fs::remove_dir_all(&dst).unwrap();
+            std::fs::remove_dir_all(&dst_big).unwrap();
+        }
+
         /// OpenSSH 的 limits 扩展声明句柄上限 1019，russh-sftp 按它在客户端计数、只有等到 CLOSE 回复才减一：
         /// 下载完只 drop 不关的只读句柄会一直占着计数，同一会话下载约一千个文件后 open / 列目录全部失败。
         #[tokio::test(flavor = "multi_thread")]
@@ -3074,7 +3474,7 @@ mod tests {
             }
             assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
             exec(&h, &format!("rm -rf -- '{base}'")).await;
-            std::fs::remove_file(&local).unwrap();
+            assert!(!local.exists(), "下载失败不留下文件");
         }
 
         /// 遍历远端目录时有子目录列不了（没有读权限）：其余在列的目录也要关好句柄再报错。
