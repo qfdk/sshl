@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getDeclinedUser, getFileIdentity, nextDeclinedUser, recordSyncResult, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
+import { getDeclinedUser, getFileIdentity, getRejectedSaved, nextDeclinedUser, recordSyncResult, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
 import sessionManager from '../ui/src/lib/session-manager.ts';
 
 const wrong = { success: false, error: 'SUDO_PASSWORD_INCORRECT: su: Authentication failure' };
@@ -26,7 +26,7 @@ test('终端和文件管理是同一个用户：什么都不做', async () => {
 
 test('终端 su 成 root 且保存了 root 的密码：直接用它切过去，不弹框', async () => {
   const { run, calls } = harness({ who: { ...alice, user: 'root', via: 'su', credential: 'acct:root' } });
-  assert.deepEqual(await run(), { status: 'switched', fileUser: 'root', terminalUser: 'root' });
+  assert.deepEqual(await run(), { status: 'switched', fileUser: 'root', terminalUser: 'root', saved: { user: 'root', ok: true } });
   assert.deepEqual(calls.switch, [[{ user: 'root', via: 'su' }, { credential: 'acct:root' }]]);
   assert.deepEqual(calls.ask, []);
 });
@@ -200,4 +200,57 @@ test('会话还在：同步结果写回身份和拒绝记录', () => {
   assert.deepEqual(getFileIdentity('alive'), { loginUser: 'alice', fileUser: 'root', terminalUser: 'root' });
   assert.equal(getDeclinedUser('alive'), null);
   sessionManager.removeSession('alive');
+});
+
+test('已保存的密码自动试过被拒：同一会话里自动同步不再拿它去试，直接按需询问；点徽标照旧先试', async () => {
+  const id = 'saved-bad';
+  sessionManager.addSession(id, 'c1');
+  const who = { ...alice, user: 'root', via: 'su', credential: 'acct:root' };
+  // 按 FileManager 的接法：读记录 → 同步 → recordSyncResult 写回
+  const sync = async ({ interactive = false, switchResults = [], passwords = [] } = {}) => {
+    const { run, calls } = harness({ who, switchResults, passwords });
+    const declinedUser = getDeclinedUser(id);
+    const result = await run({ interactive, declinedUser, rejectedSaved: getRejectedSaved(id) });
+    recordSyncResult(id, result, { loginUser: 'alice', terminalUser: 'root', declinedUser });
+    return { result, tried: calls.switch.map(([, secret]) => secret), asked: calls.ask.map(a => a.exclude) };
+  };
+
+  const first = await sync({ switchResults: [wrong] });
+  assert.deepEqual(first.tried, [{ credential: 'acct:root' }], '第一次：自动用 root 自己的已保存密码');
+  assert.deepEqual(first.asked, [['acct:root']], '服务器说不对：弹框，不列这个错密码；用户取消');
+  assert.equal(getRejectedSaved(id).has('root'), true);
+
+  const second = await sync();
+  assert.deepEqual(second.tried, [], '再次自动同步：不再拿错密码去试（每次失败的 su 都进认证日志、可能锁号）');
+  assert.deepEqual(second.asked, [], '用户拒绝过 root：也不打扰');
+
+  // 拒绝记录清掉后（如终端换过人又切回 root）：直接按需询问，不先试那个错密码，也不拿别人的密码试
+  setDeclinedUser(id, null);
+  const third = await sync({ switchResults: [{ success: false, error: 'SUDO_PASSWORD_REQUIRED: x' }, { success: true }], passwords: [{ password: 'rootpw' }] });
+  assert.deepEqual(third.tried, [null, { password: 'rootpw' }], '不带密码那次后端直接回 REQUIRED、不真跑 su');
+  assert.deepEqual(third.asked, [['acct:root']]);
+  assert.equal(third.result.status, 'switched');
+  assert.equal(getRejectedSaved(id).has('root'), true, '手输的对了，不代表已保存的那个对');
+
+  const fourth = await sync({ interactive: true, switchResults: [{ success: true }] });
+  assert.deepEqual(fourth.tried, [{ credential: 'acct:root' }], '点徽标：照旧先试已保存密码');
+  assert.equal(getRejectedSaved(id).has('root'), false, '这次对了（设置里改好了）：撤销记录');
+  sessionManager.removeSession(id);
+});
+
+test('已保存密码被拒的记录按会话 + 用户记：别的用户、别的会话照常自动试；会话移除时清掉', async () => {
+  sessionManager.addSession('saved-a', 'c1');
+  sessionManager.addSession('saved-b', 'c2');
+  recordSyncResult('saved-a', { status: 'cancelled', fileUser: 'alice', terminalUser: 'root', saved: { user: 'root', ok: false } }, { loginUser: 'alice', terminalUser: 'root', declinedUser: null });
+  assert.deepEqual([...getRejectedSaved('saved-a')], ['root']);
+  assert.equal(getRejectedSaved('saved-b').size, 0);
+
+  // sudo 要的是登录用户 alice 的密码：root 的记录不影响它
+  const { run, calls } = harness({ who: { ...alice, user: 'root', via: 'sudo', credential: 'password' } });
+  assert.equal((await run({ interactive: false, rejectedSaved: getRejectedSaved('saved-a') })).status, 'switched');
+  assert.deepEqual(calls.switch.map(([, secret]) => secret), [{ credential: 'password' }]);
+
+  sessionManager.removeSession('saved-a');
+  assert.equal(getRejectedSaved('saved-a').size, 0);
+  sessionManager.removeSession('saved-b');
 });

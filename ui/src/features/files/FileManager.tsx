@@ -12,7 +12,7 @@ import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
 import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
 import sessionManager from '../../lib/session-manager';
-import { getDeclinedUser, getFileIdentity, recordSyncResult, subscribeFileIdentity, syncFileUser } from './file-user';
+import { getDeclinedUser, getFileIdentity, getRejectedSaved, recordSyncResult, subscribeFileIdentity, syncFileUser } from './file-user';
 import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
@@ -190,6 +190,7 @@ export const FileManager = memo(function FileManager() {
       const result = await syncFileUser({
         interactive,
         declinedUser,
+        rejectedSaved: getRejectedSaved(sessionId),
         identify: async () => {
           const who = await api.file.terminalUser(sessionId);
           if (!who?.success) return null;
