@@ -333,6 +333,46 @@ fn split_remote(path: &str) -> Option<(String, String)> {
 }
 
 /// 只验 sudo 能不能用（密码对不对、有没有权限），不做任何事。放在上传之前：密码错不会白传一遍大文件。
+/// sudo 只认登录用户自己的密码。连接保存的登录密码就是它；没有时找以登录用户名保存的账号密码
+/// （`acct:<用户名>`）。只认这一份，不拿其他已保存的密码去试（每次试错都会记进服务器的认证日志、可能触发锁定）。
+fn own_sudo_credential(connection_id: Option<&str>, username: &str, has: impl Fn(&str, &str) -> bool) -> Option<String> {
+    let cid = connection_id?;
+    ["password".to_string(), format!("acct:{username}")].into_iter().find(|kind| has(cid, kind))
+}
+
+/// 本次 sudo 用哪份密码：点选的已保存密码（`credential` = "password" / "acct:<账号>"，只传标识，
+/// 后端解密，不经过渲染层）> 手动输入 > 无（`sudo -n`）。用谁的密码由前端按 `file_sudo_identity` 决定。
+fn pick_sudo_password(
+    connection_id: Option<&str>,
+    credential: Option<&str>,
+    typed: Option<String>,
+    load: impl Fn(&str, &str) -> Option<String>,
+) -> AppResult<Option<String>> {
+    if let Some(kind) = credential {
+        let cid = connection_id.ok_or_else(|| AppError::Other("当前连接未保存，没有已保存的密码".into()))?;
+        return load(cid, kind).map(Some).ok_or_else(|| AppError::Other("未找到对应的已保存密码".into()));
+    }
+    Ok(typed.filter(|p| !p.is_empty()))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SudoIdentity {
+    /// 登录用户名：sudo 要的就是这个用户的密码。
+    pub user: String,
+    /// 该用户自己的已保存密码标识，没有为 None。
+    pub credential: Option<String>,
+}
+
+/// sudo 上传前先确认当前登录用户是谁、有没有保存他自己的密码。
+#[tauri::command]
+pub async fn file_sudo_identity(state: State<'_, AppState>, session_id: String) -> AppResult<SudoIdentity> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let credential = own_sudo_credential(session.connection_id.as_deref(), &session.username, crate::crypto_store::has);
+    Ok(SudoIdentity { user: session.username.clone(), credential })
+}
+
 fn sudo_check_command(with_password: bool) -> String {
     let auth = if with_password { "-S -p ''" } else { "-n" };
     format!("LC_ALL=C sudo {auth} true")
@@ -350,15 +390,14 @@ pub async fn file_upload_sudo(
     remote_path: String,
     is_directory: bool,
     sudo_password: Option<String>,
+    credential: Option<String>,
 ) -> AppResult<()> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
     let (dest_dir, name) = split_remote(&remote_path)
         .ok_or_else(|| AppError::Other(format!("无效的上传路径: {remote_path}")))?;
-    let password = sudo_password
-        .filter(|p| !p.is_empty())
-        .or_else(|| session.connection_id.as_deref().and_then(|cid| load_secret(cid, "password")));
+    let password = pick_sudo_password(session.connection_id.as_deref(), credential.as_deref(), sudo_password, load_secret)?;
     let input = password.as_ref().map(|p| format!("{p}\n"));
     let stdin = input.as_deref().map(str::as_bytes);
 
@@ -1046,7 +1085,7 @@ mod tests {
     use super::{
         download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        split_remote, sudo_check_command, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
+        own_sudo_credential, pick_sudo_password, split_remote, sudo_check_command, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
         DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
     };
 
@@ -1196,6 +1235,34 @@ mod tests {
         assert_eq!(split_remote("/x"), Some(("/".into(), "x".into())));
         assert_eq!(split_remote("/"), None);
         assert_eq!(split_remote("relative"), None);
+    }
+
+    #[test]
+    fn sudo_uses_only_the_login_users_own_saved_password() {
+        let saved = |entries: &'static [&'static str]| move |_cid: &str, kind: &str| entries.contains(&kind);
+        // 连接密码就是登录用户的密码；没有时找以登录用户名保存的账号密码；别人的密码（root）一律不拿来试
+        assert_eq!(own_sudo_credential(Some("c1"), "alice", saved(&["password", "acct:alice", "acct:root"])).as_deref(), Some("password"));
+        assert_eq!(own_sudo_credential(Some("c1"), "alice", saved(&["acct:alice", "acct:root"])).as_deref(), Some("acct:alice"));
+        assert_eq!(own_sudo_credential(Some("c1"), "alice", saved(&["acct:root", "acct:bob"])), None);
+        assert_eq!(own_sudo_credential(None, "alice", saved(&["password"])), None);
+    }
+
+    #[test]
+    fn picks_sudo_password_by_precedence() {
+        let saved = |cid: &str, kind: &str| match (cid, kind) {
+            ("c1", "password") => Some("login-pw".to_string()),
+            ("c1", "acct:root") => Some("root-pw".to_string()),
+            _ => None,
+        };
+        // 点选的已保存密码优先于输入框（选了就以它为准）
+        assert_eq!(pick_sudo_password(Some("c1"), Some("acct:root"), Some("typed".into()), saved).unwrap().as_deref(), Some("root-pw"));
+        assert_eq!(pick_sudo_password(Some("c1"), None, Some("typed".into()), saved).unwrap().as_deref(), Some("typed"));
+        // 什么都没给（或空串）→ None（走 sudo -n），不自己去翻已保存的密码
+        assert_eq!(pick_sudo_password(Some("c1"), None, Some(String::new()), saved).unwrap(), None);
+        assert_eq!(pick_sudo_password(Some("c1"), None, None, saved).unwrap(), None);
+        // 点选的密码已被删 / 连接没保存：报错而不是悄悄换成别的密码
+        assert!(pick_sudo_password(Some("c1"), Some("acct:gone"), None, saved).is_err());
+        assert!(pick_sudo_password(None, Some("acct:root"), None, saved).is_err());
     }
 
     #[test]

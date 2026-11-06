@@ -1,4 +1,5 @@
 import { useRef, useState, useSyncExternalStore } from 'react';
+import { KeyRound } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog';
@@ -11,7 +12,7 @@ export function DialogHost() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState('');
   const isPrompt = request?.kind === 'prompt';
-  const settle = (ok: boolean) => { const v = value; setValue(''); settleDialog(ok, isPrompt ? v : undefined); };
+  const settle = (ok: boolean, choice?: string) => { const v = value; setValue(''); settleDialog(ok, isPrompt ? v : undefined, choice); };
 
   return (
     <Dialog open={Boolean(request)} onOpenChange={open => { if (!open) settle(false); }}>
@@ -34,6 +35,19 @@ export function DialogHost() {
             {request.detail && <p className="select-text truncate text-sm text-foreground/80" title={request.detail}>{request.detail}</p>}
             {request.message && <DialogDescription className="select-text whitespace-pre-line break-words">{request.message}</DialogDescription>}
           </DialogHeader>
+          {/* 已保存的密码：点一下就以它确定（只回传标识，密码不经过界面） */}
+          {isPrompt && request.choices?.length ? (
+            <div className="grid gap-1.5">
+              <div className="text-xs text-muted-foreground">已保存的密码</div>
+              <div className="flex flex-wrap gap-1.5">
+                {request.choices.map(choice => (
+                  <Button key={choice.value} type="button" variant="outline" className="h-8 gap-1.5 px-2.5 text-xs" onClick={() => settle(true, choice.value)}>
+                    <KeyRound className="h-3.5 w-3.5" />{choice.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {isPrompt && (
             <Input
               ref={inputRef}

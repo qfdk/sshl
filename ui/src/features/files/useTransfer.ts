@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
 import { describeProgress, type TransferProgress } from './transfer-progress';
-import { sudoErrorMessage, uploadWithSudoFallback } from './sudo-upload';
+import { savedPasswordChoices, sudoErrorMessage, uploadWithSudoFallback } from './sudo-upload';
+import sessionManager from '../../lib/session-manager';
 
 function parentDir(remotePath: string) {
   const i = remotePath.replace(/\/+$/, '').lastIndexOf('/');
@@ -10,21 +11,36 @@ function parentDir(remotePath: string) {
 
 // 普通上传；目标目录无写权限时问一次是否用 sudo（见 sudo-upload.ts）。
 function uploadWithSudo(sessionId: string, localPath: string, remotePath: string, isDirectory: boolean) {
-  const file = (window as AppWindow).api.file;
+  const api = (window as AppWindow).api;
+  const file = api.file;
+  const connectionId = sessionManager.getSession(sessionId)?.connectionId;
+  let user = '';
   return uploadWithSudoFallback({
     normal: () => isDirectory ? file.uploadDirectory(sessionId, localPath, remotePath) : file.upload(sessionId, localPath, remotePath),
-    sudo: password => file.uploadSudo(sessionId, localPath, remotePath, isDirectory, password),
+    sudo: secret => file.uploadSudo(sessionId, localPath, remotePath, isDirectory, secret),
     confirm: () => confirmDialog({
       title: '没有写入权限',
       message: '当前登录用户不能写入这个目录。要用 sudo 上传吗？文件会归目录的所有者。',
       detail: parentDir(remotePath),
       confirmLabel: '用 sudo 上传',
     }),
-    askPassword: retry => passwordDialog({
-      title: retry ? 'sudo 密码不正确' : '需要 sudo 密码',
-      message: '输入当前登录用户的 sudo 密码。',
-      confirmLabel: '上传',
-    }),
+    ownPassword: async () => {
+      const identity = await file.sudoIdentity(sessionId);
+      user = identity?.user || '';
+      return identity?.credential ?? null;
+    },
+    askPassword: async (retry, exclude) => {
+      const saved = connectionId ? await api.cred.list(connectionId).catch(() => null) : null;
+      const choices = savedPasswordChoices(saved, user, exclude);
+      const answer = await passwordDialog({
+        title: retry ? 'sudo 密码不正确' : '需要 sudo 密码',
+        message: `sudo 要的是当前登录用户${user ? ` ${user} ` : ''}的密码。`,
+        placeholder: choices.length ? '或输入密码' : '输入密码',
+        confirmLabel: '上传',
+        choices,
+      });
+      return answer === null ? null : 'choice' in answer ? { credential: answer.choice } : answer;
+    },
   }).then(result => result?.error?.startsWith('SUDO_') ? { ...result, error: sudoErrorMessage(result.error) } : result);
 }
 

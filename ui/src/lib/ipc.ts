@@ -62,9 +62,12 @@ export const api = {
     getHomeDir: () => invoke<string>('file_get_home_dir'),
     listSystemFonts: () => invoke<string[]>('list_system_fonts'),
     upload: (sessionId: string, localPath: string, remotePath: string) => call('file_upload', { sessionId, localPath, remotePath }),
-    // 目标目录无写权限时的兜底：暂存后 sudo 以目录属主身份解包。sudoPassword 为 null 时后端用保存的登录密码或免密 sudo。
-    uploadSudo: (sessionId: string, localPath: string, remotePath: string, isDirectory: boolean, sudoPassword: string | null) =>
-      call('file_upload_sudo', { sessionId, localPath, remotePath, isDirectory, sudoPassword }),
+    // 目标目录无写权限时的兜底：暂存后 sudo 以目录属主身份解包。
+    // secret：手动输入的 password，或已保存密码的标识 credential（后端解密）；null = 免密 sudo。
+    uploadSudo: (sessionId: string, localPath: string, remotePath: string, isDirectory: boolean, secret: { password?: string; credential?: string } | null) =>
+      call('file_upload_sudo', { sessionId, localPath, remotePath, isDirectory, sudoPassword: secret?.password ?? null, credential: secret?.credential ?? null }),
+    // 当前登录用户名 + 他自己的已保存密码标识（无则 credential 为 null）
+    sudoIdentity: (sessionId: string) => call('file_sudo_identity', { sessionId }),
     download: (sessionId: string, remotePath: string, localPath: string) => call('file_download', { sessionId, remotePath, localPath }),
     deleteLocal: (filePath: string) => call('file_delete_local', { filePath }),
     deleteLocalDirectory: (dirPath: string) => call('file_delete_local_directory', { dirPath }),
