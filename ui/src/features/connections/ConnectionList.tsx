@@ -10,6 +10,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { getCurrentSessionId, setConnectionDialogOpen, setEditingConnection, subscribe } from '../../lib/app-state';
 import { UNGROUPED_LABEL, getConnectionInitials, getUngroupedConnections, groupConnections, matchesConnection } from '../../lib/connection-groups';
+import { pointerMoveStep } from '../../lib/pointer-release';
 import sessionManager from '../../lib/session-manager';
 import { shallowEqual } from '../../lib/shallow-equal';
 import { cn } from '../../lib/utils';
@@ -26,7 +27,7 @@ type DropTarget =
   | { kind: 'ungrouped' };
 
 // 指针追踪高频且不影响渲染，留在 ref 里。
-type PointerState = { connectionId: string; pointerId: number; startX: number; startY: number; active: boolean };
+type PointerState = { connectionId: string; pointerId: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean };
 
 type ConnectionListProps = { manager: ConnectionManager; query: string; collapsed?: boolean };
 
@@ -179,22 +180,37 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
     if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
     const item = (event.target as HTMLElement).closest<HTMLElement>('[data-connection-item]');
     if (!item?.dataset.id) return;
-    pointerRef.current = { connectionId: item.dataset.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+    pointerRef.current = { connectionId: item.dataset.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, active: false };
   };
 
   const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const pointer = pointerRef.current;
     if (!pointer || pointer.pointerId !== event.pointerId) return;
     // 6px 阈值：低于它算点击，不能一碰就进入拖拽
-    const distance = Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY);
-    if (!pointer.active && distance < 6) return;
+    const step = pointerMoveStep(pointer, event, Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY), 6);
+    if (step === 'ignore') return;
+    if (step !== 'drag') {
+      // 左键已松开却没收到 pointerup（WKWebView 常丢）：见 pointerMoveStep
+      if (pointer.active) listRef.current?.releasePointerCapture?.(event.pointerId);
+      if (step === 'drop') finishDrag(event.nativeEvent);
+      else clearDrag();
+      return;
+    }
     if (!pointer.active) {
       pointer.active = true;
       setDraggingId(pointer.connectionId);
       listRef.current?.setPointerCapture?.(event.pointerId);
     }
+    pointer.lastX = event.clientX;
+    pointer.lastY = event.clientY;
     event.preventDefault();
     applyDrop(computeDrop(event.clientX, event.clientY, pointer.connectionId));
+  };
+
+  const clearDrag = () => {
+    pointerRef.current = null;
+    setDraggingId(null);
+    applyDrop(null);
   };
 
   // 收尾挂在 window 上：指针可能在列表外松开，否则拖拽状态会卡住。
@@ -202,9 +218,7 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
     const pointer = pointerRef.current;
     if (!pointer || pointer.pointerId !== event.pointerId) return;
     const target = dropRef.current;
-    pointerRef.current = null;
-    setDraggingId(null);
-    applyDrop(null);
+    clearDrag();
     if (!pointer.active || event.type === 'pointercancel' || !target) return;
     const group = target.kind === 'ungrouped' ? '' : target.group;
     const beforeId = target.kind === 'item' ? target.beforeId : null;

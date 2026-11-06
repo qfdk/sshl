@@ -3,6 +3,8 @@
 // 全部截走、不交给 WebKit，页面内的 drop 事件根本不触发。两侧互拖用指针事件（同会话标签、连接树）。
 import type { FileEntry } from './useFileList';
 
+export { releasedMove } from '../../lib/pointer-release';
+
 export type PaneName = 'local' | 'remote';
 export type DropTarget = { pane: PaneName; directory: string | null };
 export type DropAction = { kind: 'upload' | 'download'; directory: string };
@@ -66,13 +68,4 @@ export function dragLabel(items: FileEntry[]) {
 /** Tauri 拖放事件的坐标：macOS 上 wry 给的是窗口内的点（即 CSS 像素），其他平台是物理像素。 */
 export function dropPointToCss(position: { x: number; y: number }, isMac: boolean, devicePixelRatio: number) {
   return isMac ? { x: position.x, y: position.y } : { x: position.x / devicePixelRatio, y: position.y / devicePixelRatio };
-}
-
-/**
- * 拖拽中收到「左键已松开」的指针移动、却没收到 pointerup 时怎么办。WKWebView 拖拽后常丢 pointerup / mouseup，
- * 紧接着补一个松开状态的 pointermove：就在最后的拖拽位置附近 → 当作在这里松手（drop）；
- * 离得远（在窗口外松手、指针后来才回来）→ 取消，免得误传，也免得提示卡在屏幕上。
- */
-export function releasedMove(drag: { active: boolean; lastX: number; lastY: number }, x: number, y: number, tolerance: number) {
-  return drag.active && Math.hypot(x - drag.lastX, y - drag.lastY) <= tolerance ? 'drop' : 'cancel';
 }

@@ -1,6 +1,7 @@
 import { Plus, X } from 'lucide-react';
 import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import { getCurrentSessionId, setConnectionDialogOpen, setEditingConnection, subscribe } from '../lib/app-state';
+import { pointerMoveStep } from '../lib/pointer-release';
 import sessionManager from '../lib/session-manager';
 import { applyTabOrder, moveTabId, toSessionTabs } from '../lib/session-tabs';
 import { shallowEqual } from '../lib/shallow-equal';
@@ -11,7 +12,7 @@ const subscribeCurrentSessionId = (callback: () => void) => subscribe('currentSe
 
 type DropMark = { id: string; side: 'before' | 'after' };
 // 指针追踪高频且不影响渲染，留在 ref 里（与侧边栏拖拽同一套做法：指针事件而非 HTML5 拖放）。
-type PointerState = { id: string; pointerId: number; startX: number; startY: number; active: boolean };
+type PointerState = { id: string; pointerId: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean };
 
 export function SessionTabs({ manager }: { manager: ConnectionManager }) {
   const currentSessionId = useSyncExternalStore(subscribeCurrentSessionId, getCurrentSessionId, () => null);
@@ -34,19 +35,29 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
 
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>, id: string) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest('[data-session-tab-close]')) return;
-    pointerRef.current = { id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+    pointerRef.current = { id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, active: false };
   };
 
   const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const pointer = pointerRef.current;
     if (!pointer || pointer.pointerId !== event.pointerId) return;
     // 5px 阈值：低于它算点击（切换会话），不能一碰就进入拖拽
-    if (!pointer.active && Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY) < 5) return;
+    const step = pointerMoveStep(pointer, event, Math.hypot(event.clientX - pointer.startX, event.clientY - pointer.startY), 5);
+    if (step === 'ignore') return;
+    if (step !== 'drag') {
+      // 左键已松开却没收到 pointerup（WKWebView 常丢）：见 pointerMoveStep
+      if (pointer.active) listRef.current?.releasePointerCapture?.(event.pointerId);
+      if (step === 'drop') finishDrag(event.nativeEvent);
+      else clearDrag();
+      return;
+    }
     if (!pointer.active) {
       pointer.active = true;
       setDraggingId(pointer.id);
       listRef.current?.setPointerCapture?.(event.pointerId);
     }
+    pointer.lastX = event.clientX;
+    pointer.lastY = event.clientY;
     const target = (document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null)?.closest<HTMLElement>('[data-session-tab]');
     const targetId = target?.dataset.sessionTab;
     if (!target || !targetId || targetId === pointer.id) {
@@ -57,13 +68,17 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
     applyMark({ id: targetId, side: event.clientX < rect.left + rect.width / 2 ? 'before' : 'after' });
   };
 
+  const clearDrag = () => {
+    pointerRef.current = null;
+    setDraggingId(null);
+    applyMark(null);
+  };
+
   const finishDrag = (event: PointerEvent) => {
     const pointer = pointerRef.current;
     if (!pointer || pointer.pointerId !== event.pointerId) return;
-    pointerRef.current = null;
     const target = markRef.current;
-    setDraggingId(null);
-    applyMark(null);
+    clearDrag();
     if (!pointer.active) return;
     // 拖完松手紧接着的 click 不算切换会话
     suppressClickRef.current = true;
