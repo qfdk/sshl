@@ -16,6 +16,34 @@ export function dropTargetFrom(element: Located): DropTarget | null {
   return { pane, directory: element?.closest('[data-file-dir]')?.getAttribute('data-file-dir') || null };
 }
 
+/** 同一个落点：同一侧、同一个文件夹行（或都不在文件夹行上）。指针每次移动都得到新对象，内容一样不算换了落点。 */
+export function sameDropTarget(a: DropTarget | null, b: DropTarget | null) {
+  return a === b || (a !== null && b !== null && a.pane === b.pane && a.directory === b.directory);
+}
+
+/** 拖拽中跟着指针的提示：拖了什么、指针在哪、松手会传到哪个目录（不能放为 null）。 */
+export type DragPreview = { pane: PaneName; items: FileEntry[]; x: number; y: number; destination: string | null };
+
+// 拖拽浮层的小 store：指针位置每次移动都变，放进 FileManager 的 state 会让整个文件管理（两侧列表）
+// 按指针频率重渲染；放这里只有订阅它的浮层重渲染。
+export function createDragPreviewStore() {
+  let preview: DragPreview | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => preview,
+    set: (next: DragPreview | null) => {
+      preview = next;
+      listeners.forEach(listener => listener());
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}
+
+export type DragPreviewStore = ReturnType<typeof createDragPreviewStore>;
+
 /** 拖到哪、做什么：本地 → 远程 = 上传，远程 → 本地 = 下载，Finder 只能拖进远程。目标目录缺省为那一侧的当前目录。 */
 export function planDrop(source: PaneName | 'finder', target: DropTarget | null, current: Record<PaneName, string>): DropAction | null {
   if (!target) return null;

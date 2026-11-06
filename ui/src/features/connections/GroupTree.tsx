@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import { Input } from '../../components/ui/input';
 import { Button } from '../../components/ui/button';
 import { UNGROUPED_LABEL, normalizeGroupName } from '../../lib/connection-groups';
+import { shallowEqual } from '../../lib/shallow-equal';
 import { cn } from '../../lib/utils';
 
 export type TreeConnection = { id: string; name?: string; host?: string; username?: string; group?: string };
@@ -39,7 +40,9 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
   // 默认全部折叠：这样整棵树就是一列分组，拖起来最好排。展开某个分组后才排它的机器。
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
+  // 落点没变不 setState：指针每动一下都重渲染整棵树没有必要
   const setDropTarget = (next: DropTarget | null) => {
+    if (shallowEqual(dropRef.current, next)) return;
     dropRef.current = next;
     setDrop(next);
   };

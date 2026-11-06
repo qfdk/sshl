@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as
 import { getCurrentSessionId, setConnectionDialogOpen, setEditingConnection, subscribe } from '../lib/app-state';
 import sessionManager from '../lib/session-manager';
 import { applyTabOrder, moveTabId, toSessionTabs } from '../lib/session-tabs';
+import { shallowEqual } from '../lib/shallow-equal';
 import { cn } from '../lib/utils';
 import type { ConnectionManager } from '../features/connections/useConnections';
 
@@ -24,7 +25,9 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
   // sessionManager 不是响应式的；会话增删都会 bump manager.revision，App 随之重渲染，这里跟着读到最新。
   const tabs = applyTabOrder(toSessionTabs(sessionManager.getAllSessions(), manager.connections, currentSessionId), order);
 
+  // 落点没变（同一个标签的同一侧）不 setState：指针每动一下都重渲染整排标签没有必要
   const applyMark = (next: DropMark | null) => {
+    if (shallowEqual(markRef.current, next)) return;
     markRef.current = next;
     setMark(next);
   };
