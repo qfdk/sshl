@@ -89,13 +89,20 @@ export function SessionTabs({ manager }: { manager: ConnectionManager }) {
   // 监听只挂一次，经 ref 调到最新一次渲染的 finishDrag（要用当时的 tabs），不必每次渲染都拆了重挂
   const finishDragRef = useRef(finishDrag);
   finishDragRef.current = finishDrag;
+  const clearDragRef = useRef(clearDrag);
+  clearDragRef.current = clearDrag;
 
   // 收尾挂在 window 上：指针可能在标签栏外松开，否则拖拽状态会卡住。
   useEffect(() => {
     const finish = (event: PointerEvent) => finishDragRef.current(event);
+    // 新的按下说明上一次按下已经结束：它的 pointerup 丢了（WKWebView）就清掉残留状态，免得这次在别处按住拖进来时接着旧状态拖。
+    // window 捕获阶段先于列表自己的 onPointerDown，清完再由 startDrag 记新的按下。
+    const press = () => { if (pointerRef.current) clearDragRef.current(); };
+    window.addEventListener('pointerdown', press, true);
     window.addEventListener('pointerup', finish, true);
     window.addEventListener('pointercancel', finish, true);
     return () => {
+      window.removeEventListener('pointerdown', press, true);
       window.removeEventListener('pointerup', finish, true);
       window.removeEventListener('pointercancel', finish, true);
     };

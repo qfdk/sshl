@@ -162,9 +162,14 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
   };
 
   useEffect(() => {
+    // 新的按下说明上一次按下已经结束：它的 pointerup 丢了（WKWebView）就清掉残留状态，免得这次在别处按住拖进来时接着旧状态拖。
+    // window 捕获阶段先于列表自己的 onPointerDown，清完再由 startDrag 记新的按下。
+    const press = () => { if (dragRef.current) clearDrag(); };
+    window.addEventListener('pointerdown', press, true);
     window.addEventListener('pointerup', finish, true);
     window.addEventListener('pointercancel', finish, true);
     return () => {
+      window.removeEventListener('pointerdown', press, true);
       window.removeEventListener('pointerup', finish, true);
       window.removeEventListener('pointercancel', finish, true);
     };
