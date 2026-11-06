@@ -60,5 +60,20 @@ export function subscribeFileIdentity(listener: () => void) {
   return () => { listeners.delete(listener); };
 }
 
-// 会话没了（断开 / 远端关闭）就丢掉它的身份记录，否则按 sessionId 只增不删
-sessionManager.onSessionRemoved(sessionId => setFileIdentity(sessionId, null));
+// 自动同步时用户取消过输密码的（会话 → 当时的终端用户）：不再每次切到文件管理都弹框，点徽标才再问。
+const declined = new Map<string, string>();
+
+export function getDeclinedUser(sessionId: string) {
+  return declined.get(sessionId) ?? null;
+}
+
+export function setDeclinedUser(sessionId: string, user: string | null) {
+  if (user) declined.set(sessionId, user);
+  else declined.delete(sessionId);
+}
+
+// 会话没了（断开 / 远端关闭）就丢掉它的身份和取消记录，否则按 sessionId 只增不删
+sessionManager.onSessionRemoved(sessionId => {
+  setFileIdentity(sessionId, null);
+  declined.delete(sessionId);
+});

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getFileIdentity, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
+import { getDeclinedUser, getFileIdentity, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
 import sessionManager from '../ui/src/lib/session-manager.ts';
 
 const wrong = { success: false, error: 'SUDO_PASSWORD_INCORRECT: su: Authentication failure' };
@@ -118,4 +118,18 @@ test('会话被移除（断开 / 远端关闭 / 失效丢弃）时，它的文�
   assert.ok(notified > 0, '徽标订阅者收到变化');
   sessionManager.removeSession('staying');
   assert.equal(getFileIdentity('staying'), null);
+});
+
+test('自动同步时取消过输密码的记录：按会话记，会话被移除时一并清掉，其他会话不受影响', () => {
+  sessionManager.addSession('declined-closing', 'c1');
+  sessionManager.addSession('declined-staying', 'c2');
+  setDeclinedUser('declined-closing', 'root');
+  setDeclinedUser('declined-staying', 'admin');
+  assert.equal(getDeclinedUser('declined-closing'), 'root');
+  sessionManager.removeSession('declined-closing');
+  assert.equal(getDeclinedUser('declined-closing'), null);
+  assert.equal(getDeclinedUser('declined-staying'), 'admin');
+  setDeclinedUser('declined-staying', null);
+  assert.equal(getDeclinedUser('declined-staying'), null, '切换成功 / 终端换了用户时主动清掉');
+  sessionManager.removeSession('declined-staying');
 });

@@ -12,7 +12,7 @@ import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
 import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
 import sessionManager from '../../lib/session-manager';
-import { getFileIdentity, setFileIdentity, subscribeFileIdentity, syncFileUser } from './file-user';
+import { getDeclinedUser, getFileIdentity, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from './file-user';
 import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
@@ -148,8 +148,6 @@ export const FileManager = memo(function FileManager() {
   // 文件管理跟随终端用户（file-user.ts）：切到文件管理 / 刷新时看终端此刻是谁，变了就切换身份并回到他的主目录。
   const identity = useSyncExternalStore(subscribeFileIdentity, () => getFileIdentity(sessionId), () => null);
   const syncingRef = useRef(false);
-  // 自动同步时用户取消过输密码的（会话 → 终端用户），不再每次切标签页都弹；点徽标才再问
-  const declinedRef = useRef(new Map<string, string>());
   const syncIdentity = useCallback(async (interactive: boolean) => {
     if (!sessionId || syncingRef.current) return;
     syncingRef.current = true;
@@ -159,13 +157,13 @@ export const FileManager = memo(function FileManager() {
       let loginUser = '';
       let terminalUser = '';
       const result = await syncFileUser({
-        prompt: interactive || !declinedRef.current.has(sessionId),
+        prompt: interactive || getDeclinedUser(sessionId) === null,
         identify: async () => {
           const who = await api.file.terminalUser(sessionId);
           if (!who?.success) return null;
           loginUser = who.loginUser;
           terminalUser = who.user;
-          if (declinedRef.current.get(sessionId) !== who.user) declinedRef.current.delete(sessionId);
+          if (getDeclinedUser(sessionId) !== who.user) setDeclinedUser(sessionId, null);
           return who;
         },
         switchUser: (target, secret) => api.file.switchUser(sessionId, target, secret),
@@ -185,9 +183,9 @@ export const FileManager = memo(function FileManager() {
         },
       });
       if (result.fileUser) setFileIdentity(sessionId, { loginUser, fileUser: result.fileUser, terminalUser });
-      if (result.status === 'cancelled' && result.terminalUser) declinedRef.current.set(sessionId, result.terminalUser);
+      if (result.status === 'cancelled' && result.terminalUser) setDeclinedUser(sessionId, result.terminalUser);
       if (result.status === 'switched') {
-        declinedRef.current.delete(sessionId);
+        setDeclinedUser(sessionId, null);
         remote.clearCache();
         void remote.load(await resolveRemoteHome(sessionId) || '/', true);
       } else if (result.status === 'failed') {
