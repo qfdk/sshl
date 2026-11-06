@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getFileIdentity, setFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
+import { getFileIdentity, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
+import sessionManager from '../ui/src/lib/session-manager.ts';
 
 const wrong = { success: false, error: 'SUDO_PASSWORD_INCORRECT: su: Authentication failure' };
 
@@ -101,4 +102,20 @@ test('每个会话记住文件管理当前身份', () => {
   assert.equal(getFileIdentity('s2'), null);
   setFileIdentity('s1', null);
   assert.equal(getFileIdentity('s1'), null);
+});
+
+test('会话被移除（断开 / 远端关闭 / 失效丢弃）时，它的文件管理身份一并清掉，其他会话不受影响', () => {
+  sessionManager.addSession('closing', 'c1');
+  sessionManager.addSession('staying', 'c2');
+  setFileIdentity('closing', { loginUser: 'alice', fileUser: 'root' });
+  setFileIdentity('staying', { loginUser: 'bob', fileUser: 'bob' });
+  let notified = 0;
+  const unsubscribe = subscribeFileIdentity(() => { notified += 1; });
+  sessionManager.removeSession('closing');
+  unsubscribe();
+  assert.equal(getFileIdentity('closing'), null);
+  assert.deepEqual(getFileIdentity('staying'), { loginUser: 'bob', fileUser: 'bob' });
+  assert.ok(notified > 0, '徽标订阅者收到变化');
+  sessionManager.removeSession('staying');
+  assert.equal(getFileIdentity('staying'), null);
 });

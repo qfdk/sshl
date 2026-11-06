@@ -28,10 +28,15 @@ function call<T = any>(command: string, args?: Record<string, unknown>, shape?: 
 function onEvent(name: string) {
   return (callback: EventCallback) => {
     let unlisten: (() => void) | null = null;
+    // listen 是异步注册：在它 resolve 前就取消（组件先卸载、StrictMode 双挂载）时，注册完成后立刻取消，否则监听永远挂着
+    let disposed = false;
     void listen(name, event => {
+      if (disposed) return;
       try { callback({}, event.payload); } catch (error) { console.error(`[ipc] ${name} callback:`, error); }
-    }).then(stop => { unlisten = stop; }).catch(error => console.error(`[ipc] listen ${name}:`, error));
-    return () => { try { unlisten?.(); } catch {} };
+    }).then(stop => {
+      if (disposed) { try { stop(); } catch {} } else unlisten = stop;
+    }).catch(error => console.error(`[ipc] listen ${name}:`, error));
+    return () => { disposed = true; try { unlisten?.(); } catch {} };
   };
 }
 

@@ -2,6 +2,7 @@
 // 后端 file_terminal_user 从这条连接的进程链看出终端此刻是谁、怎么切过去的；file_switch_user 以他的身份
 // 起 sftp-server 换掉 SFTP 会话。密码：su 要目标用户的，sudo 要登录用户的；先用那位用户自己的已保存密码，
 // 没有再弹框（retryWithPassword），不拿别的已保存密码去试。
+import sessionManager from '../../lib/session-manager';
 import { retryWithPassword, type SudoSecret, type UploadResult } from './sudo-upload';
 
 export type Via = 'su' | 'sudo';
@@ -58,3 +59,6 @@ export function subscribeFileIdentity(listener: () => void) {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
+
+// 会话没了（断开 / 远端关闭）就丢掉它的身份记录，否则按 sessionId 只增不删
+sessionManager.onSessionRemoved(sessionId => setFileIdentity(sessionId, null));
