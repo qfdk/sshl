@@ -936,6 +936,16 @@ async fn scan_local(local: PathBuf, remote: String) -> AppResult<DirPlan<PathBuf
     Ok(plan)
 }
 
+/// 列一个远端目录：(名称, 是否目录, 字节数)，供 scan_remote 用。
+async fn list_remote_dir(sftp: &SftpSession, dir: String) -> AppResult<Vec<(String, bool, u64)>> {
+    let entries = sftp.read_dir(&dir).await
+        .map_err(|e| AppError::Sftp(format!("read_dir {dir}: {e}")))?;
+    Ok(entries.into_iter().map(|e| {
+        let meta = e.metadata();
+        (e.file_name(), meta.is_dir(), meta.size.unwrap_or(0))
+    }).collect())
+}
+
 /// 下载前遍历远端目录。`list` 列出一个远端目录的 (名称, 是否目录, 字节数)。
 async fn scan_remote<L, Fut>(remote: String, local: PathBuf, list: L) -> AppResult<DirPlan<String, PathBuf>>
 where
@@ -1023,6 +1033,15 @@ pub async fn file_upload_directory(
     upload_tree_to(&app, &sftp, &session_id, &local_path, &remote_path, &remote_path).await
 }
 
+/// 目录传输的进度快照，交给调用方转成上传 / 下载进度事件。
+#[derive(Debug, Clone, Copy)]
+struct DirCounts {
+    transferred: u64,
+    total: u64,
+    files_done: u64,
+    files_total: u64,
+}
+
 /// 上传整个本地目录到 `remote_path`；进度事件按 `progress_path` 上报。
 async fn upload_tree_to(
     app: &AppHandle,
@@ -1032,6 +1051,25 @@ async fn upload_tree_to(
     remote_path: &str,
     progress_path: &str,
 ) -> AppResult<()> {
+    upload_tree(sftp, local_path, remote_path, |c| {
+        emit_upload_progress(app, UploadProgress {
+            session_id: session_id.to_string(),
+            remote_path: progress_path.to_string(),
+            transferred: c.transferred,
+            total: c.total,
+            files_done: Some(c.files_done),
+            files_total: Some(c.files_total),
+        });
+    }).await
+}
+
+/// 上传整个本地目录到 `remote_path`，进度按 PROGRESS_INTERVAL 节流交给 `emit`。
+async fn upload_tree(
+    sftp: &SftpSession,
+    local_path: &str,
+    remote_path: &str,
+    emit: impl Fn(DirCounts),
+) -> AppResult<()> {
     let plan = scan_local(PathBuf::from(local_path), remote_path.to_string()).await?;
     for dir in &plan.dirs {
         // 已存在不算错（mkdir -p 语义）。
@@ -1039,14 +1077,7 @@ async fn upload_tree_to(
     }
     let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
     let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
-        emit_upload_progress(app, UploadProgress {
-            session_id: session_id.to_string(),
-            remote_path: progress_path.to_string(),
-            transferred,
-            total,
-            files_done: Some(files_done),
-            files_total: Some(files_total),
-        });
+        emit(DirCounts { transferred, total, files_done, files_total });
     });
     let (sftp_ref, progress_ref) = (&sftp, &progress);
     transfer_files_concurrently(plan.files, |(local, remote, _): (PathBuf, String, u64)| async move {
@@ -1075,28 +1106,33 @@ pub async fn file_download_directory(
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
-    let sftp_ref = &sftp;
-    let plan = scan_remote(remote_path.clone(), PathBuf::from(local_path), |dir| async move {
-        let entries = sftp_ref.read_dir(&dir).await
-            .map_err(|e| AppError::Sftp(format!("read_dir {dir}: {e}")))?;
-        Ok(entries.into_iter().map(|e| {
-            let meta = e.metadata();
-            (e.file_name(), meta.is_dir(), meta.size.unwrap_or(0))
-        }).collect())
-    }).await?;
+    download_tree(&sftp, &remote_path, &local_path, |c| {
+        emit_download_progress(&app, DownloadProgress {
+            session_id: session_id.clone(),
+            remote_path: remote_path.clone(),
+            transferred: c.transferred,
+            total: c.total,
+            files_done: Some(c.files_done),
+            files_total: Some(c.files_total),
+        });
+    }).await
+}
+
+/// 下载整个远端目录到 `local_path`，进度按 PROGRESS_INTERVAL 节流交给 `emit`。
+async fn download_tree(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &str,
+    emit: impl Fn(DirCounts),
+) -> AppResult<()> {
+    let sftp_ref = sftp;
+    let plan = scan_remote(remote_path.to_string(), PathBuf::from(local_path), |dir| list_remote_dir(sftp_ref, dir)).await?;
     for dir in &plan.dirs {
         tokio::fs::create_dir_all(dir).await?;
     }
     let (total, files_total) = (plan.total_bytes(), plan.files.len() as u64);
     let progress = DirProgress::new(PROGRESS_INTERVAL, |transferred, files_done| {
-        emit_download_progress(&app, DownloadProgress {
-            session_id: session_id.clone(),
-            remote_path: remote_path.clone(),
-            transferred,
-            total,
-            files_done: Some(files_done),
-            files_total: Some(files_total),
-        });
+        emit(DirCounts { transferred, total, files_done, files_total });
     });
     let progress_ref = &progress;
     download_dir_files(
@@ -2011,5 +2047,212 @@ mod tests {
 
         let missing = scan_remote("/nope".to_string(), PathBuf::from("/l"), list).await;
         assert!(matches!(missing, Err(AppError::Sftp(msg)) if msg.contains("/nope")));
+    }
+
+    /// 真实 sshd 上的目录 / 大文件传输。容器同 sudo_upload_against_real_linux（以 alice 登录）：
+    /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
+    mod real_sftp {
+        use super::super::{
+            download_large, download_tree, exec_capture, list_remote_dir, new_sftp, scan_remote,
+            stream_to_remote, upload_tree, DirCounts, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
+        };
+        use russh_sftp::client::SftpSession;
+        use std::collections::BTreeMap;
+        use std::path::{Path, PathBuf};
+        use std::sync::Mutex;
+        use std::time::Instant;
+        use tokio::io::AsyncWriteExt;
+
+        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+
+        async fn channel(h: &H) -> russh::Channel<russh::client::Msg> {
+            h.lock().await.channel_open_session().await.unwrap()
+        }
+
+        async fn connect() -> Option<(H, SftpSession)> {
+            let target = std::env::var("SSHL_SFTP_IT").ok()?;
+            let (host, port) = target.split_once(':').unwrap();
+            let h = crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap();
+            let ch = channel(&h).await;
+            ch.request_subsystem(true, "sftp").await.unwrap();
+            let sftp = new_sftp(ch).await.unwrap();
+            Some((h, sftp))
+        }
+
+        async fn exec(h: &H, cmd: &str) -> String {
+            let (status, out, err) = exec_capture(channel(h).await, cmd, None).await.unwrap();
+            assert_eq!(status, 0, "`{cmd}`: {err}");
+            out
+        }
+
+        fn temp_dir(tag: &str) -> PathBuf {
+            std::env::temp_dir().join(format!("sshl-{tag}-{}", uuid::Uuid::new_v4()))
+        }
+
+        fn bytes(len: usize, seed: usize) -> Vec<u8> {
+            (0..len).map(|i| ((i * 31 + seed) % 251) as u8).collect()
+        }
+
+        fn write(path: &Path, data: &[u8]) {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, data).unwrap();
+        }
+
+        /// 目录树快照：相对路径 → None（目录）/ Some(内容)。
+        fn snapshot(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+            fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Option<Vec<u8>>>) {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                    if path.is_dir() {
+                        out.insert(rel, None);
+                        walk(root, &path, out);
+                    } else {
+                        out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                    }
+                }
+            }
+            let mut out = BTreeMap::new();
+            walk(root, root, &mut out);
+            out
+        }
+
+        fn files_equal(a: &Path, b: &Path) -> bool {
+            use std::io::Read;
+            let (mut fa, mut fb) = (std::fs::File::open(a).unwrap(), std::fs::File::open(b).unwrap());
+            let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+            loop {
+                let na = fa.read(&mut ba).unwrap();
+                let mut nb = 0;
+                while nb < na {
+                    let n = fb.read(&mut bb[nb..na]).unwrap();
+                    if n == 0 { return false; }
+                    nb += n;
+                }
+                if na == 0 { return fb.read(&mut bb).unwrap() == 0; }
+                if ba[..na] != bb[..na] { return false; }
+            }
+        }
+
+        /// 最后一次进度回报必须走到终点（字节和文件数都满）。
+        fn assert_finished(last: &Mutex<Option<DirCounts>>) {
+            let c = last.lock().unwrap().expect("没有进度回报");
+            assert_eq!((c.transferred, c.files_done), (c.total, c.files_total), "{c:?}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn directory_round_trip_keeps_tree_and_bytes() {
+            let Some((h, sftp)) = connect().await else { return };
+            let chunk = TRANSFER_CHUNK;
+            let src = temp_dir("rt-src");
+            let files: Vec<(&str, usize)> = vec![
+                ("zero.txt", 0),
+                ("it's ü name.bin", 1000),
+                ("l1/chunk-1.bin", chunk - 1),
+                ("l1/chunk.bin", chunk),
+                ("l1/l2/chunk+1.bin", chunk + 1),
+                ("l1/l2/three.bin", 3 * chunk),
+                ("l1/l2/l3/seg-min.bin", SEGMENTED_DOWNLOAD_MIN as usize),
+                ("l1/l2/l3/big.bin", 9 * chunk + 7),
+            ];
+            for (i, (name, len)) in files.iter().enumerate() {
+                write(&src.join(name), &bytes(*len, i));
+            }
+            for i in 0..60 {
+                write(&src.join(format!("many/f{i:02}.txt")), &bytes(1 + i * 67, i));
+            }
+            for dir in ["empty", "l1/l2/l3/empty-deep", "many/empty"] {
+                std::fs::create_dir_all(src.join(dir)).unwrap();
+            }
+
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/tree");
+            let last = Mutex::new(None);
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |c| *last.lock().unwrap() = Some(c)).await.unwrap();
+            assert_finished(&last);
+
+            let dst = temp_dir("rt-dst");
+            let last = Mutex::new(None);
+            download_tree(&sftp, &remote, &dst.to_string_lossy(), |c| *last.lock().unwrap() = Some(c)).await.unwrap();
+            assert_finished(&last);
+            let (before, after) = (snapshot(&src), snapshot(&dst));
+            assert_eq!(before.keys().collect::<Vec<_>>(), after.keys().collect::<Vec<_>>(), "目录结构（含空目录）要一致");
+            for (path, content) in &before {
+                assert!(after[path] == *content, "{path} 内容不一致");
+            }
+
+            // 单文件分段下载
+            let single = dst.join("single.bin");
+            let n = download_large(&sftp, &format!("{remote}/l1/l2/l3/big.bin"), &single, 9 * chunk as u64 + 7, |_| {}).await.unwrap();
+            assert_eq!(n, 9 * chunk as u64 + 7);
+            assert!(files_equal(&single, &src.join("l1/l2/l3/big.bin")));
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
+            std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 耗时基准（另需 SSHL_SFTP_BENCH=1）：300 个目录 / 3000 个小文件的上传、遍历、下载，100MB 单文件上传、下载。
+        /// 模拟 WAN：容器里 `apt-get install -y iproute2 && tc qdisc add dev eth0 root netem delay 50ms`。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 和 SSHL_SFTP_BENCH=1"]
+        async fn bench_directory_and_large_file() {
+            if std::env::var("SSHL_SFTP_BENCH").is_err() { return; }
+            let Some((h, sftp)) = connect().await else { return };
+            let src = temp_dir("bench-src");
+            let mut n = 0usize;
+            for top in 0..10 {
+                for sub in 0..29 {
+                    for f in 0..10 {
+                        write(&src.join(format!("d{top}/s{sub}/f{f}.txt")), &bytes((n * 7919) % 16384, n));
+                        n += 1;
+                    }
+                }
+                for f in 0..10 {
+                    write(&src.join(format!("d{top}/f{f}.txt")), &bytes((n * 7919) % 16384, n));
+                    n += 1;
+                }
+            }
+            assert_eq!(n, 3000);
+            let base = exec(&h, "mktemp -d /home/alice/sshl-bench.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/tree");
+
+            let t = Instant::now();
+            upload_tree(&sftp, &src.to_string_lossy(), &remote, |_| {}).await.unwrap();
+            eprintln!("BENCH upload tree (300 dirs / 3000 files): {:.2}s", t.elapsed().as_secs_f64());
+
+            let t = Instant::now();
+            let plan = scan_remote(remote.clone(), PathBuf::from("/unused"), |d| list_remote_dir(&sftp, d)).await.unwrap();
+            eprintln!("BENCH scan remote tree ({} files): {:.2}s", plan.files.len(), t.elapsed().as_secs_f64());
+
+            let dst = temp_dir("bench-dst");
+            let t = Instant::now();
+            download_tree(&sftp, &remote, &dst.to_string_lossy(), |_| {}).await.unwrap();
+            eprintln!("BENCH download tree: {:.2}s", t.elapsed().as_secs_f64());
+            assert!(snapshot(&src) == snapshot(&dst), "目录往返后内容不一致");
+
+            let big = src.join("big.bin");
+            let size = 100 * 1024 * 1024;
+            std::fs::write(&big, bytes(size, 1)).unwrap();
+            let remote_big = format!("{base}/big.bin");
+            let t = Instant::now();
+            let mut f = sftp.create(remote_big.as_str()).await.unwrap();
+            stream_to_remote(&big.to_string_lossy(), &mut f, &remote_big, |_| {}).await.unwrap();
+            f.shutdown().await.unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            eprintln!("BENCH upload 100MB: {secs:.2}s ({:.1} MB/s)", 100.0 / secs);
+
+            let got = dst.join("big.bin");
+            let t = Instant::now();
+            download_large(&sftp, &remote_big, &got, size as u64, |_| {}).await.unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            eprintln!("BENCH download 100MB: {secs:.2}s ({:.1} MB/s)", 100.0 / secs);
+            assert!(files_equal(&big, &got));
+
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
+            std::fs::remove_dir_all(&dst).unwrap();
+        }
     }
 }
