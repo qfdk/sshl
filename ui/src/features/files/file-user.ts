@@ -11,12 +11,14 @@ export type SwitchTarget = { user: string; via: Via } | null;
 export type PasswordContext = { user: string; via: Via; needUser: string; loginUser: string };
 export type SyncResult = { status: 'same' | 'switched' | 'cancelled' | 'failed'; fileUser: string | null; terminalUser: string | null; error?: string };
 
-export async function syncFileUser({ identify, switchUser, askPassword, prompt = true }: {
+export async function syncFileUser({ identify, switchUser, askPassword, interactive = true, declinedUser = null }: {
   identify: () => Promise<TerminalIdentity | null>;
   switchUser: (target: SwitchTarget, secret: SudoSecret | null) => Promise<UploadResult>;
   askPassword: (retry: boolean, exclude: string[], context: PasswordContext) => Promise<SudoSecret | null>;
-  /** false：自动同步（切标签页时），没保存密码就不弹框打扰；点徽标时为 true。 */
-  prompt?: boolean;
+  /** true：点徽标，总要问。false：自动同步（切到文件管理 / 刷新时）。 */
+  interactive?: boolean;
+  /** 自动同步时用户取消过输密码的那位终端用户：没保存他的密码就不再弹框打扰；终端换成别人照常询问。 */
+  declinedUser?: string | null;
 }): Promise<SyncResult> {
   const who = await identify();
   if (!who) return { status: 'same', fileUser: null, terminalUser: null };
@@ -27,7 +29,7 @@ export async function syncFileUser({ identify, switchUser, askPassword, prompt =
     const back = await switchUser(null, null);
     return back?.success ? { status: 'switched', fileUser: who.loginUser, terminalUser: who.user } : { status: 'failed', ...unchanged, error: back?.error };
   }
-  if (!prompt && !who.credential) return { status: 'cancelled', ...unchanged };
+  if (!interactive && who.user === declinedUser && !who.credential) return { status: 'cancelled', ...unchanged };
   const target = { user: who.user, via: who.via };
   const context = { user: who.user, via: who.via, needUser: who.via === 'su' ? who.user : who.loginUser, loginUser: who.loginUser };
   const result = await retryWithPassword(
@@ -70,6 +72,13 @@ export function getDeclinedUser(sessionId: string) {
 export function setDeclinedUser(sessionId: string, user: string | null) {
   if (user) declined.set(sessionId, user);
   else declined.delete(sessionId);
+}
+
+/** 一次同步之后该记谁为「已拒绝」：取消了记这位终端用户；切换成功或终端已换了人就清掉；探测失败保持原样。 */
+export function nextDeclinedUser(previous: string | null, result: SyncResult) {
+  if (result.status === 'cancelled') return result.terminalUser;
+  if (result.status === 'switched') return null;
+  return result.terminalUser === null || result.terminalUser === previous ? previous : null;
 }
 
 // 会话没了（断开 / 远端关闭）就丢掉它的身份和取消记录，否则按 sessionId 只增不删

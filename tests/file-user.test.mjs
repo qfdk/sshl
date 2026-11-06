@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getDeclinedUser, getFileIdentity, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
+import { getDeclinedUser, getFileIdentity, nextDeclinedUser, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
 import sessionManager from '../ui/src/lib/session-manager.ts';
 
 const wrong = { success: false, error: 'SUDO_PASSWORD_INCORRECT: su: Authentication failure' };
@@ -68,10 +68,49 @@ test('用户取消输密码：保持原身份，标记取消', async () => {
 test('自动同步时不重复打扰：取消过的用户不再弹框，点徽标（interactive）才再问', async () => {
   const who = { ...alice, user: 'root', via: 'su', credential: null };
   const quiet = harness({ who, switchResults: [{ success: false, error: 'SUDO_PASSWORD_REQUIRED: x' }] });
-  assert.equal((await quiet.run({ prompt: false })).status, 'cancelled');
+  assert.equal((await quiet.run({ interactive: false, declinedUser: 'root' })).status, 'cancelled');
   assert.deepEqual(quiet.calls.switch, [], '不弹框也不白跑一次');
   const asked = harness({ who, switchResults: [{ success: false, error: 'SUDO_PASSWORD_REQUIRED: x' }], passwords: [{ password: 'rootpw' }] });
-  assert.equal((await asked.run({ prompt: true })).status, 'switched');
+  assert.equal((await asked.run({ interactive: true, declinedUser: 'root' })).status, 'switched');
+});
+
+test('「已拒绝」只针对拒绝过的那位用户：终端换成别人照常询问，那人也拒绝了才记他', async () => {
+  // 按 FileManager 的接法串起多次自动同步：读当前记录 → 同步 → nextDeclinedUser 写回
+  let declined = null;
+  const sync = async (who, { interactive = false, passwords = [] } = {}) => {
+    const { run, calls } = harness({ who, switchResults: [{ success: false, error: 'SUDO_PASSWORD_REQUIRED: x' }], passwords });
+    const result = await run({ interactive, declinedUser: declined });
+    declined = nextDeclinedUser(declined, result);
+    return { result, asked: calls.ask.map(a => a.user) };
+  };
+  const root = { ...alice, user: 'root', via: 'su', credential: null };
+  const bob = { ...alice, user: 'bob', via: 'su', credential: null };
+
+  assert.deepEqual((await sync(root)).asked, ['root'], '第一次切到 root：询问');
+  assert.equal(declined, 'root', '取消了：记下 root');
+  assert.deepEqual((await sync(root)).asked, [], '还是 root：不再打扰');
+  assert.equal(declined, 'root');
+
+  assert.deepEqual((await sync(bob)).asked, ['bob'], '终端换成 bob：照常询问，不沿用对 root 的拒绝');
+  assert.equal(declined, 'bob', 'bob 也取消了才记 bob');
+  assert.deepEqual((await sync(bob)).asked, [], '还是 bob：不再打扰');
+  assert.deepEqual((await sync(bob, { interactive: true })).asked, ['bob'], '点徽标：总要问');
+});
+
+test('拒绝记录怎么延续：切换成功或终端回到当前文件用户就清掉；探测失败（不知道终端是谁）保持原样', () => {
+  assert.equal(nextDeclinedUser(null, { status: 'cancelled', fileUser: 'alice', terminalUser: 'root' }), 'root');
+  assert.equal(nextDeclinedUser('root', { status: 'switched', fileUser: 'root', terminalUser: 'root' }), null);
+  assert.equal(nextDeclinedUser('root', { status: 'same', fileUser: 'alice', terminalUser: 'alice' }), null, '终端 exit 回了 alice：以后再切 root 会重新询问');
+  assert.equal(nextDeclinedUser('root', { status: 'same', fileUser: null, terminalUser: null }), 'root');
+  assert.equal(nextDeclinedUser('root', { status: 'failed', fileUser: 'alice', terminalUser: 'root', error: 'x' }), 'root');
+  assert.equal(nextDeclinedUser('root', { status: 'failed', fileUser: 'alice', terminalUser: 'bob', error: 'x' }), null);
+});
+
+test('自动同步时被拒绝过的用户若保存了他自己的密码，仍自动用它（只用他自己的，不试别的）', async () => {
+  const { run, calls } = harness({ who: { ...alice, user: 'root', via: 'su', credential: 'acct:root' } });
+  assert.equal((await run({ interactive: false, declinedUser: 'root' })).status, 'switched');
+  assert.deepEqual(calls.switch, [[{ user: 'root', via: 'su' }, { credential: 'acct:root' }]]);
+  assert.deepEqual(calls.ask, []);
 });
 
 test('终端 exit 回到登录用户：文件管理也切回来', async () => {

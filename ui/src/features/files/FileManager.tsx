@@ -12,7 +12,7 @@ import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
 import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
 import sessionManager from '../../lib/session-manager';
-import { getDeclinedUser, getFileIdentity, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from './file-user';
+import { getDeclinedUser, getFileIdentity, nextDeclinedUser, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from './file-user';
 import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
@@ -186,14 +186,15 @@ export const FileManager = memo(function FileManager() {
       const connectionId = sessionManager.getSession(sessionId)?.connectionId;
       let loginUser = '';
       let terminalUser = '';
+      const declinedUser = getDeclinedUser(sessionId);
       const result = await syncFileUser({
-        prompt: interactive || getDeclinedUser(sessionId) === null,
+        interactive,
+        declinedUser,
         identify: async () => {
           const who = await api.file.terminalUser(sessionId);
           if (!who?.success) return null;
           loginUser = who.loginUser;
           terminalUser = who.user;
-          if (getDeclinedUser(sessionId) !== who.user) setDeclinedUser(sessionId, null);
           return who;
         },
         switchUser: (target, secret) => api.file.switchUser(sessionId, target, secret),
@@ -213,9 +214,8 @@ export const FileManager = memo(function FileManager() {
         },
       });
       if (result.fileUser) setFileIdentity(sessionId, { loginUser, fileUser: result.fileUser, terminalUser });
-      if (result.status === 'cancelled' && result.terminalUser) setDeclinedUser(sessionId, result.terminalUser);
+      setDeclinedUser(sessionId, nextDeclinedUser(declinedUser, result));
       if (result.status === 'switched') {
-        setDeclinedUser(sessionId, null);
         remote.clearCache();
         void remote.load(await resolveRemoteHome(sessionId) || '/', true);
       } else if (result.status === 'failed') {
