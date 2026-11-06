@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react';
+import { overlayOpen, shouldRefocusTerminal } from './refocus';
 import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
 import type { WebglAddon } from 'xterm-addon-webgl';
@@ -594,6 +595,12 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
     }
   };
 
+  const focusTerminalFor = (reason: 'tab' | 'window') => {
+    const term = activeTerminalRef.current;
+    if (!term || !shouldRefocusTerminal({ reason, activeTab: getActiveTabId(), active: document.activeElement, dialogOpen: overlayOpen(document) })) return;
+    try { term.focus(); } catch (err) { console.warn('聚焦终端失败:', err); }
+  };
+
   const ensureTerminalVisible = () => {
     if (terminalFitAddonRef.current && !isTabSwitchingRef.current) resizeTerminal();
     if (activeTerminalRef.current && !isTabSwitchingRef.current) setTimeout(() => {
@@ -628,12 +635,17 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       requestAnimationFrame(() => {
         isTabSwitchingRef.current = true;
         ensureTerminalVisible();
+        // ensureTerminalVisible 在切标签期间不聚焦；切回终端标签时焦点要直接进终端，不然直接打字没反应
+        focusTerminalFor('tab');
         setTimeout(() => {
           resizeTerminal();
           isTabSwitchingRef.current = false;
         }, 50);
       });
     });
+    // 从别的应用切回窗口：焦点不在输入框里就交给终端
+    const onWindowFocus = () => focusTerminalFor('window');
+    window.addEventListener('focus', onWindowFocus);
     const container = containerRef.current;
     // 容器尺寸变化（含窗口缩放）统一走这里；备用终端也跟着重排，保证它给出的初始尺寸是准的。
     const observer = typeof ResizeObserver === 'undefined' || !container
@@ -651,6 +663,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       : setTimeout(() => { void prewarm(); }, 300);
     return () => {
       unsubscribe();
+      window.removeEventListener('focus', onWindowFocus);
       observer?.disconnect();
       if ((window as any).cancelIdleCallback) (window as any).cancelIdleCallback(idle); else clearTimeout(idle);
       if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
