@@ -56,3 +56,13 @@ pub async fn file_delete_local_directory(dir_path: String) -> AppResult<()> {
     tokio::fs::remove_dir_all(&dir_path).await?;
     Ok(())
 }
+
+/// 本地路径各是不是目录（从 Finder 拖进来的只有路径）。读不到的按文件处理，上传时再报错。
+#[tauri::command]
+pub async fn file_local_kinds(paths: Vec<String>) -> Vec<bool> {
+    let mut kinds = Vec::with_capacity(paths.len());
+    for path in paths {
+        kinds.push(tokio::fs::metadata(&path).await.map(|m| m.is_dir()).unwrap_or(false));
+    }
+    kinds
+}

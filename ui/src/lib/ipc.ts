@@ -59,6 +59,8 @@ export const api = {
     list: (sessionId: string, path: string) => call('file_list', { sessionId, path }, 'files'),
     remoteHome: (sessionId: string) => call('file_remote_home', { sessionId }, 'home'),
     listLocal: (directory: string) => call('file_list_local', { directory }, 'files'),
+    // 从 Finder 拖进来的路径各是不是目录
+    localKinds: (paths: string[]) => invoke<boolean[]>('file_local_kinds', { paths }),
     getHomeDir: () => invoke<string>('file_get_home_dir'),
     listSystemFonts: () => invoke<string[]>('list_system_fonts'),
     upload: (sessionId: string, localPath: string, remotePath: string) => call('file_upload', { sessionId, localPath, remotePath }),
@@ -68,6 +70,11 @@ export const api = {
       call('file_upload_sudo', { sessionId, localPath, remotePath, isDirectory, sudoPassword: secret?.password ?? null, credential: secret?.credential ?? null }),
     // 当前登录用户名 + 他自己的已保存密码标识（无则 credential 为 null）
     sudoIdentity: (sessionId: string) => call('file_sudo_identity', { sessionId }),
+    // 文件管理跟随终端用户（见 features/files/file-user.ts）：终端此刻是谁 / 切换文件管理身份 / 以当前身份跑命令
+    terminalUser: (sessionId: string) => call('file_terminal_user', { sessionId }),
+    switchUser: (sessionId: string, target: { user: string; via: string } | null, secret: { password?: string; credential?: string } | null) =>
+      call('file_switch_user', { sessionId, user: target?.user ?? null, via: target?.via ?? null, password: secret?.password ?? null, credential: secret?.credential ?? null }),
+    shell: (sessionId: string, command: string) => call('file_shell', { sessionId, command }, 'output'),
     download: (sessionId: string, remotePath: string, localPath: string) => call('file_download', { sessionId, remotePath, localPath }),
     deleteLocal: (filePath: string) => call('file_delete_local', { filePath }),
     deleteLocalDirectory: (dirPath: string) => call('file_delete_local_directory', { dirPath }),

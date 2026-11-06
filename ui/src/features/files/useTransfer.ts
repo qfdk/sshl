@@ -3,6 +3,7 @@ import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
 import { describeProgress, type TransferProgress } from './transfer-progress';
 import { savedPasswordChoices, sudoErrorMessage, uploadWithSudoFallback } from './sudo-upload';
 import sessionManager from '../../lib/session-manager';
+import { getFileIdentity } from './file-user';
 
 function parentDir(remotePath: string) {
   const i = remotePath.replace(/\/+$/, '').lastIndexOf('/');
@@ -15,7 +16,9 @@ function uploadWithSudo(sessionId: string, localPath: string, remotePath: string
   const file = api.file;
   const connectionId = sessionManager.getSession(sessionId)?.connectionId;
   let user = '';
+  const identity = getFileIdentity(sessionId);
   return uploadWithSudoFallback({
+    elevated: Boolean(identity && identity.fileUser !== identity.loginUser),
     normal: () => isDirectory ? file.uploadDirectory(sessionId, localPath, remotePath) : file.upload(sessionId, localPath, remotePath),
     sudo: secret => file.uploadSudo(sessionId, localPath, remotePath, isDirectory, secret),
     confirm: () => confirmDialog({

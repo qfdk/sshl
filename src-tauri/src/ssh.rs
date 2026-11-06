@@ -90,6 +90,9 @@ pub struct SshSession {
     pub passwd_cache: Mutex<Option<Arc<HashMap<u32, String>>>>,
     /// Lazily loaded gid→groupname map (from /etc/group).
     pub group_cache: Mutex<Option<Arc<HashMap<u32, String>>>>,
+    /// 终端切换了用户（su / sudo -i）后，文件管理以该用户身份运行：SFTP 换成以他身份起的
+    /// sftp-server，删除 / chmod / chown 也以他身份执行。None = SSH 登录用户。
+    pub elevation: Mutex<Option<Arc<crate::terminal_user::Elevation>>>,
     /// Renderer must explicitly activate the session to start receiving ssh:data events.
     /// Until then, output is silently buffered; ssh_activate_session emits the buffered
     /// prelude as the first ssh:data event so snapshot and live data stay in one
@@ -414,6 +417,7 @@ async fn connect_session(
         handle: handle_arc.clone(),
         sftp: Mutex::new(None),
         passwd_cache: Mutex::new(None),
+        elevation: Mutex::new(None),
         group_cache: Mutex::new(None),
         activated: AtomicBool::new(false),
         first_data: first_data.clone(),

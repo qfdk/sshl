@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::io::AsyncWriteExt;
 
 use crate::config_store::load_secret;
+use crate::terminal_user::{self, Elevation, Via};
 use crate::error::{AppError, AppResult};
 use crate::ssh::SshSession;
 use crate::state::AppState;
@@ -93,22 +94,124 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
         }
     }
     // Open new SFTP subsystem channel and cache it. Handle 锁只覆盖开通道（同 ssh_execute）。
-    let channel = {
-        let handle = session.handle.lock().await;
-        handle.channel_open_session().await
-            .map_err(|e| AppError::Sftp(format!("open sftp channel: {e}")))?
+    let channel = open_exec_channel(session).await?;
+    let elevation = session.elevation.lock().await.clone();
+    let sftp = match elevation {
+        // 终端切换了用户：以他的身份起 sftp-server（缓存的会话断了也按同一身份重开）
+        Some(e) => open_sftp_as(channel, &e.user, e.via, e.password.as_deref()).await?,
+        None => {
+            channel.request_subsystem(true, "sftp").await
+                .map_err(|e| AppError::Sftp(format!("request sftp subsystem: {e}")))?;
+            new_sftp(channel).await?
+        }
     };
-    channel.request_subsystem(true, "sftp").await
-        .map_err(|e| AppError::Sftp(format!("request sftp subsystem: {e}")))?;
+    let sftp = Arc::new(sftp);
+    let mut cache = session.sftp.lock().await;
+    // 打开期间刚切换过身份（file_switch_user 已放好新会话）：以缓存里的为准
+    if let Some(existing) = cache.as_ref() {
+        return Ok(existing.clone());
+    }
+    *cache = Some(sftp.clone());
+    Ok(sftp)
+}
+
+async fn new_sftp(channel: russh::Channel<russh::client::Msg>) -> AppResult<SftpSession> {
     let sftp = SftpSession::new(channel.into_stream()).await
         .map_err(|e| AppError::Sftp(format!("sftp init: {e}")))?;
     // russh-sftp 的读请求从发出起计时，默认 10s 超时（写请求不计时）。分段下载 / 目录并发下载
     // 会同时挂约 1MB 的 READ，链路慢于 ~100KB/s 时排在后面的回复会超时；放宽到 30s（≥ ~35KB/s）。
     sftp.set_timeout(30);
-    let sftp = Arc::new(sftp);
-    let mut cache = session.sftp.lock().await;
-    *cache = Some(sftp.clone());
     Ok(sftp)
+}
+
+/// 在 exec 通道上以 `user` 身份起 sftp-server（见 terminal_user::sftp_server_script），返回 SFTP 会话。
+/// 等到 stderr 出现密码提示才写密码、出现就绪标记才开始 SFTP 协议：免密 sudo 不会把密码误当成 SFTP 数据，
+/// 密码错（sudo 再次提示 / su 报 Authentication failure）在协议开始前就能识别。
+async fn open_sftp_as(
+    mut channel: russh::Channel<russh::client::Msg>,
+    user: &str,
+    via: Via,
+    password: Option<&str>,
+) -> AppResult<SftpSession> {
+    let ready = if via == Via::Su && password.is_none() {
+        // 没密码就不跑 su：空密码同样会记一次认证失败
+        Err(AppError::Other(format!("SUDO_PASSWORD_REQUIRED: 需要 {user} 的密码")))
+    } else {
+        wait_for_sftp_ready(&mut channel, user, via, password).await
+    };
+    if let Err(e) = ready {
+        // russh 的 Channel 丢弃时不会关通道：不显式关，密码错后 sudo 会一直等第二次输入、
+        // 占着该用户的 sudo 时间戳锁，之后所有 sudo 都卡住
+        let _ = channel.eof().await;
+        let _ = channel.close().await;
+        return Err(e);
+    }
+    new_sftp(channel).await
+}
+
+async fn wait_for_sftp_ready(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    user: &str,
+    via: Via,
+    password: Option<&str>,
+) -> AppResult<()> {
+    let cmd = terminal_user::run_as_command(user, via, password.is_some(), &terminal_user::sftp_server_script());
+    channel.exec(true, cmd.as_bytes()).await
+        .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
+    let prompt = if via == Via::Sudo { terminal_user::SUDO_PROMPT } else { terminal_user::SU_PROMPT };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let (mut log, mut answered) = (String::new(), 0usize);
+    loop {
+        let Ok(msg) = tokio::time::timeout_at(deadline, channel.wait()).await else {
+            return Err(AppError::Other(format!("SUDO_FAILED: 切换到 {user} 超时 {}", terminal_user::clean_auth_noise(&log))));
+        };
+        match msg {
+            Some(russh::ChannelMsg::Data { data }) | Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                log.push_str(&String::from_utf8_lossy(&data));
+                if log.contains(terminal_user::SFTP_READY) {
+                    return Ok(());
+                }
+                let prompts = log.matches(prompt).count();
+                if prompts > answered {
+                    if answered > 0 {
+                        return Err(AppError::Other(format!("SUDO_PASSWORD_INCORRECT: {}", terminal_user::clean_auth_noise(&log))));
+                    }
+                    let pw = password.ok_or_else(|| AppError::Other("SUDO_PASSWORD_REQUIRED: 需要密码".into()))?;
+                    channel.data(format!("{pw}\n").as_bytes()).await
+                        .map_err(|e| AppError::Ssh(format!("exec stdin: {e}")))?;
+                    answered = prompts;
+                }
+            }
+            Some(russh::ChannelMsg::ExitStatus { .. }) | Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
+                if log.contains(terminal_user::NO_SFTP_SERVER) {
+                    return Err(AppError::Other("SUDO_FAILED: 服务器上找不到 sftp-server，无法以该用户身份管理文件".into()));
+                }
+                let text = terminal_user::clean_auth_noise(&log);
+                let marker = if via == Via::Sudo { sudo_failure(&text) } else { terminal_user::su_failure(&text) };
+                return Err(AppError::Other(format!("{marker}: {text}")));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 以文件管理当前身份跑一条命令（删除 / chmod / chown）：终端切换过用户就经 su / sudo 以他身份执行。
+async fn exec_as_file_user(session: &SshSession, cmd: &str) -> AppResult<(u32, String, String)> {
+    let elevation = session.elevation.lock().await.clone();
+    let channel = open_exec_channel(session).await?;
+    let Some(e) = elevation else { return exec_capture(channel, cmd, None).await };
+    let input = e.password.as_ref().map(|p| format!("{p}\n"));
+    let wrapped = terminal_user::run_as_command(&e.user, e.via, e.password.is_some(), cmd);
+    let (status, out, err) = exec_capture(channel, &wrapped, input.as_deref().map(str::as_bytes)).await?;
+    Ok((status, terminal_user::clean_auth_noise(&out), terminal_user::clean_auth_noise(&err)))
+}
+
+async fn run_as_file_user(session: &SshSession, cmd: &str) -> AppResult<String> {
+    let (status, out, err) = exec_as_file_user(session, cmd).await?;
+    if status != 0 {
+        return Err(AppError::Other(if err.is_empty() { format!("`{cmd}` exited {status}") } else { err }));
+    }
+    Ok(out)
 }
 
 /// Read a small text file via SFTP and parse `colon:separated:fields` lines,
@@ -332,12 +435,12 @@ fn split_remote(path: &str) -> Option<(String, String)> {
     Some((dir.to_string(), name.to_string()))
 }
 
-/// 只验 sudo 能不能用（密码对不对、有没有权限），不做任何事。放在上传之前：密码错不会白传一遍大文件。
-/// sudo 只认登录用户自己的密码。连接保存的登录密码就是它；没有时找以登录用户名保存的账号密码
-/// （`acct:<用户名>`）。只认这一份，不拿其他已保存的密码去试（每次试错都会记进服务器的认证日志、可能触发锁定）。
-fn own_sudo_credential(connection_id: Option<&str>, username: &str, has: impl Fn(&str, &str) -> bool) -> Option<String> {
+/// `need_user` 自己的已保存密码标识：登录用户的就是连接密码，否则找以用户名保存的账号密码（`acct:<用户名>`）。
+/// 只认这一份，不拿其他已保存的密码去试（每次试错都会记进服务器的认证日志、可能触发锁定）。
+fn saved_password_for(connection_id: Option<&str>, login_user: &str, need_user: &str, has: impl Fn(&str, &str) -> bool) -> Option<String> {
     let cid = connection_id?;
-    ["password".to_string(), format!("acct:{username}")].into_iter().find(|kind| has(cid, kind))
+    let login = (need_user == login_user).then(|| "password".to_string());
+    login.into_iter().chain([format!("acct:{need_user}")]).find(|kind| has(cid, kind))
 }
 
 /// 本次 sudo 用哪份密码：点选的已保存密码（`credential` = "password" / "acct:<账号>"，只传标识，
@@ -369,10 +472,99 @@ pub struct SudoIdentity {
 pub async fn file_sudo_identity(state: State<'_, AppState>, session_id: String) -> AppResult<SudoIdentity> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    let credential = own_sudo_credential(session.connection_id.as_deref(), &session.username, crate::crypto_store::has);
+    let credential = saved_password_for(session.connection_id.as_deref(), &session.username, &session.username, crate::crypto_store::has);
     Ok(SudoIdentity { user: session.username.clone(), credential })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalIdentity {
+    pub login_user: String,
+    /// 终端此刻的用户（su / sudo -i 之后）。
+    pub user: String,
+    /// 怎么切过去的："su"（要 user 的密码）/ "sudo"（要登录用户的密码）；没切换为 None。
+    pub via: Option<&'static str>,
+    /// 这次需要的那份密码有没有保存：su → user 的，sudo / 未切换 → 登录用户的。
+    pub credential: Option<String>,
+    /// 文件管理当前以谁的身份运行。
+    pub file_user: String,
+}
+
+/// uid → 用户名：先查已缓存的 /etc/passwd，没有再问服务器（getent 也覆盖 LDAP 等）。
+async fn user_name(session: &SshSession, uid: u32) -> String {
+    if let Some(name) = session.passwd_cache.lock().await.as_ref().and_then(|m| m.get(&uid).cloned()) {
+        return name;
+    }
+    if uid == 0 {
+        return "root".into();
+    }
+    if let Ok(channel) = open_exec_channel(session).await {
+        // 管道的退出码是 cut 的：getent 查不到时用 grep . 让它失败，才会退到 id -nu
+        let cmd = format!("getent passwd {uid} 2>/dev/null | cut -d: -f1 | grep . || id -nu {uid}");
+        if let Ok((_, out, _)) = exec_capture(channel, &cmd, None).await {
+            let name = out.trim();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    uid.to_string()
+}
+
+/// 终端此刻是谁（见 terminal_user）。文件管理据此决定是否切换身份。
+#[tauri::command]
+pub async fn file_terminal_user(state: State<'_, AppState>, session_id: String) -> AppResult<TerminalIdentity> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let login_user = session.username.clone();
+    let file_user = session.elevation.lock().await.as_ref().map_or_else(|| login_user.clone(), |e| e.user.clone());
+    // 探测一律以登录用户身份跑（exec 的 $PPID 才是这条连接的 sshd 会话进程）
+    let (_, out, _) = exec_capture(open_exec_channel(&session).await?, terminal_user::PROBE_COMMAND, None).await?;
+    let found = terminal_user::parse_probe(&out).and_then(|(sshd, procs)| terminal_user::terminal_user(sshd, &procs));
+    let (user, via) = match found {
+        Some((uid, Some(via))) => (user_name(&session, uid).await, Some(via)),
+        _ => (login_user.clone(), None),
+    };
+    let need = if via == Some(Via::Su) { user.as_str() } else { login_user.as_str() };
+    let credential = saved_password_for(session.connection_id.as_deref(), &login_user, need, crate::crypto_store::has);
+    Ok(TerminalIdentity { login_user, user, via: via.map(Via::as_str), credential, file_user })
+}
+
+/// 切换文件管理的身份。`user` 为 None 或登录用户 → 回到登录用户；否则以 `via`（su / sudo）切过去，
+/// 密码：点选的已保存密码 > 手动输入 > 无（仅免密 sudo）。成功后这条连接的 SFTP、删除、chmod、chown 都以新身份进行。
+#[tauri::command]
+pub async fn file_switch_user(
+    state: State<'_, AppState>,
+    session_id: String,
+    user: Option<String>,
+    via: Option<String>,
+    password: Option<String>,
+    credential: Option<String>,
+) -> AppResult<()> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let Some(user) = user.filter(|u| *u != session.username) else {
+        *session.elevation.lock().await = None;
+        *session.sftp.lock().await = None;
+        return Ok(());
+    };
+    let via = if via.as_deref() == Some("sudo") { Via::Sudo } else { Via::Su };
+    let password = pick_sudo_password(session.connection_id.as_deref(), credential.as_deref(), password, load_secret)?;
+    let sftp = open_sftp_as(open_exec_channel(&session).await?, &user, via, password.as_deref()).await?;
+    *session.elevation.lock().await = Some(Arc::new(Elevation { user, via, password }));
+    *session.sftp.lock().await = Some(Arc::new(sftp));
+    Ok(())
+}
+
+/// 以文件管理当前身份跑命令（远程删除用）。
+#[tauri::command]
+pub async fn file_shell(state: State<'_, AppState>, session_id: String, command: String) -> AppResult<String> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    run_as_file_user(&session, &command).await
+}
+
+/// 只验 sudo 能不能用（密码对不对、有没有权限），不做任何事。放在上传之前：密码错不会白传一遍大文件。
 fn sudo_check_command(with_password: bool) -> String {
     let auth = if with_password { "-S -p ''" } else { "-n" };
     format!("LC_ALL=C sudo {auth} true")
@@ -938,14 +1130,8 @@ pub async fn file_change_permissions(
     // and chmod via `chmod` is universally portable.
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
-    let channel = {
-        let handle = session.handle.lock().await;
-        handle.channel_open_session().await
-            .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))?
-    };
     let cmd = format!("chmod {:o} {}", permissions, shell_quote(&remote_path));
-    drain_exec(channel, &cmd).await
+    run_as_file_user(&session, &cmd).await.map(drop)
 }
 
 #[tauri::command]
@@ -958,19 +1144,13 @@ pub async fn file_change_owner(
 ) -> AppResult<()> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
-    let channel = {
-        let handle = session.handle.lock().await;
-        handle.channel_open_session().await
-            .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))?
-    };
     let cmd = format!(
         "chown {}:{} {}",
         shell_quote(&owner),
         shell_quote(&group),
         shell_quote(&remote_path)
     );
-    drain_exec(channel, &cmd).await
+    run_as_file_user(&session, &cmd).await.map(drop)
 }
 
 fn shell_quote(s: &str) -> String {
@@ -1052,26 +1232,6 @@ async fn open_exec_channel(session: &SshSession) -> AppResult<russh::Channel<rus
         .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))
 }
 
-async fn drain_exec(
-    mut channel: russh::Channel<russh::client::Msg>,
-    cmd: &str,
-) -> AppResult<()> {
-    channel.exec(true, cmd.as_bytes()).await
-        .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
-    while let Some(msg) = channel.wait().await {
-        match msg {
-            russh::ChannelMsg::ExitStatus { exit_status } => {
-                if exit_status != 0 {
-                    return Err(AppError::Other(format!("`{}` exited {}", cmd, exit_status)));
-                }
-            }
-            russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 pub fn emit_download_progress(app: &AppHandle, payload: DownloadProgress) {
     let _ = app.emit("file:download-progress", payload);
 }
@@ -1085,7 +1245,7 @@ mod tests {
     use super::{
         download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
-        own_sudo_credential, pick_sudo_password, split_remote, sudo_check_command, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
+        pick_sudo_password, saved_password_for, split_remote, sudo_check_command, sudo_extract_command, sudo_failure, transfer_files_concurrently, DirProgress,
         DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
     };
 
@@ -1228,6 +1388,106 @@ mod tests {
         exec(&dave, &format!("rm -rf -- {}", shell_quote(&staging)), None).await;
     }
 
+    /// 真实 Linux 上「文件管理跟随终端用户」：终端（带 pty 的交互 shell，同应用）里 su / sudo -i 之后，
+    /// 能识别出当前用户和切换方式，并以他的身份起 SFTP、执行命令。容器同 sudo_upload_against_real_linux，
+    /// `SSHL_SUDO_IT=127.0.0.1:2223 cargo test --lib follows_terminal_user_against_real_linux -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 SSHL_SUDO_IT=host:port 指向 sudo 测试容器"]
+    async fn follows_terminal_user_against_real_linux() {
+        use super::{exec_capture, open_sftp_as};
+        use crate::terminal_user::{parse_probe, run_as_command, terminal_user, Via, PROBE_COMMAND};
+        use tokio::io::AsyncWriteExt;
+        let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
+        let (host, port) = target.split_once(':').unwrap();
+        let port: u16 = port.parse().unwrap();
+        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+        type Ch = russh::Channel<russh::client::Msg>;
+        async fn channel(h: &H) -> Ch {
+            h.lock().await.channel_open_session().await.unwrap()
+        }
+        async fn exec(h: &H, cmd: &str, stdin: Option<&[u8]>) -> (u32, String, String) {
+            exec_capture(channel(h).await, cmd, stdin).await.unwrap()
+        }
+        async fn identify(h: &H) -> Option<(u32, Option<Via>)> {
+            let (_, out, _) = exec(h, PROBE_COMMAND, None).await;
+            parse_probe(&out).and_then(|(sshd, procs)| terminal_user(sshd, &procs))
+        }
+        // 往终端里敲一行，等输出里出现 `until`
+        async fn type_line(term: &mut Ch, line: &str, until: &str) {
+            term.data(format!("{line}\n").as_bytes()).await.unwrap();
+            let mut seen = String::new();
+            let wait = async {
+                while let Some(msg) = term.wait().await {
+                    if let russh::ChannelMsg::Data { data } = msg {
+                        seen.push_str(&String::from_utf8_lossy(&data));
+                        if seen.contains(until) {
+                            return;
+                        }
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), wait).await
+                .unwrap_or_else(|_| panic!("终端里等不到 {until:?}，已输出：{seen}"));
+        }
+        async fn sftp_err(h: &H, user: &str, via: Via, pw: Option<&str>) -> String {
+            open_sftp_as(channel(h).await, user, via, pw).await.err().expect("应当失败").to_string()
+        }
+
+        let alice = crate::ssh::do_handshake(host, port, "alice", Some("alicepw"), None, None).await.unwrap();
+        let uid_of = |name: &'static str| { let alice = alice.clone(); async move { exec(&alice, &format!("id -u {name}"), None).await.1.trim().parse::<u32>().unwrap() } };
+        let (alice_uid, bob_uid) = (uid_of("alice").await, uid_of("bob").await);
+        let mut term = channel(&alice).await;
+        term.request_pty(false, "xterm-256color", 120, 40, 0, 0, &[]).await.unwrap();
+        term.request_shell(false).await.unwrap();
+        type_line(&mut term, "echo ready", "ready").await;
+        assert_eq!(identify(&alice).await, Some((alice_uid, None)), "没切换：就是登录用户");
+
+        // su - root
+        type_line(&mut term, "su - root", "Password:").await;
+        type_line(&mut term, "rootpw", "# ").await;
+        assert_eq!(identify(&alice).await, Some((0, Some(Via::Su))));
+        type_line(&mut term, "sleep 30 &", "# ").await;
+        type_line(&mut term, "vim -u NONE /tmp/x 2>/dev/null || sleep 3", "").await;
+        assert_eq!(identify(&alice).await, Some((0, Some(Via::Su))), "root shell 里开着程序 / 后台任务也还是 root");
+        term.data(&b"\x1b:q!\n\x03"[..]).await.unwrap();
+
+        // 以 root 起 SFTP：密码错 / 没给密码在协议开始前识别，且没给密码时根本不跑 su
+        assert!(sftp_err(&alice, "root", Via::Su, Some("wrong")).await.contains("SUDO_PASSWORD_INCORRECT"));
+        assert!(sftp_err(&alice, "root", Via::Su, None).await.contains("SUDO_PASSWORD_REQUIRED"));
+        let sftp = open_sftp_as(channel(&alice).await, "root", Via::Su, Some("rootpw")).await.unwrap();
+        assert_eq!(sftp.canonicalize(".").await.unwrap(), "/root", "主目录跟着变成 root 的");
+        sftp.read_dir("/root").await.expect("能看到 root 的东西");
+        let mut f = sftp.create("/home/bob/uploads/by-root.txt").await.expect("root 能写进 bob 的目录");
+        f.write_all(b"root").await.unwrap();
+        f.shutdown().await.unwrap();
+        let (_, out, _) = exec(&alice, "stat -c %U /home/bob/uploads/by-root.txt", None).await;
+        assert_eq!(out.trim(), "root", "以 root 上传，文件归 root");
+        let (st, _, err) = exec(&alice, &run_as_command("root", Via::Su, true, "rm -f -- '/home/bob/uploads/by-root.txt'"), Some(b"rootpw\n")).await;
+        assert_eq!(st, 0, "以 root 删除：{err}");
+        assert_ne!(exec(&alice, "test -e /home/bob/uploads/by-root.txt", None).await.0, 0);
+
+        // 回到 alice，再 sudo -i（要 alice 的密码）
+        type_line(&mut term, "exit", "$ ").await;
+        assert_eq!(identify(&alice).await, Some((alice_uid, None)));
+        type_line(&mut term, "sudo -i", "password for alice").await;
+        type_line(&mut term, "alicepw", "# ").await;
+        assert_eq!(identify(&alice).await, Some((0, Some(Via::Sudo))));
+        let err = sftp_err(&alice, "root", Via::Sudo, Some("wrong")).await;
+        assert!(err.contains("SUDO_PASSWORD_INCORRECT"), "{err}");
+        let err = sftp_err(&alice, "root", Via::Sudo, None).await;
+        assert!(err.contains("SUDO_PASSWORD_REQUIRED"), "{err}");
+        let sftp = open_sftp_as(channel(&alice).await, "root", Via::Sudo, Some("alicepw")).await.unwrap();
+        assert_eq!(sftp.canonicalize(".").await.unwrap(), "/root");
+
+        // su 成普通用户 bob：以 bob 身份，主目录是 bob 的
+        type_line(&mut term, "exit", "$ ").await;
+        type_line(&mut term, "su - bob", "Password:").await;
+        type_line(&mut term, "bobpw", "$ ").await;
+        assert_eq!(identify(&alice).await, Some((bob_uid, Some(Via::Su))));
+        let sftp = open_sftp_as(channel(&alice).await, "bob", Via::Su, Some("bobpw")).await.unwrap();
+        assert_eq!(sftp.canonicalize(".").await.unwrap(), "/home/bob");
+    }
+
     #[test]
     fn splits_remote_path_into_parent_and_name() {
         assert_eq!(split_remote("/home/bob/a.txt"), Some(("/home/bob".into(), "a.txt".into())));
@@ -1238,13 +1498,16 @@ mod tests {
     }
 
     #[test]
-    fn sudo_uses_only_the_login_users_own_saved_password() {
+    fn uses_only_the_needed_users_own_saved_password() {
         let saved = |entries: &'static [&'static str]| move |_cid: &str, kind: &str| entries.contains(&kind);
-        // 连接密码就是登录用户的密码；没有时找以登录用户名保存的账号密码；别人的密码（root）一律不拿来试
-        assert_eq!(own_sudo_credential(Some("c1"), "alice", saved(&["password", "acct:alice", "acct:root"])).as_deref(), Some("password"));
-        assert_eq!(own_sudo_credential(Some("c1"), "alice", saved(&["acct:alice", "acct:root"])).as_deref(), Some("acct:alice"));
-        assert_eq!(own_sudo_credential(Some("c1"), "alice", saved(&["acct:root", "acct:bob"])), None);
-        assert_eq!(own_sudo_credential(None, "alice", saved(&["password"])), None);
+        // 登录用户 alice 自己的：连接密码，没有时找以 alice 保存的账号密码；别人的（root）不拿来试
+        assert_eq!(saved_password_for(Some("c1"), "alice", "alice", saved(&["password", "acct:alice", "acct:root"])).as_deref(), Some("password"));
+        assert_eq!(saved_password_for(Some("c1"), "alice", "alice", saved(&["acct:alice", "acct:root"])).as_deref(), Some("acct:alice"));
+        assert_eq!(saved_password_for(Some("c1"), "alice", "alice", saved(&["acct:root", "acct:bob"])), None);
+        // 终端 su 成了 root：要的是 root 的密码，连接密码（alice 的）不算
+        assert_eq!(saved_password_for(Some("c1"), "alice", "root", saved(&["password", "acct:root"])).as_deref(), Some("acct:root"));
+        assert_eq!(saved_password_for(Some("c1"), "alice", "root", saved(&["password", "acct:alice"])), None);
+        assert_eq!(saved_password_for(None, "alice", "alice", saved(&["password"])), None);
     }
 
     #[test]

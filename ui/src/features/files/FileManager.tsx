@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from 'react';
-import { ArrowDownUp, Download, FolderPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { ArrowDownUp, Download, FileText, Folder, FolderPlus, RefreshCw, Trash2, Upload, UserRound } from 'lucide-react';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
 import { Button } from '../../components/ui/button';
 import { Checkbox } from '../../components/ui/checkbox';
@@ -9,16 +10,23 @@ import { Progress } from '../../components/ui/progress';
 import { joinPath, parentPath, resolveRemoteHome, useFileList, type FileEntry, type FileKind } from './useFileList';
 import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
-import { alertDialog, confirmDialog } from '../../lib/dialogs';
+import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
+import sessionManager from '../../lib/session-manager';
+import { getFileIdentity, setFileIdentity, subscribeFileIdentity, syncFileUser } from './file-user';
+import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
+import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, type DropTarget } from './file-drag';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
 const subscribeCurrentSessionId = (callback: () => void) => subscribe('currentSessionId', callback);
 
 type AppWindow = Window & { api?: any; fileManager?: any; connectionManager?: any };
 type PaneName = 'local' | 'remote';
+type RowDrag = { pane: PaneName; items: FileEntry[]; pointerId: number; startX: number; startY: number; active: boolean };
+const DRAG_THRESHOLD = 5;
+const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 type Selected = Record<PaneName, Set<string>>;
 
 type PermissionTarget = {
@@ -83,6 +91,7 @@ export function FileManager() {
   }, []);
 
   const selectRow = useCallback((pane: PaneName, entry: FileEntry, index: number, event: ReactMouseEvent<HTMLTableRowElement>) => {
+    if (suppressClickRef.current) return;
     setSelected(current => {
       const next = new Set<string>();
       const otherPane: PaneName = pane === 'local' ? 'remote' : 'local';
@@ -121,8 +130,70 @@ export function FileManager() {
       : { ...current, [pane]: new Set([entry.path]), [pane === 'local' ? 'remote' : 'local']: new Set() });
   }, []);
 
+  // 文件管理跟随终端用户（file-user.ts）：切到文件管理 / 刷新时看终端此刻是谁，变了就切换身份并回到他的主目录。
+  const identity = useSyncExternalStore(subscribeFileIdentity, () => getFileIdentity(sessionId), () => null);
+  const syncingRef = useRef(false);
+  // 自动同步时用户取消过输密码的（会话 → 终端用户），不再每次切标签页都弹；点徽标才再问
+  const declinedRef = useRef(new Map<string, string>());
+  const syncIdentity = useCallback(async (interactive: boolean) => {
+    if (!sessionId || syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      const api = (window as AppWindow).api;
+      const connectionId = sessionManager.getSession(sessionId)?.connectionId;
+      let loginUser = '';
+      let terminalUser = '';
+      const result = await syncFileUser({
+        prompt: interactive || !declinedRef.current.has(sessionId),
+        identify: async () => {
+          const who = await api.file.terminalUser(sessionId);
+          if (!who?.success) return null;
+          loginUser = who.loginUser;
+          terminalUser = who.user;
+          if (declinedRef.current.get(sessionId) !== who.user) declinedRef.current.delete(sessionId);
+          return who;
+        },
+        switchUser: (target, secret) => api.file.switchUser(sessionId, target, secret),
+        askPassword: async (retry, exclude, context) => {
+          const saved = connectionId ? await api.cred.list(connectionId).catch(() => null) : null;
+          const choices = savedPasswordChoices(saved, context.needUser, exclude, context.loginUser);
+          const answer = await passwordDialog({
+            title: retry ? `${context.needUser} 的密码不正确` : `以 ${context.user} 身份管理文件`,
+            message: context.via === 'su'
+              ? `终端已切换到 ${context.user}，文件管理也以 ${context.user} 身份浏览、上传和下载，需要 ${context.user} 的密码。`
+              : `终端用 sudo 切换到了 ${context.user}，文件管理也以 ${context.user} 身份浏览、上传和下载，需要 ${context.loginUser} 的 sudo 密码。`,
+            placeholder: choices.length ? '或输入密码' : '输入密码',
+            confirmLabel: '切换',
+            choices,
+          });
+          return answer === null ? null : 'choice' in answer ? { credential: answer.choice } : answer;
+        },
+      });
+      if (result.fileUser) setFileIdentity(sessionId, { loginUser, fileUser: result.fileUser, terminalUser });
+      if (result.status === 'cancelled' && result.terminalUser) declinedRef.current.set(sessionId, result.terminalUser);
+      if (result.status === 'switched') {
+        declinedRef.current.delete(sessionId);
+        remote.clearCache();
+        void remote.load(await resolveRemoteHome(sessionId) || '/', true);
+      } else if (result.status === 'failed') {
+        void alertDialog({ title: `无法以 ${terminalUser} 身份管理文件`, message: sudoErrorMessage(result.error) });
+      }
+    } finally {
+      syncingRef.current = false;
+    }
+  }, [remote, sessionId]);
+  const syncIdentityRef = useRef(syncIdentity);
+  syncIdentityRef.current = syncIdentity;
+  useEffect(() => {
+    if (enabled && sessionId) void syncIdentityRef.current(false);
+  }, [enabled, sessionId]);
+
   const refreshLocal = useCallback(() => { void local.load(local.path, true); }, [local]);
-  const refreshRemote = useCallback(() => { if (sessionId) void remote.load(remote.path || '/', true); }, [remote, sessionId]);
+  const refreshRemote = useCallback(() => {
+    if (!sessionId) return;
+    void remote.load(remote.path || '/', true);
+    void syncIdentityRef.current(false);
+  }, [remote, sessionId]);
 
   const onUploadComplete = useCallback(() => {
     if (sessionId) {
@@ -136,22 +207,102 @@ export function FileManager() {
   }, [local]);
   const transfer = useTransfer(sessionId, onUploadComplete, onDownloadComplete);
 
-  const uploadItems = useCallback(async (items: FileEntry[]) => {
+  const uploadItems = useCallback(async (items: FileEntry[], directory = remote.path) => {
     if (!sessionId) return;
     for (const item of items) {
-      const destination = remote.path === '/' ? `/${basename(item.path)}` : `${remote.path}/${basename(item.path)}`;
+      const destination = joinPath(directory, basename(item.path));
       if (item.isDirectory) await transfer.uploadDirectory(item.path, destination);
       else await transfer.uploadFile(item.path, destination);
     }
   }, [remote.path, sessionId, transfer]);
 
-  const downloadItems = useCallback(async (items: FileEntry[]) => {
-    if (!sessionId || !local.path) return;
+  const downloadItems = useCallback(async (items: FileEntry[], directory = local.path) => {
+    if (!sessionId || !directory) return;
     for (const item of items) {
-      if (item.isDirectory) await transfer.downloadDirectory(item.path, joinPath(local.path, basename(item.path)));
-      else await transfer.downloadFile(item.path, joinPath(local.path, basename(item.path)));
+      if (item.isDirectory) await transfer.downloadDirectory(item.path, joinPath(directory, basename(item.path)));
+      else await transfer.downloadFile(item.path, joinPath(directory, basename(item.path)));
     }
   }, [local.path, sessionId, transfer]);
+
+  // 拖拽：两侧互拖 = 上传 / 下载（指针事件），从 Finder 拖进远程 = 上传（Tauri 拖放事件，带本地路径）。见 file-drag.ts。
+  const rowDragRef = useRef<RowDrag | null>(null);
+  const suppressClickRef = useRef(false);
+  const [rowDrag, setRowDrag] = useState<{ pane: PaneName; items: FileEntry[]; x: number; y: number; target: DropTarget | null } | null>(null);
+  const [finderTarget, setFinderTarget] = useState<DropTarget | null>(null);
+  const dragContext = useRef({ dirs: { local: local.path, remote: remote.path }, sessionId, uploadItems, downloadItems, transfer });
+  dragContext.current = { dirs: { local: local.path, remote: remote.path }, sessionId, uploadItems, downloadItems, transfer };
+
+  const beginRowDrag = useCallback((pane: PaneName, entry: FileEntry, event: ReactPointerEvent<HTMLTableRowElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || !sessionId) return;
+    const items = dragItems(entry, selected[pane], pane === 'local' ? local.files : remote.files);
+    if (!items.length) return;
+    rowDragRef.current = { pane, items, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+  }, [local.files, remote.files, selected, sessionId]);
+
+  useEffect(() => {
+    const targetAt = (x: number, y: number) => dropTargetFrom(document.elementFromPoint(x, y));
+    const move = (event: PointerEvent) => {
+      const drag = rowDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      // 阈值之下算点击，轻碰一下不进入拖拽
+      if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD) return;
+      drag.active = true;
+      event.preventDefault();
+      const target = targetAt(event.clientX, event.clientY);
+      const ok = planDrop(drag.pane, target, dragContext.current.dirs);
+      setRowDrag({ pane: drag.pane, items: drag.items, x: event.clientX, y: event.clientY, target: ok ? target : null });
+    };
+    // 收尾挂 window：指针可能在面板外松开
+    const finish = (event: PointerEvent) => {
+      const drag = rowDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      rowDragRef.current = null;
+      setRowDrag(null);
+      if (!drag.active || event.type === 'pointercancel') return;
+      // 拖完松手别再当成点了一下这一行
+      suppressClickRef.current = true;
+      setTimeout(() => { suppressClickRef.current = false; }, 0);
+      const action = planDrop(drag.pane, targetAt(event.clientX, event.clientY), dragContext.current.dirs);
+      if (action?.kind === 'upload') void dragContext.current.uploadItems(drag.items, action.directory);
+      else if (action?.kind === 'download') void dragContext.current.downloadItems(drag.items, action.directory);
+    };
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', finish, true);
+    window.addEventListener('pointercancel', finish, true);
+    return () => {
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', finish, true);
+      window.removeEventListener('pointercancel', finish, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let stop: (() => void) | null = null;
+    let disposed = false;
+    const targetAt = (position: { x: number; y: number }) => {
+      const point = dropPointToCss(position, IS_MAC, window.devicePixelRatio || 1);
+      const target = dropTargetFrom(document.elementFromPoint(point.x, point.y));
+      const action = dragContext.current.sessionId ? planDrop('finder', target, dragContext.current.dirs) : null;
+      return { target: action ? target : null, action };
+    };
+    void getCurrentWebview().onDragDropEvent(async event => {
+      const payload = event.payload;
+      if (payload.type === 'leave') { setFinderTarget(null); return; }
+      const { target, action } = targetAt(payload.position);
+      if (payload.type !== 'drop') { setFinderTarget(target); return; }
+      setFinderTarget(null);
+      if (!action || !payload.paths.length) return;
+      const kinds: boolean[] = await (window as AppWindow).api.file.localKinds(payload.paths).catch(() => payload.paths.map(() => false));
+      const { transfer: current } = dragContext.current;
+      for (const [index, localPath] of payload.paths.entries()) {
+        const destination = joinPath(action.directory, basename(localPath));
+        if (kinds[index]) await current.uploadDirectory(localPath, destination);
+        else await current.uploadFile(localPath, destination);
+      }
+    }).then(unlisten => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
+    return () => { disposed = true; stop?.(); setFinderTarget(null); };
+  }, [enabled]);
 
   const deleteItems = useCallback(async (pane: PaneName, items: FileEntry[]) => {
     if (!items.length) return;
@@ -159,7 +310,8 @@ export function FileManager() {
 
     if (pane === 'remote') {
       for (const command of remoteDeleteCommands(items.map(item => item.path))) {
-        const result = await (window as AppWindow).api.ssh.execute(sessionId, command);
+        // 以文件管理当前身份删除（终端切成 root 后就以 root 删）
+        const result = await (window as AppWindow).api.file.shell(sessionId, command);
         if (!result?.success) void alertDialog({ title: '删除失败', message: result?.error || '未知错误' });
       }
       remote.invalidate(remote.path, sessionId);
@@ -348,6 +500,9 @@ export function FileManager() {
             onContextTarget={entry => ensureContextSelection('local', entry)}
             onSelectAll={() => selectAll('local')}
             onClearSelection={() => clearSelection('local')}
+            onRowPointerDown={(entry, event) => beginRowDrag('local', entry, event)}
+            dropActive={rowDrag?.target?.pane === 'local'}
+            dropDirectory={rowDrag?.target?.directory}
           />
         </div>
         <div id="pane-divider" className="w-2.5 shrink-0 cursor-col-resize rounded-full transition-colors hover:bg-primary/15" title="拖动调整面板宽度" />
@@ -383,9 +538,34 @@ export function FileManager() {
             onPermission={openPermissions}
             onSelectAll={() => selectAll('remote')}
             onClearSelection={() => clearSelection('remote')}
+            onRowPointerDown={(entry, event) => beginRowDrag('remote', entry, event)}
+            dropActive={rowDrag?.target?.pane === 'remote' || finderTarget?.pane === 'remote'}
+            dropDirectory={(rowDrag?.target ?? finderTarget)?.directory}
+            badge={sessionId && identity && (identity.fileUser !== identity.loginUser ? (
+              <span className="flex h-6 shrink-0 items-center gap-1 rounded-md bg-primary/10 px-2 text-xs font-medium text-primary" title={`文件管理以 ${identity.fileUser} 身份运行（跟随终端）`}>
+                <UserRound className="h-3.5 w-3.5" />{identity.fileUser}
+              </span>
+            ) : identity.terminalUser && identity.terminalUser !== identity.fileUser ? (
+              <button type="button" className="flex h-6 shrink-0 items-center gap-1 rounded-md border border-border px-2 text-xs text-muted-foreground hover:bg-muted" title={`终端当前是 ${identity.terminalUser}，点击让文件管理也切过去`} onClick={() => void syncIdentity(true)}>
+                <UserRound className="h-3.5 w-3.5" />切到 {identity.terminalUser}
+              </button>
+            ) : null)}
           />
         </div>
       </div>
+
+      {/* 拖拽中跟着指针的提示：拖了什么、松手会传到哪 */}
+      {rowDrag && (
+        <div className="pointer-events-none fixed z-50 flex max-w-80 items-center gap-1.5 rounded-lg border border-border bg-popover px-2.5 py-1.5 text-xs text-popover-foreground shadow-lg" style={{ left: rowDrag.x + 14, top: rowDrag.y + 14 }}>
+          {rowDrag.items.length === 1 && !rowDrag.items[0].isDirectory ? <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <Folder className="h-3.5 w-3.5 shrink-0 text-primary" />}
+          <span className="truncate font-medium">{dragLabel(rowDrag.items)}</span>
+          {rowDrag.target && (
+            <span className="shrink-0 text-muted-foreground">
+              {rowDrag.pane === 'local' ? '上传到' : '下载到'} {basename(rowDrag.target.directory || (rowDrag.target.pane === 'remote' ? remote.path : local.path)) || '/'}
+            </span>
+          )}
+        </div>
+      )}
 
       {transfer.status.active && (
         <div className="flex h-11 shrink-0 items-center gap-3 rounded-xl border border-border bg-card px-3.5 text-xs">
