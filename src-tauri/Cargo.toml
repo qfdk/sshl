@@ -48,6 +48,10 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+# tokio::time::pause：SFTP 卡死检测的单元测试用虚拟时钟
+tokio = { version = "1", features = ["test-util"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSUserDefaults", "NSString", "NSDictionary"] }
