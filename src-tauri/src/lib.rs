@@ -255,8 +255,8 @@ async fn maintain_warm_pool(app: &tauri::AppHandle, failed_at: &mut HashMap<Stri
         tracing::info!("warm pool: dropped {} closed or deleted connection(s)", evicted.len());
     }
     for warm in evicted {
-        let h = warm.handle.lock().await;
-        let _ = h
+        let _ = warm
+            .handle
             .disconnect(russh::Disconnect::ByApplication, "warm pool evicted", "en")
             .await;
     }

@@ -81,8 +81,9 @@ pub struct SshSession {
     /// host:port:user —— 预热池据此跳过已有会话的主机（见 AppState::active_warm_keys）。
     pub warm_key: String,
     pub buffer: Mutex<String>,
-    /// Shared SSH handle — locked briefly when opening new channels (SFTP).
-    pub handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    /// Shared SSH handle（shell / SFTP / exec 共用）。认证之后用到的 is_closed、channel_open_session、
+    /// disconnect 都是 &self、各等各的通道确认，不加锁：加锁会把同一会话上的开通道串行化。
+    pub handle: Arc<russh::client::Handle<ClientHandler>>,
     /// Cached SFTP session — reused across file ops to avoid sshd MaxSessions exhaustion.
     /// Mirrors the Electron-side fix from commits 8cb552c / a819e15.
     pub sftp: Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
@@ -195,10 +196,9 @@ async fn connect_tcp(addr: &str) -> AppResult<TcpStream> {
 }
 
 async fn open_session_channel(
-    handle: &Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    handle: &russh::client::Handle<ClientHandler>,
     timeout: Duration,
 ) -> AppResult<russh::Channel<russh::client::Msg>> {
-    let handle = handle.lock().await;
     if handle.is_closed() {
         return Err(AppError::Ssh("ssh transport is closed".into()));
     }
@@ -213,8 +213,8 @@ async fn open_session_channel(
     }
 }
 
-/// TCP + SSH handshake + auth. Returns the russh Handle wrapped in Arc<Mutex<>>
-/// so it can be shared between the shell pump, SFTP channel, and warm pool.
+/// TCP + SSH handshake + auth. Returns the russh Handle wrapped in Arc so it can be shared
+/// between the shell pump, SFTP channel, and warm pool. 只有认证要 &mut，在这里就做完了。
 pub(crate) async fn do_handshake(
     host: &str,
     port: u16,
@@ -222,7 +222,7 @@ pub(crate) async fn do_handshake(
     password: Option<&str>,
     private_key: Option<&str>,
     passphrase: Option<&str>,
-) -> AppResult<Arc<Mutex<russh::client::Handle<ClientHandler>>>> {
+) -> AppResult<Arc<russh::client::Handle<ClientHandler>>> {
     let addr = format!("{}:{}", host, port);
     let tcp = connect_tcp(&addr).await?;
     tcp.set_nodelay(true).ok();
@@ -258,7 +258,7 @@ pub(crate) async fn do_handshake(
     if !authed {
         return Err(AppError::Ssh("authentication rejected".into()));
     }
-    Ok(Arc::new(Mutex::new(handle)))
+    Ok(Arc::new(handle))
 }
 
 pub struct ClientHandler {
@@ -457,24 +457,17 @@ pub async fn ssh_cancel_connect(
 
 async fn validate_session(session: &SshSession) -> bool {
     let probe = async {
-        let channel_result = {
-            let handle = session.handle.lock().await;
-            if handle.is_closed() {
-                return false;
-            }
-            handle.channel_open_session().await
-        };
+        if session.handle.is_closed() {
+            return false;
+        }
 
-        match channel_result {
+        match session.handle.channel_open_session().await {
             Ok(channel) => {
                 let _ = channel.close().await;
                 true
             }
             Err(error) => {
-                let transport_open = {
-                    let handle = session.handle.lock().await;
-                    !handle.is_closed()
-                };
+                let transport_open = !session.handle.is_closed();
                 if transport_open {
                     tracing::warn!("session probe rejected by live server: {error}");
                 }
@@ -642,10 +635,7 @@ async fn run_channel(
         emit_data(&app, &session_id, &pending);
     }
 
-    {
-        let h = session.handle.lock().await;
-        let _ = h.disconnect(russh::Disconnect::ByApplication, "client closed", "en").await;
-    }
+    let _ = session.handle.disconnect(russh::Disconnect::ByApplication, "client closed", "en").await;
     // 退出路径（含 server EOF / exit 命令）也要从 AppState 移除，否则死 session
     // 连同 Arc handle、缓存的 SFTP / passwd / group map 永久泄漏在 sessions map 里。
     // 主动 ssh_disconnect 已先 remove 过，这里 remove 是幂等的 no-op。
@@ -727,13 +717,8 @@ pub async fn ssh_execute(
 ) -> AppResult<String> {
     let session = state.get(&session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-    // Handle 锁只覆盖开通道。命令执行 + 读输出可能持续数秒（rm -rf 大目录），
-    // 期间占锁会让其它开通道的操作全部排队，validate 探测 2s 超时还会把正常会话误判为失效。
-    let mut channel = {
-        let handle = session.handle.lock().await;
-        handle.channel_open_session().await
-            .map_err(|e| AppError::Ssh(format!("open exec channel: {e}")))?
-    };
+    let mut channel = session.handle.channel_open_session().await
+        .map_err(|e| AppError::Ssh(format!("open exec channel: {e}")))?;
     channel.exec(true, command.as_bytes()).await
         .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
     let mut out = Vec::new();

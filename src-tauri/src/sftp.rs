@@ -93,7 +93,7 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<SftpSession>> {
             return Ok(s.clone());
         }
     }
-    // Open new SFTP subsystem channel and cache it. Handle 锁只覆盖开通道（同 ssh_execute）。
+    // Open new SFTP subsystem channel and cache it.
     let channel = open_exec_channel(session).await?;
     let elevation = session.elevation.lock().await.clone();
     let sftp = match elevation {
@@ -1226,9 +1226,7 @@ async fn exec_capture(
 }
 
 async fn open_exec_channel(session: &SshSession) -> AppResult<russh::Channel<russh::client::Msg>> {
-    // Handle 锁只覆盖开通道，命令执行期间不占锁（同 ssh_execute）。
-    let handle = session.handle.lock().await;
-    handle.channel_open_session().await
+    session.handle.channel_open_session().await
         .map_err(|e| AppError::Sftp(format!("open exec channel: {e}")))
 }
 
@@ -1325,9 +1323,9 @@ mod tests {
         let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
         let port: u16 = port.parse().unwrap();
-        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+        type H = std::sync::Arc<russh::client::Handle<crate::ssh::ClientHandler>>;
         async fn exec(h: &H, cmd: &str, stdin: Option<&[u8]>) -> (u32, String, String) {
-            let ch = h.lock().await.channel_open_session().await.unwrap();
+            let ch = h.channel_open_session().await.unwrap();
             exec_capture(ch, cmd, stdin).await.unwrap()
         }
         async fn stage(h: &H) -> String {
@@ -1400,10 +1398,10 @@ mod tests {
         let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
         let port: u16 = port.parse().unwrap();
-        type H = std::sync::Arc<tokio::sync::Mutex<russh::client::Handle<crate::ssh::ClientHandler>>>;
+        type H = std::sync::Arc<russh::client::Handle<crate::ssh::ClientHandler>>;
         type Ch = russh::Channel<russh::client::Msg>;
         async fn channel(h: &H) -> Ch {
-            h.lock().await.channel_open_session().await.unwrap()
+            h.channel_open_session().await.unwrap()
         }
         async fn exec(h: &H, cmd: &str, stdin: Option<&[u8]>) -> (u32, String, String) {
             exec_capture(channel(h).await, cmd, stdin).await.unwrap()
