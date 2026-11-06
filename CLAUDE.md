@@ -44,7 +44,11 @@ pnpm build             # Tauri application build
   renderer has acked. Every `ssh:data` carries `bytes`; it must reach xterm through `flowAck.deliver`
   (`ui/src/lib/flow-ack.ts`), which acks via `ssh_ack_data` once xterm has parsed it. Dropping that path
   freezes the terminal after 2MB of output. Other channels (SFTP, exec, probes) keep russh's auto window
-  (`CONNECTION_WINDOW` in `ssh.rs`, 8MB; SFTP download segments / in-flight / timeout are derived from it in `sftp.rs`).
+  (`CONNECTION_WINDOW` in `ssh.rs`, 8MB; SFTP download segments / in-flight bytes are derived from it in `sftp.rs`).
+- **SFTP timeouts** — no per-request deadline that a slow link can trip: `sftp_stall.rs` wraps the channel and
+  fails every waiting request only when nothing at all has arrived for `SFTP_STALL` (60s); `sftp_for` then reopens
+  the session with the same identity. Downloads write `.<name>.<rand>.sshl-part` next to the target and rename
+  on success, so a failure never leaves a truncated file or clobbers the existing one.
 - **Warm pool** is backend-owned. The frontend makes no prewarm call.
 - **Window reveal** — the main window is built in `create_main_window` (`src-tauri/src/lib.rs`,
   `create: false` in tauri.conf.json) at the screen work area, not via `maximized` (tao's async
