@@ -27,5 +27,5 @@ keepalive 全停（实测渲染端卡住时开通道 5s 超时）。上游 0.65 
 
 重新拉对应版本源码，按 `russh-manual-window.patch` 的意图移植（0.65 的对应位置：
 `session.rs` `adjust_window_size`、`client/encrypted.rs` CHANNEL_DATA 分支、`client/mod.rs`
-`handle_msg`），再跑 `src-tauri/src/ssh.rs` 里的 `terminal_flow_against_real_sshd` 集成测试。
+`handle_msg`），再跑 `src-tauri/src/ssh.rs` 里的 `terminal_window_against_real_sshd` 集成测试。
 vendor 之后拿不到 0.45.x 的补丁版本，安全公告需自行关注。

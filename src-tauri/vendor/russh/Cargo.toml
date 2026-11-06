@@ -209,3 +209,7 @@ vendored-openssl = [
     "openssl/vendored",
     "russh-keys/vendored-openssl",
 ]
+
+# 上游 0.45.0 自带一处 dead_code（auth.rs 的 key/algo 字段），与补丁无关；path 依赖不受 cap-lints 保护，这里静音
+[lints.rust]
+dead_code = "allow"
