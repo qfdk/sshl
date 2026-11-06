@@ -47,6 +47,17 @@ pnpm build             # Tauri application build
   otherwise the window only appears at the 3s fallback. Do not hide the window instead: a hidden
   WKWebView does not paint or fire rAF, so it would reveal a blank frame.
 - **SFTP channel reuse** — one cached SFTP session is shared per SSH session.
+- **File manager follows the terminal user** — after `su` / `sudo -i` in the terminal, the file
+  manager runs as that user (`ui/src/features/files/file-user.ts`, `src-tauri/src/terminal_user.rs`).
+  `file_switch_user` replaces the cached SFTP session with an `sftp-server` started via su/sudo;
+  `sftp_for` reopens it with the same identity. Remote shell-based file ops (delete, chmod, chown)
+  must go through `exec_as_file_user` / `file_shell`, not a plain exec or `ssh_execute`. Only the
+  needed user's own saved password is used automatically; never try other saved passwords.
+  On any failure before SFTP starts, EOF + close the channel (russh does not close on drop, and a
+  waiting `sudo` holds the user's timestamp lock).
+- **Drag and drop** — Tauri's drag-drop handler is on (Finder drops need local paths) and swallows
+  WKWebView drag callbacks, so in-page HTML5 drop events never fire. Drags inside the app use
+  pointer events (`file-drag.ts`, session tabs, connection tree).
 - **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` keeps CanvasAddon after
   `term.open()`, Unicode11 registration, bottom alignment, ANSI background sampling, and
   PTY resize synchronization. Do not reorder those paths.

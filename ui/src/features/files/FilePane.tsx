@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode, type UIEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode, type UIEvent } from 'react';
 import { ArrowUp, ChevronRight, FileText, Folder, FolderOpen, House, LoaderCircle, RefreshCw } from 'lucide-react';
 import {
   ContextMenu,
@@ -10,7 +10,7 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../components/ui/table';
 import { cn } from '../../lib/utils';
-import { formatDate, formatFileSize, formatPermissions, type FileEntry, type FileKind, isRootPath } from './useFileList';
+import { formatDate, formatFileSize, formatPermissions, parentPath, type FileEntry, type FileKind, isRootPath } from './useFileList';
 import { matchDirectories, splitCompletionPath, tabCompletion } from './path-completion';
 import { isClearSelectionKey, isSelectAllShortcut } from './shortcuts';
 import { visibleRowWindow } from './virtual-rows';
@@ -53,6 +53,13 @@ export type FilePaneProps = {
   onPermission?: (entry: FileEntry) => void;
   onSelectAll?: () => void;
   onClearSelection?: () => void;
+  /** 标题旁的标记（远程：文件管理当前以谁的身份运行）。 */
+  badge?: ReactNode;
+  /** 按下某一行（可能开始拖拽）。 */
+  onRowPointerDown?: (entry: FileEntry, event: PointerEvent<HTMLTableRowElement>) => void;
+  /** 拖拽悬停在这一侧上：整块高亮；落在某个文件夹行上时那一行也高亮。 */
+  dropActive?: boolean;
+  dropDirectory?: string | null;
 };
 
 export function FilePane({
@@ -76,6 +83,10 @@ export function FilePane({
   onPermission,
   onSelectAll,
   onClearSelection,
+  badge,
+  onRowPointerDown,
+  dropActive = false,
+  dropDirectory = null,
 }: FilePaneProps) {
   const suggestionListId = useId();
   const suggestionListRef = useRef<HTMLDivElement>(null);
@@ -161,9 +172,10 @@ export function FilePane({
     : { start: 0, end: rows.length, padTop: 0, padBottom: 0 };
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-border bg-card shadow-[0_1px_2px_rgba(22,24,29,0.06),0_8px_24px_rgba(22,24,29,0.06)]">
+    <section className={cn('flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-border bg-card shadow-[0_1px_2px_rgba(22,24,29,0.06),0_8px_24px_rgba(22,24,29,0.06)] transition-shadow', dropActive && 'border-primary ring-2 ring-primary/30')}>
       <header className="flex items-center gap-1.5 px-3.5 pb-2.5 pt-3">
         <span className="mr-1 shrink-0 text-sm font-semibold">{isRemote ? '远程文件' : '本地文件'}</span>
+        {badge}
         <div className="relative min-w-0 flex-1">
           <Input
             value={path}
@@ -303,12 +315,16 @@ export function FilePane({
                     {rows.slice(range.start, range.end).map(entry => {
                       const selected = selectedPaths.has(entry.path);
                       const parent = entry.name === '..';
+                      // 文件夹行（含「..」= 上级）可作拖放目标
+                      const directory = parent ? parentPath(path, kind) : entry.isDirectory ? entry.path : undefined;
                       return (
                         <TableRow
                           key={parent ? '..' : entry.path}
                           data-state={selected ? 'selected' : undefined}
+                          data-file-dir={directory}
                           style={{ height: ROW_HEIGHT }}
-                          className={cn('cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent')}
+                          className={cn('cursor-pointer', selected && 'bg-accent text-accent-foreground hover:bg-accent', dropActive && directory && directory === dropDirectory && 'bg-primary/15 hover:bg-primary/15')}
+                          onPointerDown={event => onRowPointerDown?.(entry, event)}
                           // 阻止默认行为避免拖选文字，但焦点要交给列表，否则会留在终端里、收不到 Cmd+A。
                           onMouseDown={event => {
                             event.preventDefault();

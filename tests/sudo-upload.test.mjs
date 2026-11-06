@@ -20,12 +20,13 @@ test('后端 sudo 失败标记 → 前端分类', () => {
 
 function harness({ normal, sudoResults, confirm = true, passwords = [], own = null }) {
   const calls = { sudo: [], confirm: 0, ask: [], exclude: [] };
-  const run = () => uploadWithSudoFallback({
+  const run = (extra = {}) => uploadWithSudoFallback({
     normal: async () => normal,
     sudo: async password => { calls.sudo.push(password); return sudoResults.shift(); },
     confirm: async () => { calls.confirm += 1; return confirm; },
     ownPassword: async () => own,
     askPassword: async (retry, exclude) => { calls.ask.push(retry); calls.exclude.push([...exclude]); return passwords.length ? passwords.shift() : null; },
+    ...extra,
   });
   return { run, calls };
 }
@@ -133,4 +134,15 @@ test('弹框里的已保存密码：当前用户自己的排前面，试错的�
   ]);
   assert.deepEqual(savedPasswordChoices(saved, 'alice', ['password', 'acct:root']).map(c => c.value), ['acct:alice', 'acct:deploy']);
   assert.deepEqual(savedPasswordChoices(null, 'alice', []), []);
+});
+
+test('切到别的用户时：要他的密码，他名下的排前面，连接密码（登录用户的）排后面', () => {
+  const saved = { hasPassword: true, accounts: ['deploy', 'root'] };
+  assert.deepEqual(savedPasswordChoices(saved, 'root', [], 'alice').map(c => c.value), ['acct:root', 'password', 'acct:deploy']);
+});
+
+test('终端已切成别的用户（文件管理以他身份运行）时不走 sudo 兜底', async () => {
+  const { run, calls } = harness({ normal: denied, sudoResults: [] });
+  assert.deepEqual(await run({ elevated: true }), denied);
+  assert.equal(calls.confirm, 0);
 });

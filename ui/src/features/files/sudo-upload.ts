@@ -1,9 +1,7 @@
 // 上传到登录用户无权写入的目录（如别的用户的家目录）时的 sudo 兜底。
-// 普通 SFTP 上传报 Permission denied → 问用户是否用 sudo → 后端 file_upload_sudo（暂存 + sudo 以目录属主身份解包）。
-// sudo 只认登录用户自己的密码：先问后端当前用户是谁、有没有保存他自己的密码，有就只用这一份，
-// 没有走免密 sudo。不拿别的已保存密码挨个试（试错会记进服务器认证日志、可能触发锁定）。
-// 不行再弹框：用户可点选已保存的密码（只传标识，后端解密，不经过界面）或手动输入；
-// 试错的已保存密码不再列出，最多再问三次。
+// 文件管理以登录用户身份运行时（终端没切换用户），普通上传报 Permission denied → 问是否用 sudo →
+// 后端 file_upload_sudo（暂存 + sudo 以目录属主身份解包）。sudo 只认登录用户自己的密码（retryWithPassword）。
+// 终端切换了用户时文件管理整个以那个用户身份运行（见 file-user.ts），不走这里的兜底。
 
 export type UploadResult = { success: boolean; error?: string; cancelled?: boolean } | null | undefined;
 export type SudoFailure = 'password-required' | 'password-incorrect' | 'not-allowed' | 'other';
@@ -36,40 +34,54 @@ export function sudoErrorMessage(error: string | undefined) {
   }
 }
 
-/** 弹框里可点选的已保存密码：连接密码、当前用户名下的账号密码排前面，已试错的不列。 */
-export function savedPasswordChoices(saved: { hasPassword?: boolean; accounts?: string[] } | null | undefined, user: string, exclude: string[]) {
-  const accounts = [...(saved?.accounts || [])].sort((a, b) => Number(b === user) - Number(a === user));
-  return [
-    ...(saved?.hasPassword ? [{ value: 'password', label: '连接密码' }] : []),
-    ...accounts.map(account => ({ value: `acct:${account}`, label: account })),
-  ].filter(choice => !exclude.includes(choice.value));
+/** 弹框里可点选的已保存密码：要谁的密码（needUser），他名下的排前面；连接密码属于登录用户；已试错的不列。 */
+export function savedPasswordChoices(saved: { hasPassword?: boolean; accounts?: string[] } | null | undefined, needUser: string, exclude: string[], loginUser = needUser) {
+  const all = [
+    ...(saved?.hasPassword ? [{ value: 'password', label: '连接密码', owner: loginUser }] : []),
+    ...(saved?.accounts || []).map(account => ({ value: `acct:${account}`, label: account, owner: account })),
+  ];
+  return [...all.filter(c => c.owner === needUser), ...all.filter(c => c.owner !== needUser)]
+    .filter(choice => !exclude.includes(choice.value))
+    .map(({ value, label }) => ({ value, label }));
 }
 
-export async function uploadWithSudoFallback({ normal, sudo, confirm, ownPassword, askPassword }: {
-  normal: () => Promise<UploadResult>;
-  sudo: (secret: SudoSecret | null) => Promise<UploadResult>;
-  confirm: () => Promise<boolean>;
-  /** 当前登录用户自己的已保存密码标识（没有为 null）。 */
-  ownPassword: () => Promise<string | null>;
-  /** exclude：已试过且不对的已保存密码标识，弹框里不再列出。 */
-  askPassword: (retry: boolean, exclude: string[]) => Promise<SudoSecret | null>;
-}): Promise<UploadResult> {
-  const first = await normal();
-  if (first?.success || !isPermissionDenied(first?.error)) return first;
-  if (!await confirm()) return { success: false, cancelled: true };
-
+/**
+ * 先用当前要的那位用户自己的已保存密码（own，没有就不带密码），要密码 / 密码错再弹框，最多再问三次。
+ * 不拿别的已保存密码挨个试：试错会记进服务器认证日志、可能触发锁定。
+ */
+export async function retryWithPassword(
+  run: (secret: SudoSecret | null) => Promise<UploadResult>,
+  own: string | null,
+  askPassword: (retry: boolean, exclude: string[]) => Promise<SudoSecret | null>,
+): Promise<UploadResult> {
   const failed: string[] = [];
-  const own = await ownPassword();
   let secret: SudoSecret | null = own ? { credential: own } : null;
-  let result = await sudo(secret);
+  let result = await run(secret);
   for (let attempt = 0; attempt < MAX_PASSWORD_ATTEMPTS && !result?.success; attempt++) {
     const failure = sudoFailure(result?.error);
     if (failure !== 'password-required' && failure !== 'password-incorrect') break;
     const tried = secret && 'credential' in secret ? secret.credential : null;
     if (failure === 'password-incorrect' && tried) failed.push(tried);
-    secret = await askPassword(failure === 'password-incorrect', failed);
+    secret = await askPassword(failure === 'password-incorrect', [...failed]);
     if (secret === null) return { success: false, cancelled: true };
-    result = await sudo(secret);
+    result = await run(secret);
   }
   return result;
+}
+
+export async function uploadWithSudoFallback({ normal, sudo, confirm, ownPassword, askPassword, elevated = false }: {
+  normal: () => Promise<UploadResult>;
+  sudo: (secret: SudoSecret | null) => Promise<UploadResult>;
+  confirm: () => Promise<boolean>;
+  /** 登录用户自己的已保存密码标识（没有为 null）。 */
+  ownPassword: () => Promise<string | null>;
+  /** exclude：已试过且不对的已保存密码标识，弹框里不再列出。 */
+  askPassword: (retry: boolean, exclude: string[]) => Promise<SudoSecret | null>;
+  /** 文件管理已跟随终端切到别的用户：权限问题就是那个用户的，不再用登录用户的 sudo 兜底。 */
+  elevated?: boolean;
+}): Promise<UploadResult> {
+  const first = await normal();
+  if (elevated || first?.success || !isPermissionDenied(first?.error)) return first;
+  if (!await confirm()) return { success: false, cancelled: true };
+  return retryWithPassword(sudo, await ownPassword(), askPassword);
 }

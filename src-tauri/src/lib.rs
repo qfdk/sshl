@@ -7,6 +7,7 @@ mod sftp;
 mod ssh;
 mod state;
 mod system_fonts;
+mod terminal_user;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -72,6 +73,9 @@ pub fn run() {
             sftp::file_upload,
             sftp::file_upload_sudo,
             sftp::file_sudo_identity,
+            sftp::file_terminal_user,
+            sftp::file_switch_user,
+            sftp::file_shell,
             sftp::file_download,
             sftp::file_create_remote_directory,
             sftp::file_upload_directory,
@@ -81,6 +85,7 @@ pub fn run() {
             // local fs
             local_fs::file_get_home_dir,
             local_fs::file_list_local,
+            local_fs::file_local_kinds,
             local_fs::file_delete_local,
             local_fs::file_delete_local_directory,
             // config
