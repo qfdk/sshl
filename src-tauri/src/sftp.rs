@@ -790,7 +790,25 @@ impl PartFile {
         }
     }
 
+    /// 下完换成最终名。覆盖已有文件时沿用它的权限位（可执行脚本不丢 +x）；目标是符号链接时照旧写进链接指向的文件，
+    /// 不把链接本身换成普通文件——指向的文件可能在别的目录 / 卷上，rename 不过去，只能拷进去（这一步非原子，同改动前）。
     async fn commit(mut self, target: &Path) -> AppResult<()> {
+        match tokio::fs::symlink_metadata(target).await {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                use tokio::io::AsyncWriteExt;
+                let mut src = tokio::fs::File::open(&self.path).await?;
+                // 不用 fs::copy：它会把临时文件的权限也拷到目标上
+                let mut dst = tokio::fs::OpenOptions::new().write(true).create(true).truncate(true).open(target).await?;
+                tokio::io::copy(&mut src, &mut dst).await?;
+                dst.flush().await?;
+                // 临时文件交给 Drop 删
+                return Ok(());
+            }
+            Ok(meta) => {
+                let _ = tokio::fs::set_permissions(&self.path, meta.permissions()).await;
+            }
+            Err(_) => {}
+        }
         tokio::fs::rename(&self.path, target).await?;
         self.committed = true;
         Ok(())
@@ -2978,6 +2996,41 @@ mod tests {
             assert_eq!(dir_names(&dir), ["large", "small"]);
             assert!(std::fs::read(dir.join("small")).unwrap() == small);
             assert!(std::fs::read(dir.join("large")).unwrap() == large);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 覆盖已有文件时沿用它的权限位（如可执行脚本的 +x）；目标是符号链接时写进链接指向的文件，链接本身保持不变。
+        #[tokio::test]
+        async fn overwrite_keeps_permissions_and_writes_through_symlinks() {
+            use std::os::unix::fs::PermissionsExt;
+            let small = pattern(3 * TRANSFER_CHUNK + 5);
+            let large = pattern(3 * SEGMENTED_DOWNLOAD_MIN as usize + 7);
+            let sftp = serve(vec![("/small", small.clone(), None), ("/large", large.clone(), None)]).await;
+            let dir = local_dir();
+            for name in ["small", "large"] {
+                std::fs::write(dir.join(name), b"old").unwrap();
+                std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o751)).unwrap();
+            }
+            download_small(&sftp, "/small", &dir.join("small"), |_| {}).await.unwrap();
+            download_large(&sftp, "/large", &dir.join("large"), large.len() as u64, |_| {}).await.unwrap();
+            for name in ["small", "large"] {
+                assert_eq!(std::fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o777, 0o751, "{name} 的权限被换掉了");
+            }
+
+            let real = dir.join("real");
+            std::fs::create_dir(&real).unwrap();
+            for name in ["small", "large"] {
+                std::fs::write(real.join(name), b"old").unwrap();
+                std::fs::remove_file(dir.join(name)).unwrap();
+                std::os::unix::fs::symlink(real.join(name), dir.join(name)).unwrap();
+            }
+            download_small(&sftp, "/small", &dir.join("small"), |_| {}).await.unwrap();
+            download_large(&sftp, "/large", &dir.join("large"), large.len() as u64, |_| {}).await.unwrap();
+            for (name, want) in [("small", &small), ("large", &large)] {
+                assert!(std::fs::symlink_metadata(dir.join(name)).unwrap().file_type().is_symlink(), "{name} 的链接被换成了普通文件");
+                assert!(std::fs::read(real.join(name)).unwrap() == *want, "{name} 没写进链接指向的文件");
+            }
+            assert_eq!(dir_names(&dir), ["large", "real", "small"], "不留临时文件");
             std::fs::remove_dir_all(&dir).unwrap();
         }
 
