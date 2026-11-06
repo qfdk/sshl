@@ -26,21 +26,27 @@ use crate::state::AppState;
 /// 单次 SFTP 读/写的块大小 = OpenSSH sftp-server 的 max-read/write-length（256KiB − 1KiB），
 /// 每块恰好一个 SFTP 请求。russh-sftp 的读是一问一答（等到回复才发下一个 READ），
 /// 吞吐 ≈ 块大小 / RTT：64KB 时 50ms RTT 下只有 ~1.3MB/s。写有 8 路 pipeline，
-/// 块越大在途数据越多（8 × 255KB ≈ SSH 默认 2MB 窗口）。
+/// 块越大在途数据越多（8 × 255KB ≈ 服务端给的 2MB 通道窗口）。
 const TRANSFER_CHUNK: usize = 255 * 1024;
 
 /// 符号链接 STAT 的并发度。每个 STAT 一个 RTT，russh-sftp 按请求 id 分发响应，可并发；
 /// 串行时 /usr/lib 这类几百个 .so 链接的目录要几百个 RTT。
 const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
-/// 一条 SFTP 通道上同时在途的数据上限 ≈ SSH 默认通道窗口（russh 2MB）：再多也只是在窗口外排队，
-/// 还让排在后面的请求（OPEN / CLOSE / READ 的回复）更晚才到，慢链路上撞 SFTP 请求超时（见 new_sftp）。
-const IN_FLIGHT_BYTES: u64 = 8 * TRANSFER_CHUNK as u64;
+/// 上传时一条 SFTP 通道上同时在途的数据上限。上传方向的窗口由服务端给（OpenSSH session 通道 2MB），
+/// 与我们的 CONNECTION_WINDOW 无关；russh-sftp 的 8 路写 pipeline × 块正好填满它。再多也只是在窗口外
+/// 排队，还让排在后面的请求（OPEN / CLOSE 的回复）更晚才到，慢链路上撞 SFTP 请求超时（见 new_sftp）。
+const UPLOAD_IN_FLIGHT_BYTES: u64 = 8 * TRANSFER_CHUNK as u64;
 
-/// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），
-/// 开 N 个句柄读不相交区间，在途 READ 就是 N 个：8 × 255KB = IN_FLIGHT_BYTES ≈ SSH 通道窗口，
-/// 与上传的 8 路写 pipeline 在途量持平。
-const DOWNLOAD_SEGMENTS: usize = (IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64) as usize;
+/// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），开 N 个句柄读不相交区间，
+/// 在途 READ 就是 N 个。下载方向的窗口是我们给的 CONNECTION_WINDOW（8MB）。
+/// 50ms RTT、100MB 实测（bench_segment_count，release）：8 段 3.7–4.0s、16 段 2.4s、24 段 2.3s、32 段 2.2–2.4s，
+/// 16 段之后只再快几个百分点，在途量却翻倍（请求超时得跟着加长，见 SFTP_TIMEOUT_SECS），所以取 16。
+const DOWNLOAD_SEGMENTS: usize = 16;
+
+/// 下载时一条 SFTP 通道上同时在途的数据上限 = 分段下载的在途量（段数 × 块），
+/// 不超过下载方向的通道窗口；目录下载的小文件也按它限。
+const DOWNLOAD_IN_FLIGHT_BYTES: u64 = DOWNLOAD_SEGMENTS as u64 * TRANSFER_CHUNK as u64;
 
 /// 小于此大小走单句柄流式下载。按 RTT 算（块 = TRANSFER_CHUNK）：单句柄 = open + ⌈S/块⌉ 个 READ
 /// + 1 个读到 EOF 的 READ；分段 = 段 0 open → 其余段 open → 每段 ⌈S/(段数·块)⌉ 个 READ（只有最后一段
@@ -49,7 +55,7 @@ const DOWNLOAD_SEGMENTS: usize = (IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64) as us
 const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
 
 /// 目录传输同时在传的文件数上限。小文件的耗时几乎全是 open / 读写 / close 的往返（各一个 RTT），
-/// 串行时几千个小文件就是几千轮往返；数据量另由 IN_FLIGHT_BYTES 限，这里限的是同时开着的句柄数
+/// 串行时几千个小文件就是几千轮往返；数据量另由 *_IN_FLIGHT_BYTES 限，这里限的是同时开着的句柄数
 /// （远端远低于 OpenSSH 的 1019，本地远低于 macOS 默认 256 个 fd）。50ms RTT、3000 个小文件实测：
 /// 16 路上传 / 下载 33s / 36s，32 路 17s / 19s。
 const DIR_FILE_CONCURRENCY: usize = 32;
@@ -137,9 +143,9 @@ async fn new_sftp(channel: russh::Channel<russh::client::Msg>) -> AppResult<Sftp
 }
 
 /// SFTP 请求超时（秒）。russh-sftp 的请求从发出起计时，默认 10s（写请求不计时）。分段下载、目录并发传输
-/// 会让至多 IN_FLIGHT_BYTES（≈2MB）的数据同时在途，排在后面的请求 / 回复要等它们先过完链路：
-/// 2MB / 60s ≈ 35KB/s，链路不慢于此就不会误超时。
-const SFTP_TIMEOUT_SECS: u64 = 60;
+/// 会让至多 DOWNLOAD_IN_FLIGHT_BYTES（16 段 ≈4MB）的数据同时在途，排在后面的请求 / 回复要等它们先过完
+/// 链路：4MB / 120s ≈ 35KB/s，链路不慢于此就不会误超时。连接真断了由 keepalive（10s）发现，不靠它。
+const SFTP_TIMEOUT_SECS: u64 = 120;
 
 /// 在 exec 通道上以 `user` 身份起 sftp-server（见 terminal_user::sftp_server_script），返回 SFTP 会话。
 /// 等到 stderr 出现密码提示才写密码、出现就绪标记才开始 SFTP 协议：免密 sudo 不会把密码误当成 SFTP 数据，
@@ -907,7 +913,7 @@ async fn download_large(
 
 /// 目录下载的文件：小文件按在途字节预算并发（单句柄一问一答，每个文件在途至多一个块）；
 /// ≥ SEGMENTED_DOWNLOAD_MIN 的大文件在小文件之后逐个分段下载（自带 DOWNLOAD_SEGMENTS 路 READ）。
-/// 两批不重叠，在途 READ 始终 ≤ IN_FLIGHT_BYTES，与单文件分段下载持平，SFTP 请求超时的推导不变。
+/// 两批不重叠，在途 READ 始终 ≤ DOWNLOAD_IN_FLIGHT_BYTES，与单文件分段下载持平，SFTP 请求超时的推导不变。
 async fn download_dir_files<T, FS, FutS, FL, FutL>(
     files: Vec<(T, u64)>,
     small: FS,
@@ -922,7 +928,7 @@ where
     let (large_files, small_files): (Vec<_>, Vec<_>) =
         files.into_iter().partition(|(_, size)| *size >= SEGMENTED_DOWNLOAD_MIN);
     let small_files = small_files.into_iter().map(|(item, size)| (item, size.min(TRANSFER_CHUNK as u64))).collect();
-    transfer_with_budget(small_files, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, small).await?;
+    transfer_with_budget(small_files, DIR_FILE_CONCURRENCY, DOWNLOAD_IN_FLIGHT_BYTES, small).await?;
     for (item, size) in large_files {
         large(item, size).await?;
     }
@@ -1278,9 +1284,9 @@ async fn upload_tree(
         emit(DirCounts { transferred, total, files_done, files_total });
     });
     let (sftp_ref, progress_ref) = (&sftp, &progress);
-    // 一个文件的在途写入至多 russh-sftp 的 8 路 pipeline × 块 ≈ IN_FLIGHT_BYTES，按文件大小计（大文件独占）
+    // 一个文件的在途写入至多 russh-sftp 的 8 路 pipeline × 块 ≈ UPLOAD_IN_FLIGHT_BYTES，按文件大小计（大文件独占）
     let files = plan.files.into_iter().map(|(local, remote, size)| ((local, remote), size)).collect();
-    transfer_with_budget(files, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |(local, remote): (PathBuf, String)| async move {
+    transfer_with_budget(files, DIR_FILE_CONCURRENCY, UPLOAD_IN_FLIGHT_BYTES, |(local, remote): (PathBuf, String)| async move {
         upload_file(sftp_ref, &local.to_string_lossy(), &remote, progress_ref.file()).await?;
         progress_ref.file_done();
         Ok(())
@@ -1484,7 +1490,8 @@ mod tests {
         create_dir_levels, download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
         pick_sudo_password, saved_password_for, split_remote, sudo_extract_command, sudo_failure, transfer_with_budget, DirProgress,
-        DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY, DOWNLOAD_SEGMENTS, IN_FLIGHT_BYTES, SEGMENTED_DOWNLOAD_MIN, SFTP_TIMEOUT_SECS, TRANSFER_CHUNK,
+        DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY, DOWNLOAD_IN_FLIGHT_BYTES, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, SFTP_TIMEOUT_SECS,
+        TRANSFER_CHUNK, UPLOAD_IN_FLIGHT_BYTES,
     };
     use super::{staging_from_prepare, sudo_prepare_command};
 
@@ -2148,14 +2155,12 @@ mod tests {
 
     #[tokio::test]
     async fn segmented_download_keeps_a_window_of_reads_in_flight() {
-        let source = pattern(16 * TRANSFER_CHUNK);
+        let source = pattern(2 * DOWNLOAD_SEGMENTS * TRANSFER_CHUNK);
         let run = run_segmented(source.clone(), source.len() as u64).await;
         run.result.unwrap();
-        // 上传有 russh-sftp 的 8 路写 pipeline（8 × 块 ≈ 2MB 通道窗口），下载靠分段补齐同样的在途量：
-        // 50ms RTT 下 4 段只有 ~20MB/s。
-        let upload_pipeline = russh_sftp::client::Config::default().max_concurrent_writes;
-        assert_eq!(run.peak, upload_pipeline);
-        assert_eq!(run.peak as u64 * TRANSFER_CHUNK as u64, IN_FLIGHT_BYTES);
+        // 下载一问一答，靠分段把在途 READ 撑到下载在途上限（吞吐 ≈ 在途量 / RTT）。
+        assert_eq!(run.peak, DOWNLOAD_SEGMENTS);
+        assert_eq!(run.peak as u64 * TRANSFER_CHUNK as u64, DOWNLOAD_IN_FLIGHT_BYTES);
     }
 
     #[tokio::test]
@@ -2190,7 +2195,7 @@ mod tests {
             probe.peak()
         };
         assert_eq!(peak_for(1000).await, DIR_FILE_CONCURRENCY);
-        assert_eq!(peak_for(SEGMENTED_DOWNLOAD_MIN - 1).await as u64, IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64);
+        assert_eq!(peak_for(SEGMENTED_DOWNLOAD_MIN - 1).await as u64, DOWNLOAD_IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64);
     }
 
     #[tokio::test]
@@ -2596,9 +2601,9 @@ mod tests {
         let (bytes_now, bytes_peak) = (AtomicU64::new(0), AtomicU64::new(0));
         let started = Mutex::new(Vec::new());
         let (costs, probe_ref, bytes_now_ref, bytes_peak_ref, started_ref) = (&costs, &probe, &bytes_now, &bytes_peak, &started);
-        let result = transfer_with_budget(items, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |i: usize| async move {
+        let result = transfer_with_budget(items, DIR_FILE_CONCURRENCY, UPLOAD_IN_FLIGHT_BYTES, |i: usize| async move {
             started_ref.lock().unwrap().push(i);
-            let cost = costs[&i].min(IN_FLIGHT_BYTES);
+            let cost = costs[&i].min(UPLOAD_IN_FLIGHT_BYTES);
             let now = bytes_now_ref.fetch_add(cost, Ordering::SeqCst) + cost;
             bytes_peak_ref.fetch_max(now, Ordering::SeqCst);
             probe_ref.hold().await;
@@ -2628,24 +2633,29 @@ mod tests {
         let chunk = TRANSFER_CHUNK as u64;
         let (result, peak, bytes_peak, _) = run_budgeted((0..30).map(|i| (i, chunk)).collect(), None).await;
         result.unwrap();
-        assert_eq!(peak as u64, IN_FLIGHT_BYTES / chunk);
-        assert!(bytes_peak <= IN_FLIGHT_BYTES);
+        assert_eq!(peak as u64, UPLOAD_IN_FLIGHT_BYTES / chunk);
+        assert!(bytes_peak <= UPLOAD_IN_FLIGHT_BYTES);
 
         // 超过预算的文件独占：不和别的文件同时传，也不会因为超预算卡死。
-        let items = vec![(0, 10), (1, 10), (2, 3 * IN_FLIGHT_BYTES), (3, 10), (4, IN_FLIGHT_BYTES), (5, 10)];
+        let items = vec![(0, 10), (1, 10), (2, 3 * UPLOAD_IN_FLIGHT_BYTES), (3, 10), (4, UPLOAD_IN_FLIGHT_BYTES), (5, 10)];
         let (result, _, bytes_peak, started) = run_budgeted(items, None).await;
         result.unwrap();
-        assert_eq!(bytes_peak, IN_FLIGHT_BYTES);
+        assert_eq!(bytes_peak, UPLOAD_IN_FLIGHT_BYTES);
         // 按原顺序放行，队首放不下就等。
         assert_eq!(started, [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn in_flight_budget_fits_ssh_window_and_request_timeout() {
-        // 在途再多也只是在通道窗口外排队
-        assert!(IN_FLIGHT_BYTES <= russh::client::Config::default().window_size as u64);
+        // 在途再多也只是在通道窗口外排队：下载方向是我们给的连接窗口；上传方向是服务端给的
+        // （OpenSSH session 通道 2MB），正好是 russh-sftp 8 路写 pipeline × 块
+        assert!(DOWNLOAD_IN_FLIGHT_BYTES <= crate::ssh::CONNECTION_WINDOW as u64);
+        let write_pipeline = russh_sftp::client::Config::default().max_concurrent_writes as u64;
+        assert_eq!(UPLOAD_IN_FLIGHT_BYTES, write_pipeline * TRANSFER_CHUNK as u64);
+        assert!(UPLOAD_IN_FLIGHT_BYTES <= 2 * 1024 * 1024);
         // 排在满额在途数据后面的请求，在 ~35KB/s 的慢链路上也要在超时前等到回复
-        assert!(IN_FLIGHT_BYTES / SFTP_TIMEOUT_SECS <= 35 * 1024, "{}B/s", IN_FLIGHT_BYTES / SFTP_TIMEOUT_SECS);
+        let most = DOWNLOAD_IN_FLIGHT_BYTES.max(UPLOAD_IN_FLIGHT_BYTES);
+        assert!(most / SFTP_TIMEOUT_SECS <= 35 * 1024, "{}B/s", most / SFTP_TIMEOUT_SECS);
     }
 
     #[tokio::test]
@@ -2660,7 +2670,7 @@ mod tests {
         let (started, finished) = (Mutex::new(Vec::new()), Mutex::new(Vec::new()));
         let (started_ref, finished_ref) = (&started, &finished);
         let items = (0..3 * DIR_FILE_CONCURRENCY).map(|i| (i, 1)).collect();
-        let result = transfer_with_budget(items, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |i: usize| async move {
+        let result = transfer_with_budget(items, DIR_FILE_CONCURRENCY, UPLOAD_IN_FLIGHT_BYTES, |i: usize| async move {
             started_ref.lock().unwrap().push(i);
             tokio::task::yield_now().await;
             if i == 0 {
@@ -3075,7 +3085,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dst);
         }
 
-        /// 分段数对大文件下载吞吐的影响（另需 SSHL_SFTP_BENCH=1）：同一连接上 4 / 8 / 16 段交替跑几轮，
+        /// 分段数对大文件下载吞吐的影响（另需 SSHL_SFTP_BENCH=1）：同一连接上 8 / 16 / 24 / 32 段交替跑几轮，
         /// 排除机器负载、网络抖动对单次结果的干扰。
         #[tokio::test(flavor = "multi_thread")]
         #[ignore = "需要 SSHL_SFTP_IT=host:port 和 SSHL_SFTP_BENCH=1"]
@@ -3090,7 +3100,7 @@ mod tests {
             let local = temp_dir("segments");
             let mut results: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
             for _ in 0..3 {
-                for segments in [4, 8, 16] {
+                for segments in [8, 16, 24, 32] {
                     let t = Instant::now();
                     let first = sftp.open(remote.as_str()).await.unwrap();
                     tokio::fs::File::create(&local).await.unwrap();

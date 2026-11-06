@@ -61,3 +61,7 @@ core-foundation = "0.9"
 lto = true
 codegen-units = 1
 strip = true
+
+# russh 0.45.0 + 手动接收窗口补丁（终端输出流控，见 vendor/README.md）
+[patch.crates-io]
+russh = { path = "vendor/russh" }

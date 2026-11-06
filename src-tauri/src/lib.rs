@@ -65,6 +65,7 @@ pub fn run() {
             ssh::ssh_send_data,
             ssh::ssh_fill_password,
             ssh::ssh_resize,
+            ssh::ssh_ack_data,
             ssh::ssh_execute,
             ssh::ssh_refresh_prompt,
             ssh::ssh_activate_session,

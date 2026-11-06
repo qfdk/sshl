@@ -8,6 +8,7 @@ import {
 } from '../../lib/app-state';
 import { getUngroupedConnections, groupConnections, matchesConnection, moveConnection } from '../../lib/connection-groups';
 import { alertDialog, confirmDialog, currentDialog } from '../../lib/dialogs';
+import { flowAck } from '../../lib/flow-ack';
 import sessionManager from '../../lib/session-manager';
 import { createSessionRevalidator } from '../../lib/session-revalidator';
 import type { TerminalManager } from '../terminal/useTerminal';
@@ -457,17 +458,18 @@ export function useConnections(): ConnectionManager {
   useEffect(() => setupConnectionCancellation(), [setupConnectionCancellation]);
 
   useEffect(() => {
-    const stopData = appWindow().api.ssh.onData((_event: unknown, data: { data: string; sessionId: string }) => {
-      const terminal = appWindow().terminalManager?.getTerminalForSession(data.sessionId);
-      if (terminal) {
-        try { terminal.write(data.data); } catch (error) { console.error('[ssh:data] 写入终端失败:', error); }
-      }
+    const stopData = appWindow().api.ssh.onData((_event: unknown, data: { data: string; sessionId: string; bytes?: number }) => {
+      // 解析完才向后端确认（终端输出流控）；没有终端或写入失败时立即确认，免得后端一直停着
+      try { flowAck.deliver(appWindow().terminalManager?.getTerminalForSession(data.sessionId), data); } catch (error) { console.error('[ssh:data] 写入终端失败:', error); }
     });
+    // 监听（重新）注册前发出的事件可能没人收、永远等不到确认：让后端把这些会话的都补回来
+    for (const { id } of sessionManager.getAllSessions()) flowAck.resync(id);
     const stopClosed = appWindow().api.ssh.onClosed(async (_event: unknown, data: { sessionId: string }) => {
       const connectionId = sessionManager.getSession(data.sessionId)?.connectionId || null;
       sessionManager.setSessionActive(data.sessionId, false);
       sessionManager.removeSession(data.sessionId);
       appWindow().terminalManager?.disposeTerminalInstance(data.sessionId);
+      flowAck.forget(data.sessionId);
       if (data.sessionId === getCurrentSessionId()) {
         setCurrentSessionId(null);
         updateConnectionStatus(false);

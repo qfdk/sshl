@@ -51,6 +51,9 @@ pub struct ConnectResult {
 pub struct SshDataEvent {
     pub session_id: String,
     pub data: String,
+    /// 这段输出对应的原始 SSH 字节数。前端 xterm 解析完要用 ssh_ack_data 确认，
+    /// 后端据此补终端通道的 SSH 窗口（见 TerminalWindow）。激活快照为 0，不用确认。
+    pub bytes: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +67,8 @@ pub struct SshClosedEvent {
 enum Outbound {
     Data(Vec<u8>),
     Resize { cols: u32, rows: u32 },
+    /// 前端确认已解析的原始字节数（ssh_ack_data）。
+    Ack(u32),
     Close,
 }
 
@@ -140,8 +145,14 @@ pub(crate) fn warm_key(host: &str, port: u16, username: &str) -> String {
     format!("{}:{}:{}", host, port, username)
 }
 
+/// 连接上各通道（SFTP / exec）默认的 SSH 接收窗口。SFTP 下载吞吐上限 ≈ 窗口 / RTT：russh 默认 2MB
+/// 在 50ms RTT 下约 40MB/s，8MB 约 160MB/s。终端通道不用它（单独开 TERMINAL_WINDOW 的手动窗口），
+/// 刷屏时的积压不跟着变大。
+pub(crate) const CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
+
 fn russh_config() -> Arc<russh::client::Config> {
     Arc::new(russh::client::Config {
+        window_size: CONNECTION_WINDOW,
         inactivity_timeout: Some(Duration::from_secs(600)),
         keepalive_interval: Some(Duration::from_secs(10)),
         keepalive_max: 1,
@@ -195,7 +206,9 @@ async fn connect_tcp(addr: &str) -> AppResult<TcpStream> {
     unreachable!("TCP retry loop always returns")
 }
 
-async fn open_session_channel(
+/// 开终端（shell）通道：russh 补丁的手动窗口模式，初始窗口 TERMINAL_WINDOW，之后只按
+/// TerminalWindow 的记账补。只有终端通道这样开；SFTP / exec / 探活仍走连接默认窗口、自动补。
+async fn open_terminal_channel(
     handle: &russh::client::Handle<ClientHandler>,
     timeout: Duration,
 ) -> AppResult<russh::Channel<russh::client::Msg>> {
@@ -203,7 +216,7 @@ async fn open_session_channel(
         return Err(AppError::Ssh("ssh transport is closed".into()));
     }
 
-    match tokio::time::timeout(timeout, handle.channel_open_session()).await {
+    match tokio::time::timeout(timeout, handle.channel_open_session_manual_window(TERMINAL_WINDOW)).await {
         Ok(Ok(channel)) => Ok(channel),
         Ok(Err(error)) => Err(AppError::Ssh(format!("open channel: {error}"))),
         Err(_) => Err(AppError::Ssh(format!(
@@ -382,7 +395,7 @@ async fn connect_session(
         )
     };
 
-    let channel = match open_session_channel(&handle_arc, Duration::from_secs(2)).await {
+    let channel = match open_terminal_channel(&handle_arc, Duration::from_secs(2)).await {
         Ok(channel) => channel,
         Err(error) if used_warm_connection => {
             tracing::warn!("prewarmed connection {key} is stale ({error}); reconnecting");
@@ -395,7 +408,7 @@ async fn connect_session(
                 passphrase.as_deref(),
             )
             .await?;
-            open_session_channel(&handle_arc, Duration::from_secs(5)).await?
+            open_terminal_channel(&handle_arc, Duration::from_secs(5)).await?
         }
         Err(error) => return Err(error),
     };
@@ -546,7 +559,10 @@ async fn run_channel(
     let mut exit_code: Option<u32> = None;
     let exit_reason: String;
 
-    let mut pending = String::with_capacity(COALESCE_MAX);
+    let mut pending = PendingOutput { text: String::with_capacity(COALESCE_MAX), raw: 0 };
+    let mut window = TerminalWindow::default();
+    // 只解出半个多字节字符的 chunk 不产出文本，它的原始字节记到下一段有文本的输出上。
+    let mut raw_carried: u32 = 0;
     let mut flush_deadline: Option<tokio::time::Instant> = None;
     let mut last_emit = tokio::time::Instant::now() - COALESCE_WINDOW;
     // 跨 chunk UTF-8 残字节暂存：SSH 数据按任意字节边界到达，一个多字节字符
@@ -563,9 +579,8 @@ async fn run_channel(
                     std::future::pending::<()>().await
                 }
             }, if flush_deadline.is_some() => {
-                if !pending.is_empty() {
-                    emit_data(&app, &session_id, &pending);
-                    pending.clear();
+                if !pending.text.is_empty() {
+                    emit_pending(&app, &session_id, &mut pending, &mut window);
                     last_emit = tokio::time::Instant::now();
                 }
                 flush_deadline = None;
@@ -584,6 +599,11 @@ async fn run_channel(
                             tracing::warn!("ssh resize failed: {e}");
                         }
                     }
+                    Some(Outbound::Ack(bytes)) => {
+                        if let Some(grant) = window.acked(bytes) {
+                            let _ = channel.grant_window(grant).await;
+                        }
+                    }
                     Some(Outbound::Close) => {
                         exit_reason = "client_close".into();
                         break;
@@ -595,22 +615,13 @@ async fn run_channel(
                 }
             }
             msg = channel.wait() => {
-                match msg {
-                    Some(russh::ChannelMsg::Data { data }) => {
-                        let s = decode_stream_chunk(&mut utf8_out, &data);
-                        if !s.is_empty() && session.append_to_buffer(&s).await {
-                            queue_output(&app, &session_id, &s, &mut pending, &mut flush_deadline, &mut last_emit);
-                        }
-                    }
-                    Some(russh::ChannelMsg::ExtendedData { data, ext: _ }) => {
-                        let s = decode_stream_chunk(&mut utf8_err, &data);
-                        if !s.is_empty() && session.append_to_buffer(&s).await {
-                            queue_output(&app, &session_id, &s, &mut pending, &mut flush_deadline, &mut last_emit);
-                        }
-                    }
+                let (carry, data) = match msg {
+                    Some(russh::ChannelMsg::Data { data }) => (&mut utf8_out, data),
+                    Some(russh::ChannelMsg::ExtendedData { data, ext: _ }) => (&mut utf8_err, data),
                     Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
                         exit_code = Some(exit_status);
                         // do NOT break on exit_status alone — server may keep channel open for cleanup
+                        continue;
                     }
                     Some(russh::ChannelMsg::Eof) => {
                         exit_reason = "server_eof".into();
@@ -624,15 +635,27 @@ async fn run_channel(
                         exit_reason = "channel_stream_end".into();
                         break;
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                raw_carried = raw_carried.saturating_add(data.len() as u32);
+                let s = decode_stream_chunk(carry, &data);
+                if s.is_empty() {
+                    continue;
+                }
+                let raw = std::mem::take(&mut raw_carried);
+                if session.append_to_buffer(&s).await {
+                    queue_output(&app, &session_id, &s, raw, &mut pending, &mut window, &mut flush_deadline, &mut last_emit);
+                } else if let Some(grant) = window.buffered(raw) {
+                    // 激活前只进缓冲、前端还没在听：收到即算消费，首屏缓冲阶段不能被流控卡住。
+                    let _ = channel.grant_window(grant).await;
                 }
             }
         }
     }
 
     // 退出前刷出残余 pending
-    if !pending.is_empty() {
-        emit_data(&app, &session_id, &pending);
+    if !pending.text.is_empty() {
+        emit_pending(&app, &session_id, &mut pending, &mut window);
     }
 
     let _ = session.handle.disconnect(russh::Disconnect::ByApplication, "client closed", "en").await;
@@ -709,6 +732,20 @@ pub async fn ssh_resize(
     Ok(())
 }
 
+/// 前端 xterm 解析完 ssh:data 后确认的原始字节数（按会话攒到 ~128KB 才发一次），用来补终端通道的
+/// SSH 窗口。会话已经不在（断开、关闭）就忽略：确认本来就是尽力而为。
+#[tauri::command]
+pub async fn ssh_ack_data(
+    state: State<'_, AppState>,
+    session_id: String,
+    bytes: u32,
+) -> AppResult<()> {
+    if let Some(session) = state.get(&session_id).await {
+        let _ = session.outbound.send(Outbound::Ack(bytes));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn ssh_execute(
     state: State<'_, AppState>,
@@ -768,7 +805,8 @@ pub async fn ssh_activate_session(
     let buf = session.buffer.lock().await;
     let was_activated = session.activated.swap(true, Ordering::Relaxed);
     if !was_activated && !buf.is_empty() {
-        emit_data(&app, &session_id, &buf);
+        // 快照里的字节进缓冲时就已补过窗口，不用前端确认。
+        emit_data(&app, &session_id, &buf, 0);
     }
     drop(buf);
     Ok(())
@@ -796,19 +834,28 @@ fn flush_output_now(pending_len: usize, flush_pending: bool, since_last_emit: Du
     pending_len >= COALESCE_MAX || (!flush_pending && since_last_emit >= COALESCE_WINDOW)
 }
 
+/// 等着合并发出的输出，连同它对应的原始 SSH 字节数。
+struct PendingOutput {
+    text: String,
+    raw: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn queue_output(
     app: &AppHandle,
     session_id: &str,
     chunk: &str,
-    pending: &mut String,
+    raw: u32,
+    pending: &mut PendingOutput,
+    window: &mut TerminalWindow,
     flush_deadline: &mut Option<tokio::time::Instant>,
     last_emit: &mut tokio::time::Instant,
 ) {
-    pending.push_str(chunk);
+    pending.text.push_str(chunk);
+    pending.raw = pending.raw.saturating_add(raw);
     let now = tokio::time::Instant::now();
-    if flush_output_now(pending.len(), flush_deadline.is_some(), now.duration_since(*last_emit)) {
-        emit_data(app, session_id, pending);
-        pending.clear();
+    if flush_output_now(pending.text.len(), flush_deadline.is_some(), now.duration_since(*last_emit)) {
+        emit_pending(app, session_id, pending, window);
         *flush_deadline = None;
         *last_emit = now;
     } else if flush_deadline.is_none() {
@@ -816,11 +863,61 @@ fn queue_output(
     }
 }
 
-pub fn emit_data(app: &AppHandle, session_id: &str, data: &str) {
+fn emit_pending(app: &AppHandle, session_id: &str, pending: &mut PendingOutput, window: &mut TerminalWindow) {
+    emit_data(app, session_id, &pending.text, pending.raw);
+    window.emitted(pending.raw);
+    pending.text.clear();
+    pending.raw = 0;
+}
+
+pub fn emit_data(app: &AppHandle, session_id: &str, data: &str, bytes: u32) {
     let _ = app.emit("ssh:data", SshDataEvent {
         session_id: session_id.to_string(),
         data: data.to_string(),
+        bytes,
     });
+}
+
+/// 终端通道的 SSH 接收窗口上限：服务端最多比前端已确认（xterm 解析完）的多发这么多。
+/// 刷屏时 WebView + xterm 的积压、^C 之后还要滚完的尾巴都以它为界（xterm ≈65MB/s，2MB ≈30ms）。
+/// 交互输出远小于它，打字 / vim 不会因为没确认而停下。
+pub(crate) const TERMINAL_WINDOW: u32 = 2 * 1024 * 1024;
+/// 攒够这么多再补窗口，免得每个小包都发一次 WINDOW_ADJUST。
+const GRANT_BATCH: u32 = 64 * 1024;
+
+/// 终端通道的窗口记账（russh 补丁的手动窗口模式，见 vendor/README.md）。服务端还能发的量 =
+/// TERMINAL_WINDOW − 已收到但还没补回的字节；什么时候补回：
+/// - 激活前：输出只进 100KB 缓冲、不发给前端，收到即算消费——首屏缓冲阶段不能被流控卡住；
+/// - 激活后：随 ssh:data 发出的原始字节，等前端 xterm 解析完 ack 才算消费。
+/// 确认量按「已发出未确认」封顶：重同步、旧终端迟到的回调等重复确认不会把窗口撑大。
+#[derive(Default)]
+struct TerminalWindow {
+    unacked: u64,
+    ungranted: u32,
+}
+
+impl TerminalWindow {
+    /// 进了缓冲、没有发给前端的字节。返回此刻该补的窗口。
+    fn buffered(&mut self, raw: u32) -> Option<u32> {
+        self.consumed(raw)
+    }
+
+    /// 随 ssh:data 发给前端、等确认的字节。
+    fn emitted(&mut self, raw: u32) {
+        self.unacked += u64::from(raw);
+    }
+
+    /// 前端确认。返回此刻该补的窗口。
+    fn acked(&mut self, bytes: u32) -> Option<u32> {
+        let bytes = u64::from(bytes).min(self.unacked);
+        self.unacked -= bytes;
+        self.consumed(bytes as u32)
+    }
+
+    fn consumed(&mut self, bytes: u32) -> Option<u32> {
+        self.ungranted = self.ungranted.saturating_add(bytes);
+        (self.ungranted >= GRANT_BATCH).then(|| std::mem::take(&mut self.ungranted))
+    }
 }
 
 pub fn emit_closed(app: &AppHandle, session_id: &str, code: Option<u32>, reason: String) {
@@ -852,8 +949,131 @@ pub(crate) fn decode_stream_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_stream_chunk, flush_output_now, is_transient_connect_error, COALESCE_MAX, COALESCE_WINDOW};
+    use super::{
+        decode_stream_chunk, flush_output_now, is_transient_connect_error, TerminalWindow, COALESCE_MAX,
+        COALESCE_WINDOW, GRANT_BATCH, TERMINAL_WINDOW,
+    };
     use std::time::Duration;
+
+    /// 服务端此刻还能在终端通道上发多少：初始窗口 + 已补 − 已收。
+    struct Peer {
+        window: TerminalWindow,
+        received: u64,
+        granted: u64,
+    }
+
+    impl Peer {
+        fn new() -> Self {
+            Peer { window: TerminalWindow::default(), received: 0, granted: 0 }
+        }
+        fn credit(&self) -> u64 {
+            u64::from(TERMINAL_WINDOW) + self.granted - self.received
+        }
+        fn grant(&mut self, grant: Option<u32>) {
+            self.granted += u64::from(grant.unwrap_or(0));
+        }
+    }
+
+    #[test]
+    fn output_before_activation_never_waits_for_the_renderer() {
+        // 激活前前端还没在听：缓冲阶段收到的字节必须自己补回去，否则 MOTD 一长首屏就卡死。
+        let mut peer = Peer::new();
+        for _ in 0..1000 {
+            let n = 32 * 1024;
+            peer.received += n;
+            let grant = peer.window.buffered(n as u32);
+            peer.grant(grant);
+            assert!(peer.credit() + u64::from(GRANT_BATCH) >= u64::from(TERMINAL_WINDOW));
+        }
+    }
+
+    #[test]
+    fn emitted_output_waits_for_the_renderer_ack() {
+        let mut peer = Peer::new();
+        // 刷屏：前端不确认，服务端最多再发满一个窗口就停
+        while peer.credit() > 0 {
+            let n = peer.credit().min(32 * 1024);
+            peer.received += n;
+            peer.window.emitted(n as u32);
+        }
+        assert_eq!(peer.received, u64::from(TERMINAL_WINDOW));
+        // xterm 解析完 128KB → 补回 128KB
+        let grant = peer.window.acked(128 * 1024);
+        assert_eq!(grant, Some(128 * 1024));
+        peer.grant(grant);
+        assert_eq!(peer.credit(), 128 * 1024);
+    }
+
+    #[test]
+    fn small_acks_are_batched_into_one_window_adjust() {
+        let mut window = TerminalWindow::default();
+        window.emitted(GRANT_BATCH);
+        assert_eq!(window.acked(GRANT_BATCH / 2), None);
+        assert_eq!(window.acked(GRANT_BATCH / 2), Some(GRANT_BATCH));
+    }
+
+    #[test]
+    fn over_acks_cannot_grow_the_window() {
+        // 重同步（ACK_ALL）、旧终端迟到的回调都可能多确认；补回去的总量不能超过真正发出去的。
+        let mut peer = Peer::new();
+        peer.received += 300 * 1024;
+        peer.window.emitted(300 * 1024);
+        let grant = peer.window.acked(u32::MAX);
+        peer.grant(grant);
+        let grant = peer.window.acked(200 * 1024);
+        peer.grant(grant);
+        assert_eq!(peer.granted, 300 * 1024);
+        assert_eq!(peer.credit(), u64::from(TERMINAL_WINDOW));
+    }
+
+    #[test]
+    fn terminal_window_stays_bounded_under_any_ack_pattern() {
+        // 伪随机地交错：收数据（激活前 / 后）、xterm 解析完确认、偶尔重同步（ACK_ALL）。
+        // 前端重同步时作废旧回调（flow-ack.ts 的 generation），那些字节解析完不再确认。
+        // 任何时刻：服务端余量 + 前端还会确认的字节 ≤ 终端窗口；算上作废的也不超过两个窗口。
+        let mut peer = Peer::new();
+        let (mut fresh, mut stale): (u64, u64) = (0, 0);
+        let mut seed: u64 = 0x9e3779b97f4a7c15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for step in 0..20_000 {
+            let r = next();
+            match r % 4 {
+                0 | 1 if peer.credit() > 0 => {
+                    let n = ((r >> 8) % 40_000 + 1).min(peer.credit());
+                    peer.received += n;
+                    if step < 500 {
+                        let grant = peer.window.buffered(n as u32);
+                        peer.grant(grant);
+                    } else {
+                        peer.window.emitted(n as u32);
+                        fresh += n;
+                    }
+                }
+                2 => {
+                    let mut n = (r >> 8) % 200_000;
+                    let old = n.min(stale);
+                    stale -= old;
+                    n = (n - old).min(fresh);
+                    fresh -= n;
+                    let grant = peer.window.acked(n as u32);
+                    peer.grant(grant);
+                }
+                3 if r % 97 == 0 => {
+                    stale += std::mem::take(&mut fresh);
+                    let grant = peer.window.acked(u32::MAX);
+                    peer.grant(grant);
+                }
+                _ => {}
+            }
+            assert!(peer.credit() + fresh <= u64::from(TERMINAL_WINDOW), "step {step}");
+            assert!(peer.credit() + fresh + stale <= 2 * u64::from(TERMINAL_WINDOW), "step {step}");
+        }
+    }
 
     #[test]
     fn idle_output_goes_out_immediately() {
@@ -873,6 +1093,68 @@ mod tests {
     #[test]
     fn full_batch_flushes_regardless_of_timing() {
         assert!(flush_output_now(COALESCE_MAX, true, Duration::ZERO));
+    }
+
+    /// 真实 sshd：终端通道不确认就停在一个窗口内，同连接的其他通道照常跑；确认后继续流动。
+    /// 容器见 tests/fixtures-sudo.Dockerfile（以 alice 登录）：
+    /// `SSHL_SFTP_IT=127.0.0.1:2233 cargo test --lib terminal_window_against_real_sshd -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+    async fn terminal_window_against_real_sshd() {
+        use russh::ChannelMsg;
+        let Ok(target) = std::env::var("SSHL_SFTP_IT") else { return };
+        let (host, port) = target.split_once(':').unwrap();
+        let h = super::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap();
+        let mut term = super::open_terminal_channel(&h, Duration::from_secs(5)).await.unwrap();
+        term.request_pty(false, "xterm-256color", 120, 40, 0, 0, &[]).await.unwrap();
+        term.request_shell(false).await.unwrap();
+        term.data(&b"head -c 64M /dev/zero | tr '\\0' x\r"[..]).await.unwrap();
+
+        // 读到不再有数据（服务端窗口耗尽）为止，一个字节都不确认
+        async fn drain(term: &mut russh::Channel<russh::client::Msg>) -> u64 {
+            let mut got = 0u64;
+            while let Ok(msg) = tokio::time::timeout(Duration::from_millis(800), term.wait()).await {
+                match msg {
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => got += data.len() as u64,
+                    Some(_) => {}
+                    None => panic!("终端通道被关闭"),
+                }
+            }
+            got
+        }
+        let got = drain(&mut term).await;
+        eprintln!("terminal received {got} bytes without acks (window {TERMINAL_WINDOW})");
+        assert!(got > u64::from(TERMINAL_WINDOW) / 2, "刷屏应当先填满窗口，只收到 {got}");
+        assert!(got <= u64::from(TERMINAL_WINDOW), "没确认却收到 {got} 字节，超出终端窗口");
+
+        // 终端停着，同一连接上开通道、读 16MB 照常（russh 读循环没被挡住）
+        let side = async {
+            let mut ch = h.channel_open_session().await.unwrap();
+            ch.exec(true, "head -c 16M /dev/zero").await.unwrap();
+            let mut n = 0u64;
+            while let Some(msg) = ch.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => n += data.len() as u64,
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+            n
+        };
+        let side = tokio::time::timeout(Duration::from_secs(10), side).await.expect("同连接的其他通道被终端拖住了");
+        assert_eq!(side, 16 * 1024 * 1024);
+
+        // 按前端确认补窗口后继续流动，且仍不超过补回的量
+        let mut window = TerminalWindow::default();
+        window.emitted(got as u32);
+        let grant = window.acked(got as u32).unwrap();
+        term.grant_window(grant).await.unwrap();
+        let more = drain(&mut term).await;
+        assert!(more > 0 && more <= u64::from(grant), "补了 {grant}，又收到 {more}");
+
+        term.data(&b"\x03exit\r"[..]).await.unwrap();
+        let _ = term.grant_window(TERMINAL_WINDOW).await;
+        let _ = h.disconnect(russh::Disconnect::ByApplication, "", "en").await;
     }
 
     #[test]

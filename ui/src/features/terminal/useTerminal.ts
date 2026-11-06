@@ -4,6 +4,7 @@ import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
 import type { WebglAddon } from 'xterm-addon-webgl';
 import { getActiveTabId, getCurrentSessionId, subscribe } from '../../lib/app-state';
+import { flowAck } from '../../lib/flow-ack';
 import { getTerminalSettings } from '../../lib/terminal-settings';
 
 type AppWindow = Window & {
@@ -584,6 +585,8 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
   const disposeTerminalInstance = (sessionId: string) => {
     const entry = terminalsRef.current.get(sessionId);
     if (!entry) return;
+    // 已写入、还没解析完的输出等不到 write 回调了：先替它们确认，否则终端通道的 SSH 窗口会少掉这一截
+    flowAck.terminalGone(sessionId);
     try { if (typeof entry.dataDisposer === 'function') entry.dataDisposer(); } catch (err) { console.warn('[dispose] dataDisposer 失败:', err); }
     disposeBuilt(entry);
     terminalsRef.current.delete(sessionId);
