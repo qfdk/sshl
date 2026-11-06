@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -237,7 +237,9 @@ async fn load_id_map(sftp: &SftpSession, path: &str) -> Option<HashMap<u32, Stri
     use tokio::io::AsyncReadExt;
     let mut file = sftp.open(path).await.ok()?;
     let mut buf = Vec::with_capacity(8 * 1024);
-    file.read_to_end(&mut buf).await.ok()?;
+    let read = file.read_to_end(&mut buf).await;
+    close_in_background(file);
+    read.ok()?;
     Some(parse_id_map(&String::from_utf8_lossy(&buf)))
 }
 
@@ -407,13 +409,9 @@ async fn upload_file_to(
     progress_path: &str,
 ) -> AppResult<()> {
     let total = tokio::fs::metadata(local_path).await.map(|m| m.len()).unwrap_or(0);
-    let mut file = sftp.open_with_flags(
-        remote_path,
-        OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-    ).await.map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
     // 进度事件按 100ms 节流，避免大文件刷爆 webview 事件队列（与下载侧一致）。
     let mut last_emit = std::time::Instant::now();
-    stream_to_remote(local_path, &mut file, remote_path, |transferred| {
+    upload_file(sftp, local_path, remote_path, |transferred| {
         if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
             emit_upload_progress(app, UploadProgress {
                 session_id: session_id.to_string(),
@@ -426,8 +424,6 @@ async fn upload_file_to(
             last_emit = std::time::Instant::now();
         }
     }).await?;
-    file.shutdown().await
-        .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))?;
     // 收尾事件：保证进度条最终走到 100%（节流可能漏掉最后一段）。
     emit_upload_progress(app, UploadProgress {
         session_id: session_id.to_string(),
@@ -662,6 +658,29 @@ pub async fn file_upload_sudo(
     Ok(())
 }
 
+/// 上传一个本地文件到 `remote_path`（新建或截断）。`on_progress` 接收累计已传字节数，调用方负责节流。
+/// 读本地文件、写远端或收尾任一步出错，远端句柄照样关掉（见 close_in_background）。
+async fn upload_file(
+    sftp: &SftpSession,
+    local_path: &str,
+    remote_path: &str,
+    on_progress: impl FnMut(u64),
+) -> AppResult<()> {
+    let mut file = sftp.open_with_flags(
+        remote_path,
+        OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+    ).await.map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
+    let result = async {
+        stream_to_remote(local_path, &mut file, remote_path, on_progress).await?;
+        file.shutdown().await
+            .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))
+    }.await;
+    if result.is_err() {
+        close_in_background(file);
+    }
+    result
+}
+
 /// 分块从本地文件流式写入 SFTP 远端句柄，避免大文件一次性读进内存。
 /// 下载侧本来就是 64KB 流式的，上传侧此前用 `fs::read` 全量加载，几 GB 文件会 OOM。
 /// `on_progress` 接收累计已传字节数，调用方负责节流。
@@ -716,12 +735,19 @@ where
     Ok(transferred)
 }
 
-/// 关掉读完的远端句柄，不等回复。只 drop 也会发 CLOSE，但 russh-sftp 只有等到 CLOSE 的回复才给已开句柄
+/// 关掉用完的远端句柄，不等回复。只 drop 也会发 CLOSE，但 russh-sftp 只有等到 CLOSE 的回复才给已开句柄
 /// 计数减一，drop 掉的句柄永远占着计数：服务端声明了句柄上限（OpenSSH limits 扩展为 1019）时，同一 SFTP
 /// 会话累计下载约一千个文件后，open / 列目录全部报 "handle limit reached"，只能重连。
+/// 写失败过的句柄，shutdown 先逐个取排队的写确认、遇到失败的就报错返回（已取出的出队），这一次不发 CLOSE；
+/// 写确认至多 max_concurrent_writes 个，所以多试几次，最后一次一定轮到 CLOSE。
 fn close_in_background(mut file: russh_sftp::client::fs::File) {
+    let attempts = russh_sftp::client::Config::default().max_concurrent_writes + 1;
     tokio::spawn(async move {
-        let _ = file.shutdown().await;
+        for _ in 0..attempts {
+            if file.shutdown().await.is_ok() {
+                break;
+            }
+        }
     });
 }
 
@@ -756,6 +782,7 @@ fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
 /// 本地各段都用 `open_local` 开独立句柄。seek 到段首后顺序读写，返回累计字节数。本地文件不预分配长度——
 /// 各段写到自己的偏移，最终长度自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，
 /// 直接报错，不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
+/// 任一段出错，其余段读完手上这一块就停，等各段都交还句柄才返回第一个错误：直接丢弃在途的段会漏关它们的句柄。
 async fn download_segmented<R, W, OR, ORF, OL, OLF>(
     total: u64,
     segments: usize,
@@ -781,12 +808,13 @@ where
     let ranges = segment_ranges(total, segments);
     let last = ranges.len().saturating_sub(1);
     let transferred = AtomicU64::new(0);
-    let (open_remote, open_local, release, transferred_ref, on_progress) =
-        (&open_remote, &open_local, &release, &transferred, &on_progress);
+    let failed = AtomicBool::new(false);
+    let (open_remote, open_local, release, transferred_ref, failed_ref, on_progress) =
+        (&open_remote, &open_local, &release, &transferred, &failed, &on_progress);
     let mut first = Some(first);
     let workers: Vec<_> = ranges.into_iter().enumerate().map(|(i, (start, end))| {
         let opened = first.take();
-        async move {
+        let segment = async move {
             let mut remote = match opened {
                 Some(remote) => remote,
                 None => open_remote().await?,
@@ -798,7 +826,8 @@ where
                 local.seek(SeekFrom::Start(start)).await?;
                 let mut buf = vec![0u8; TRANSFER_CHUNK];
                 let mut pos = start;
-                loop {
+                // 别的段出错了就不再读：整个下载反正要报错
+                while !failed_ref.load(Ordering::Relaxed) {
                     let want = if i == last {
                         TRANSFER_CHUNK
                     } else {
@@ -824,13 +853,22 @@ where
             }.await;
             release(remote);
             result
+        };
+        async move {
+            let result = segment.await;
+            if result.is_err() {
+                failed_ref.store(true, Ordering::Relaxed);
+            }
+            result
         }
     }).collect();
     // 没有段（total = 0）时段 0 的句柄没人用
     if let Some(unused) = first {
         release(unused);
     }
-    futures::future::try_join_all(workers).await?;
+    for result in futures::future::join_all(workers).await {
+        result?;
+    }
     Ok(transferred.into_inner())
 }
 
@@ -892,7 +930,8 @@ where
 }
 
 /// 并发处理一批 (文件, 在途字节)，按原顺序放行：同时在传的不超过 `max_files` 个，在途字节之和不超过
-/// `budget`（超过 budget 的按 budget 计，即独占）；队首放不下就等前面的传完。遇到第一个错误即返回。
+/// `budget`（超过 budget 的按 budget 计，即独占）；队首放不下就等前面的传完。出错后不再放行新的，
+/// 等在传的都结束再返回第一个错误：直接丢弃在传的 future 会漏关它们开着的远端句柄（在途数据受 budget 限，等不了多久）。
 async fn transfer_with_budget<T, F, Fut>(
     items: Vec<(T, u64)>,
     max_files: usize,
@@ -907,16 +946,20 @@ where
     let mut queue = items.into_iter().map(|(item, cost)| (item, cost.min(budget))).peekable();
     let mut running = stream::FuturesUnordered::new();
     let mut used = 0;
+    let mut failed = None;
     loop {
         // 没有在传的时候队首一定放得下（cost 已截到 budget），所以不会空转
-        while running.len() < max_files.max(1) && queue.peek().is_some_and(|(_, cost)| used + cost <= budget) {
+        while failed.is_none() && running.len() < max_files.max(1) && queue.peek().is_some_and(|(_, cost)| used + cost <= budget) {
             let (item, cost) = queue.next().unwrap();
             used += cost;
             running.push(async move { transfer(item).await.map(|()| cost) });
         }
         match running.next().await {
-            Some(done) => used -= done?,
-            None => return Ok(()),
+            Some(Ok(cost)) => used -= cost,
+            Some(Err(e)) => {
+                failed.get_or_insert(e);
+            }
+            None => return failed.map_or(Ok(()), Err),
         }
     }
 }
@@ -1070,21 +1113,35 @@ async fn list_remote_dir(sftp: &SftpSession, dir: String) -> AppResult<Vec<(Stri
 
 /// 下载前遍历远端目录。`list` 列出一个远端目录的 (名称, 是否目录, 字节数)。
 /// 逐层遍历，同层各目录并发列（每次至少三个 RTT），结果仍按列表顺序处理，与逐个遍历的顺序一致。
+/// 某个目录列失败后不再开始新的，等在列的都结束再返回错误：直接丢弃会漏关它们开着的远端目录句柄。
 async fn scan_remote<L, Fut>(remote: String, local: PathBuf, list: L) -> AppResult<DirPlan<String, PathBuf>>
 where
     L: Fn(String) -> Fut,
     Fut: Future<Output = AppResult<Vec<(String, bool, u64)>>>,
 {
-    use futures::TryStreamExt;
+    let list = &list;
     let mut plan = DirPlan { dirs: vec![vec![local.clone()]], files: Vec::new() };
     let mut level = vec![(remote, local)];
     while !level.is_empty() {
+        let failed = AtomicBool::new(false);
+        let failed = &failed;
         let dirs: Vec<String> = level.iter().map(|(dir_remote, _)| dir_remote.clone()).collect();
         let listings: Vec<_> = stream::iter(dirs)
-            .map(&list)
+            .map(|dir| async move {
+                // 已有目录列失败，整次遍历都要报错：还没开始的不再列（结果用不上）
+                if failed.load(Ordering::Relaxed) {
+                    return Ok(Vec::new());
+                }
+                let listing = list(dir).await;
+                if listing.is_err() {
+                    failed.store(true, Ordering::Relaxed);
+                }
+                listing
+            })
             .buffered(DIR_OP_CONCURRENCY)
-            .try_collect()
-            .await?;
+            .collect()
+            .await;
+        let listings = listings.into_iter().collect::<AppResult<Vec<_>>>()?;
         let mut next = Vec::new();
         for ((dir_remote, dir_local), entries) in level.iter().zip(listings) {
             for (name, is_dir, size) in entries {
@@ -1224,13 +1281,7 @@ async fn upload_tree(
     // 一个文件的在途写入至多 russh-sftp 的 8 路 pipeline × 块 ≈ IN_FLIGHT_BYTES，按文件大小计（大文件独占）
     let files = plan.files.into_iter().map(|(local, remote, size)| ((local, remote), size)).collect();
     transfer_with_budget(files, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |(local, remote): (PathBuf, String)| async move {
-        let mut f = sftp_ref.open_with_flags(
-            &remote,
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-        ).await.map_err(|e| AppError::Sftp(format!("open {remote}: {e}")))?;
-        stream_to_remote(&local.to_string_lossy(), &mut f, &remote, progress_ref.file()).await?;
-        f.shutdown().await
-            .map_err(|e| AppError::Sftp(format!("close {remote}: {e}")))?;
+        upload_file(sftp_ref, &local.to_string_lossy(), &remote, progress_ref.file()).await?;
         progress_ref.file_done();
         Ok(())
     }).await?;
@@ -1900,6 +1951,8 @@ mod tests {
         waiting: bool,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
+        /// 在这个偏移上的 READ 报错。
+        fail_at: Option<u64>,
     }
 
     impl AsyncRead for MockRemote {
@@ -1914,6 +1967,9 @@ mod tests {
             }
             this.waiting = false;
             this.in_flight.fetch_sub(1, Ordering::SeqCst);
+            if this.fail_at == Some(this.pos) {
+                return Poll::Ready(Err(io::Error::other("read failed")));
+            }
             let start = (this.pos as usize).min(this.data.len());
             let n = buf.remaining().min(this.data.len() - start);
             buf.put_slice(&this.data[start..start + n]);
@@ -1985,6 +2041,11 @@ mod tests {
 
     /// 用 DOWNLOAD_SEGMENTS 跑一次分段下载：远端内容是 `remote`，按 `total` 切段。
     async fn run_segmented(remote: Vec<u8>, total: u64) -> SegmentedRun {
+        run_segmented_failing_at(remote, total, None).await
+    }
+
+    /// 同 run_segmented，远端在偏移 `fail_at` 上的 READ 报错。
+    async fn run_segmented_failing_at(remote: Vec<u8>, total: u64, fail_at: Option<u64>) -> SegmentedRun {
         let data = Arc::new(remote);
         let local = Arc::new(Mutex::new(Vec::new()));
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -1997,6 +2058,7 @@ mod tests {
             waiting: false,
             in_flight: in_flight.clone(),
             peak: peak.clone(),
+            fail_at,
         };
         let result = download_segmented(
             total,
@@ -2102,6 +2164,20 @@ mod tests {
         let total = 4 * TRANSFER_CHUNK as u64 + 10;
         let run = run_segmented(pattern(TRANSFER_CHUNK), total).await;
         assert!(matches!(run.result, Err(AppError::Sftp(_))), "shrunk file must not download silently");
+        assert_eq!(run.released, run.opened, "a failed segment must not leave the other segments' handles open");
+    }
+
+    #[tokio::test]
+    async fn segmented_download_stops_other_segments_and_closes_every_handle_after_a_failure() {
+        let source = pattern(DOWNLOAD_SEGMENTS * 4 * TRANSFER_CHUNK);
+        let total = source.len() as u64;
+        // 段 0 的第一个 READ 就失败
+        let run = run_segmented_failing_at(source, total, Some(0)).await;
+        assert!(matches!(run.result, Err(AppError::Sftp(_))));
+        // 直接丢弃其余段会漏关它们的远端句柄（russh-sftp 的已开句柄计数不减，攒到上限后整个 SFTP 会话不能用）
+        assert_eq!(run.released, run.opened, "every segment handle must be closed");
+        // 其余段读完手上那一块就停，不是把各自的区间读完才报错
+        assert!(run.last_progress < total / 2, "other segments kept reading: {} of {total}", run.last_progress);
     }
 
     #[tokio::test]
@@ -2578,18 +2654,73 @@ mod tests {
         assert!(matches!(result, Err(AppError::Sftp(msg)) if msg.contains("file 7")));
     }
 
+    #[tokio::test]
+    async fn budgeted_transfer_finishes_in_flight_transfers_before_returning_an_error() {
+        // 在传的文件各开着一个远端句柄：出错时直接丢弃它们会漏关句柄（russh-sftp 的已开句柄计数不减）
+        let (started, finished) = (Mutex::new(Vec::new()), Mutex::new(Vec::new()));
+        let (started_ref, finished_ref) = (&started, &finished);
+        let items = (0..3 * DIR_FILE_CONCURRENCY).map(|i| (i, 1)).collect();
+        let result = transfer_with_budget(items, DIR_FILE_CONCURRENCY, IN_FLIGHT_BYTES, |i: usize| async move {
+            started_ref.lock().unwrap().push(i);
+            tokio::task::yield_now().await;
+            if i == 0 {
+                return Err(AppError::Sftp("file 0 failed".into()));
+            }
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            finished_ref.lock().unwrap().push(i);
+            Ok(())
+        }).await;
+        assert!(matches!(result, Err(AppError::Sftp(msg)) if msg.contains("file 0")));
+        let (started, finished) = (started.into_inner().unwrap(), finished.into_inner().unwrap());
+        assert!(started.len() > 1);
+        assert_eq!(finished.len(), started.len() - 1, "every started transfer must run to completion");
+        assert!(started.len() <= DIR_FILE_CONCURRENCY, "no new transfers may start after the failure");
+    }
+
+    #[tokio::test]
+    async fn scan_remote_finishes_in_flight_listings_before_returning_an_error() {
+        // 在列的目录各开着一个远端目录句柄（opendir → readdir → close）：出错时直接丢弃会漏关
+        let (started, finished) = (Mutex::new(Vec::new()), Mutex::new(Vec::new()));
+        let (started_ref, finished_ref) = (&started, &finished);
+        let list = |dir: String| async move {
+            started_ref.lock().unwrap().push(dir.clone());
+            if dir == "/r" {
+                return Ok((0..2 * DIR_OP_CONCURRENCY).map(|i| (format!("d{i:02}"), true, 0)).collect());
+            }
+            tokio::task::yield_now().await;
+            if dir == "/r/d00" {
+                return Err(AppError::Sftp(format!("read_dir {dir}: Permission denied")));
+            }
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            finished_ref.lock().unwrap().push(dir);
+            Ok(Vec::new())
+        };
+        let result = scan_remote("/r".to_string(), PathBuf::from("/l"), list).await;
+        assert!(matches!(result, Err(AppError::Sftp(msg)) if msg.contains("/r/d00")));
+        let (started, finished) = (started.into_inner().unwrap(), finished.into_inner().unwrap());
+        // 减去立即返回的 /r 和 /r/d00
+        assert!(started.len() > 2);
+        assert_eq!(finished.len(), started.len() - 2, "every started listing must run to completion");
+        assert!(started.len() - 1 <= DIR_OP_CONCURRENCY, "no new listings may start after the failure");
+    }
+
     /// 真实 sshd 上的目录 / 大文件传输。容器同 sudo_upload_against_real_linux（以 alice 登录）：
     /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
     mod real_sftp {
         use super::super::{
-            download_large, download_tree, exec_capture, list_remote_dir, new_sftp, scan_remote,
-            stream_to_remote, upload_tree, DirCounts, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
+            download_large, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, scan_remote,
+            stream_to_remote, upload_file, upload_tree, DirCounts, DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY,
+            DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
         };
         use russh_sftp::client::SftpSession;
         use std::collections::BTreeMap;
         use std::path::{Path, PathBuf};
         use std::sync::Mutex;
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
         use tokio::io::AsyncWriteExt;
 
         type H = std::sync::Arc<russh::client::Handle<crate::ssh::ClientHandler>>;
@@ -2598,14 +2729,67 @@ mod tests {
             h.channel_open_session().await.unwrap()
         }
 
-        async fn connect() -> Option<(H, SftpSession)> {
+        async fn login() -> Option<H> {
             let target = std::env::var("SSHL_SFTP_IT").ok()?;
             let (host, port) = target.split_once(':').unwrap();
-            let h = crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap();
+            Some(crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap())
+        }
+
+        async fn connect() -> Option<(H, SftpSession)> {
+            let h = login().await?;
             let ch = channel(&h).await;
             ch.request_subsystem(true, "sftp").await.unwrap();
             let sftp = new_sftp(ch).await.unwrap();
             Some((h, sftp))
+        }
+
+        /// 下面几个泄漏测试的句柄上限：要高于目录传输 / 遍历 / 分段下载各自的并发句柄数，否则正常传输也会撞上限。
+        const HANDLE_LIMIT: u64 = 64;
+
+        /// 起一个句柄上限为 `limit` 的 sftp-server：OpenSSH 的 limits 扩展通告 RLIMIT_NOFILE − 5（stdio、syslog、余量），
+        /// russh-sftp 按它在客户端计数。上限压低后漏一个句柄就能测出来（见 assert_all_handles_released），不用真开一千多个文件。
+        async fn connect_with_handle_limit(limit: u64) -> Option<(H, SftpSession)> {
+            assert!(limit as usize > DIR_FILE_CONCURRENCY.max(DIR_OP_CONCURRENCY).max(DOWNLOAD_SEGMENTS));
+            let h = login().await?;
+            let ch = channel(&h).await;
+            ch.exec(true, format!("ulimit -n {}; exec /usr/lib/openssh/sftp-server", limit + 5)).await.unwrap();
+            let sftp = new_sftp(ch).await.unwrap();
+            // 上限确实生效：正好能同时开 limit 个，再多一个就失败
+            let mut files = Vec::new();
+            for _ in 0..limit {
+                files.push(sftp.open("/etc/passwd").await.expect("上限以内应能打开"));
+            }
+            let over = sftp.open("/etc/passwd").await.err().expect("超过上限应失败");
+            assert!(over.to_string().contains("handle limit"), "{over}");
+            for mut f in files {
+                f.shutdown().await.unwrap();
+            }
+            Some((h, sftp))
+        }
+
+        /// 句柄都关干净了：还能同时开满 `limit` 个。客户端计数漏了报 handle limit reached，
+        /// 服务端漏了（fd 没关）报 open 失败。后台关闭要等到 CLOSE 的回复才减计数，所以给一点时间。
+        async fn assert_all_handles_released(sftp: &SftpSession, limit: u64) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let (mut files, mut error) = (Vec::new(), None);
+                while (files.len() as u64) < limit {
+                    match sftp.open("/etc/passwd").await {
+                        Ok(f) => files.push(f),
+                        Err(e) => {
+                            error = Some(e);
+                            break;
+                        }
+                    }
+                }
+                let opened = files.len() as u64;
+                for mut f in files {
+                    f.shutdown().await.unwrap();
+                }
+                let Some(e) = error else { return };
+                assert!(Instant::now() < deadline, "只能同时开 {opened} / {limit} 个句柄，漏了 {} 个: {e}", limit - opened);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
 
         async fn exec(h: &H, cmd: &str) -> String {
@@ -2779,6 +2963,116 @@ mod tests {
             sftp.read_dir(base.as_str()).await.expect("下载之后还能列目录");
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 读 /etc/passwd、/etc/group 的句柄也要关：每个 SFTP 会话首次列目录都会各读一次。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn loading_id_maps_releases_its_handles() {
+            let Some((_h, sftp)) = connect_with_handle_limit(HANDLE_LIMIT).await else { return };
+            let users = load_id_map(&sftp, "/etc/passwd").await.unwrap();
+            assert!(users.values().any(|name| name == "alice"));
+            assert!(load_id_map(&sftp, "/etc/group").await.is_some());
+            assert!(load_id_map(&sftp, "/nonexistent").await.is_none());
+            assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+        }
+
+        /// 单文件上传写失败（/dev/full 的写入报 ENOSPC）：出错文件自己的句柄也要关。写错误攒在 russh-sftp 的写确认里，
+        /// 有时在写的时候报、有时在 shutdown 时报（那时 shutdown 不发 CLOSE）。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn failed_upload_releases_its_handle() {
+            let Some((_h, sftp)) = connect_with_handle_limit(HANDLE_LIMIT).await else { return };
+            let src = temp_dir("full");
+            let max_writes = russh_sftp::client::Config::default().max_concurrent_writes;
+            // 1 块：错误在 shutdown 时报；超过写 pipeline 的块数：错误在写的时候报，后面还排着失败的写确认
+            for (i, chunks) in [1, 3, max_writes + 4].into_iter().enumerate() {
+                let local = src.join(format!("{i}.bin"));
+                write(&local, &bytes(chunks * TRANSFER_CHUNK, i));
+                let err = upload_file(&sftp, &local.to_string_lossy(), "/dev/full", |_| {}).await.unwrap_err();
+                assert!(err.to_string().contains("/dev/full"), "{err}");
+            }
+            assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+            std::fs::remove_dir_all(&src).unwrap();
+        }
+
+        /// 目录上传中途有文件失败（目标子目录不可写）：其余在传的文件也要关好句柄再报错。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn failed_directory_upload_releases_in_flight_handles() {
+            let Some((h, sftp)) = connect_with_handle_limit(HANDLE_LIMIT).await else { return };
+            let src = temp_dir("up-fail");
+            for i in 0..200 {
+                write(&src.join(format!("f{i:03}.bin")), &bytes(20_000, i));
+            }
+            for i in 0..10 {
+                write(&src.join(format!("ro/x{i}.bin")), &bytes(20_000, i));
+            }
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!("mkdir -p {base}/t/ro && chmod 555 {base}/t/ro")).await;
+            for _ in 0..3 {
+                let err = upload_tree(&sftp, &src.to_string_lossy(), &format!("{base}/t"), |_| {}).await.unwrap_err();
+                assert!(err.to_string().to_lowercase().contains("permission denied"), "{err}");
+            }
+            assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+            exec(&h, &format!("chmod 755 {base}/t/ro && rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&src).unwrap();
+        }
+
+        /// 目录下载中途有文件失败（没有读权限）：其余在传的文件也要关好句柄再报错。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn failed_directory_download_releases_in_flight_handles() {
+            let Some((h, sftp)) = connect_with_handle_limit(HANDLE_LIMIT).await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!("mkdir {base}/t && cd {base}/t && seq -f f%03g 1 200 | xargs truncate -s 20000 && chmod 000 f100")).await;
+            let dst = temp_dir("dl-fail");
+            for _ in 0..3 {
+                let err = download_tree(&sftp, &format!("{base}/t"), &dst.to_string_lossy(), |_| {}).await.unwrap_err();
+                assert!(err.to_string().to_lowercase().contains("permission denied"), "{err}");
+            }
+            assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            let _ = std::fs::remove_dir_all(&dst);
+        }
+
+        /// 分段下载有一段失败（文件在 stat 之后变短，中间段提前 EOF）：其余段也要关好句柄再报错。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn failed_segmented_download_releases_every_segment_handle() {
+            let Some((h, sftp)) = connect_with_handle_limit(HANDLE_LIMIT).await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/shrunk.bin");
+            let chunk = TRANSFER_CHUNK as u64;
+            exec(&h, &format!("truncate -s {} {remote}", 2 * chunk)).await;
+            let local = temp_dir("shrunk");
+            let claimed = (2 * DOWNLOAD_SEGMENTS as u64 * chunk).max(SEGMENTED_DOWNLOAD_MIN);
+            for _ in 0..3 {
+                let err = download_large(&sftp, &remote, &local, claimed, |_| {}).await.unwrap_err();
+                assert!(err.to_string().contains("shrank"), "{err}");
+            }
+            assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_file(&local).unwrap();
+        }
+
+        /// 遍历远端目录时有子目录列不了（没有读权限）：其余在列的目录也要关好句柄再报错。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn failed_directory_scan_releases_in_flight_listings() {
+            let Some((h, sftp)) = connect_with_handle_limit(HANDLE_LIMIT).await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!(
+                "mkdir {base}/t && cd {base}/t && for i in $(seq -w 1 100); do mkdir d$i && touch d$i/a d$i/b; done && chmod 000 d050"
+            )).await;
+            let dst = temp_dir("scan-fail");
+            for _ in 0..3 {
+                let err = download_tree(&sftp, &format!("{base}/t"), &dst.to_string_lossy(), |_| {}).await.unwrap_err();
+                assert!(err.to_string().to_lowercase().contains("permission denied"), "{err}");
+            }
+            assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+            exec(&h, &format!("chmod 755 {base}/t/d050 && rm -rf -- '{base}'")).await;
+            let _ = std::fs::remove_dir_all(&dst);
         }
 
         /// 分段数对大文件下载吞吐的影响（另需 SSHL_SFTP_BENCH=1）：同一连接上 4 / 8 / 16 段交替跑几轮，
