@@ -11,6 +11,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/too
 import { getCurrentSessionId, setConnectionDialogOpen, setEditingConnection, subscribe } from '../../lib/app-state';
 import { UNGROUPED_LABEL, getConnectionInitials, getUngroupedConnections, groupConnections, matchesConnection } from '../../lib/connection-groups';
 import sessionManager from '../../lib/session-manager';
+import { shallowEqual } from '../../lib/shallow-equal';
 import { cn } from '../../lib/utils';
 import type { ConnectionManager } from './useConnections';
 type Connection = { id: string; name?: string; host?: string; username?: string; group?: string; [key: string]: unknown };
@@ -135,7 +136,9 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [drop, setDrop] = useState<DropTarget | null>(null);
 
+  // 落点没变不 setState：指针每动一下都重渲染整个连接列表没有必要
   const applyDrop = (next: DropTarget | null) => {
+    if (shallowEqual(dropRef.current, next)) return;
     dropRef.current = next;
     setDrop(next);
   };
