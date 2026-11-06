@@ -34,10 +34,14 @@ const TRANSFER_CHUNK: usize = 255 * 1024;
 const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
 /// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），
-/// 开 N 个句柄读不相交区间，在途 READ 就是 N 个。
-const DOWNLOAD_SEGMENTS: usize = 4;
+/// 开 N 个句柄读不相交区间，在途 READ 就是 N 个：8 × 255KB = IN_FLIGHT_BYTES ≈ SSH 通道窗口，
+/// 与上传的 8 路写 pipeline 在途量持平。
+const DOWNLOAD_SEGMENTS: usize = (IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64) as usize;
 
-/// 小于此大小走单句柄流式下载：多开句柄的 open/close 往返抵不过并发收益。
+/// 小于此大小走单句柄流式下载。按 RTT 算（块 = TRANSFER_CHUNK）：单句柄 = open + ⌈S/块⌉ 个 READ
+/// + 1 个读到 EOF 的 READ；分段 = 段 0 open → 其余段 open → 每段 ⌈S/(段数·块)⌉ 个 READ（只有最后一段
+/// 多读一次 EOF）。2 块时两者打平、分段还多开句柄；4 块时分段 4 个 RTT 对单句柄 6 个。再往上调
+/// 只会让 1–2MB 的文件白等往返，所以保持 4 块（≈1MB）。
 const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
 
 /// 一条 SFTP 通道上同时在途的数据上限 ≈ SSH 默认通道窗口（russh 2MB）：再多也只是在窗口外排队，
@@ -731,13 +735,15 @@ fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// 分段并发下载：每段用 `open_remote` / `open_local` 各开一个独立句柄，seek 到段首后
-/// 顺序读写，返回累计字节数。本地文件不预分配长度——各段写到自己的偏移，最终长度
-/// 自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，直接报错，
-/// 不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
+/// 分段并发下载：段 0 用调用方已打开的远端句柄 `first`，其余段用 `open_remote` 各开一个；
+/// 本地各段都用 `open_local` 开独立句柄。seek 到段首后顺序读写，返回累计字节数。本地文件不预分配长度——
+/// 各段写到自己的偏移，最终长度自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，
+/// 直接报错，不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
+#[allow(clippy::too_many_arguments)]
 async fn download_segmented<R, W, OR, ORF, OL, OLF>(
     total: u64,
     segments: usize,
+    first: R,
     open_remote: OR,
     open_local: OL,
     release: impl Fn(R),
@@ -761,48 +767,60 @@ where
     let transferred = AtomicU64::new(0);
     let (open_remote, open_local, release, transferred_ref, on_progress) =
         (&open_remote, &open_local, &release, &transferred, &on_progress);
-    let workers = ranges.into_iter().enumerate().map(|(i, (start, end))| async move {
-        let mut remote = open_remote().await?;
-        let result = async {
-            let mut local = open_local().await?;
-            remote.seek(SeekFrom::Start(start)).await
-                .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
-            local.seek(SeekFrom::Start(start)).await?;
-            let mut buf = vec![0u8; TRANSFER_CHUNK];
-            let mut pos = start;
-            loop {
-                let want = if i == last {
-                    TRANSFER_CHUNK
-                } else {
-                    (end - pos).min(TRANSFER_CHUNK as u64) as usize
-                };
-                if want == 0 { break; }
-                let n = remote.read(&mut buf[..want]).await
-                    .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
-                if n == 0 {
-                    if i != last {
-                        return Err(AppError::Sftp(format!(
-                            "{remote_path} shrank during download (EOF at {pos}, expected {end})"
-                        )));
+    let mut first = Some(first);
+    let workers: Vec<_> = ranges.into_iter().enumerate().map(|(i, (start, end))| {
+        let opened = first.take();
+        async move {
+            let mut remote = match opened {
+                Some(remote) => remote,
+                None => open_remote().await?,
+            };
+            let result = async {
+                let mut local = open_local().await?;
+                remote.seek(SeekFrom::Start(start)).await
+                    .map_err(|e| AppError::Sftp(format!("seek {remote_path}: {e}")))?;
+                local.seek(SeekFrom::Start(start)).await?;
+                let mut buf = vec![0u8; TRANSFER_CHUNK];
+                let mut pos = start;
+                loop {
+                    let want = if i == last {
+                        TRANSFER_CHUNK
+                    } else {
+                        (end - pos).min(TRANSFER_CHUNK as u64) as usize
+                    };
+                    if want == 0 { break; }
+                    let n = remote.read(&mut buf[..want]).await
+                        .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
+                    if n == 0 {
+                        if i != last {
+                            return Err(AppError::Sftp(format!(
+                                "{remote_path} shrank during download (EOF at {pos}, expected {end})"
+                            )));
+                        }
+                        break;
                     }
-                    break;
+                    local.write_all(&buf[..n]).await?;
+                    pos += n as u64;
+                    on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
                 }
-                local.write_all(&buf[..n]).await?;
-                pos += n as u64;
-                on_progress(transferred_ref.fetch_add(n as u64, Ordering::Relaxed) + n as u64);
-            }
-            local.flush().await?;
-            Ok::<(), AppError>(())
-        }.await;
-        release(remote);
-        result
-    });
+                local.flush().await?;
+                Ok::<(), AppError>(())
+            }.await;
+            release(remote);
+            result
+        }
+    }).collect();
+    // 没有段（total = 0）时段 0 的句柄没人用
+    if let Some(unused) = first {
+        release(unused);
+    }
     futures::future::try_join_all(workers).await?;
     Ok(transferred.into_inner())
 }
 
-/// 大文件分段下载到 `local_path`。先确认远端可读再创建/截断本地文件：能 stat 但没有读权限
-/// （如 root 的大日志）时，不留下 0 字节文件、也不截断同名的已有文件。之后各段再各自以写模式打开。
+/// 大文件分段下载到 `local_path`。先开段 0 的远端句柄，成功了才创建 / 截断本地文件：能 stat 但
+/// 没有读权限（如 root 的大日志）时，不留下 0 字节文件、也不截断同名的已有文件。这个句柄就是
+/// 段 0，不再单独探测一次（省一对 open / close）；其余段之后各自打开。
 async fn download_large(
     sftp: &SftpSession,
     remote_path: &str,
@@ -810,12 +828,16 @@ async fn download_large(
     total: u64,
     on_progress: impl Fn(u64),
 ) -> AppResult<u64> {
-    close_in_background(sftp.open(remote_path).await
-        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?);
-    tokio::fs::File::create(local_path).await?;
+    let first = sftp.open(remote_path).await
+        .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))?;
+    if let Err(e) = tokio::fs::File::create(local_path).await {
+        close_in_background(first);
+        return Err(e.into());
+    }
     download_segmented(
         total,
         DOWNLOAD_SEGMENTS,
+        first,
         move || async move {
             sftp.open(remote_path).await
                 .map_err(|e| AppError::Sftp(format!("open remote {remote_path}: {e}")))
@@ -1767,7 +1789,10 @@ mod tests {
         /// READ 在途峰值。
         peak: usize,
         last_progress: u64,
+        /// 远端句柄总数（调用方预先开好的段 0 句柄 + open_remote 新开的）。
         opened: usize,
+        /// 其中经 open_remote 新开的。
+        reopened: usize,
         released: usize,
     }
 
@@ -1778,19 +1803,21 @@ mod tests {
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let last_progress = AtomicU64::new(0);
-        let (opened, released) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let (reopened, released) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let new_remote = || MockRemote {
+            data: data.clone(),
+            pos: 0,
+            waiting: false,
+            in_flight: in_flight.clone(),
+            peak: peak.clone(),
+        };
         let result = download_segmented(
             total,
             DOWNLOAD_SEGMENTS,
+            new_remote(),
             || {
-                opened.fetch_add(1, Ordering::SeqCst);
-                let remote = MockRemote {
-                    data: data.clone(),
-                    pos: 0,
-                    waiting: false,
-                    in_flight: in_flight.clone(),
-                    peak: peak.clone(),
-                };
+                reopened.fetch_add(1, Ordering::SeqCst);
+                let remote = new_remote();
                 async move { Ok(remote) }
             },
             || {
@@ -1807,7 +1834,8 @@ mod tests {
             bytes,
             peak: peak.load(Ordering::SeqCst),
             last_progress: last_progress.load(Ordering::SeqCst),
-            opened: opened.into_inner(),
+            opened: 1 + reopened.load(Ordering::SeqCst),
+            reopened: reopened.into_inner(),
             released: released.into_inner(),
         }
     }
@@ -1855,6 +1883,30 @@ mod tests {
         // 只 drop 不关，russh-sftp 的已开句柄计数不会减，累计到服务端上限（1019）后 open 全部失败。
         assert!(run.opened > 1);
         assert_eq!(run.released, run.opened, "every segment handle must be closed");
+    }
+
+    #[tokio::test]
+    async fn segmented_download_reuses_the_probe_handle_for_segment_zero() {
+        let source = pattern(5 * TRANSFER_CHUNK);
+        let segments = segment_ranges(source.len() as u64, DOWNLOAD_SEGMENTS).len();
+        let run = run_segmented(source.clone(), source.len() as u64).await;
+        run.result.unwrap();
+        assert!(run.bytes == source);
+        // 探测可读用的句柄就是段 0：不再先 open 一次、关掉、再给每段各 open 一次
+        assert_eq!(run.reopened, segments - 1);
+        assert_eq!(run.released, segments);
+    }
+
+    #[tokio::test]
+    async fn segmented_download_keeps_a_window_of_reads_in_flight() {
+        let source = pattern(16 * TRANSFER_CHUNK);
+        let run = run_segmented(source.clone(), source.len() as u64).await;
+        run.result.unwrap();
+        // 上传有 russh-sftp 的 8 路写 pipeline（8 × 块 ≈ 2MB 通道窗口），下载靠分段补齐同样的在途量：
+        // 50ms RTT 下 4 段只有 ~20MB/s。
+        let upload_pipeline = russh_sftp::client::Config::default().max_concurrent_writes;
+        assert_eq!(run.peak, upload_pipeline);
+        assert_eq!(run.peak as u64 * TRANSFER_CHUNK as u64, IN_FLIGHT_BYTES);
     }
 
     #[tokio::test]
@@ -2467,6 +2519,23 @@ mod tests {
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&src).unwrap();
             std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 能 stat 但没有读权限的大文件：报错，且不截断本地同名文件（段 0 的句柄兼作探测，开成功才建本地文件）。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn unreadable_large_file_leaves_local_file_untouched() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let remote = format!("{base}/secret.bin");
+            exec(&h, &format!("truncate -s {SEGMENTED_DOWNLOAD_MIN} {remote} && chmod 000 {remote}")).await;
+            let local = temp_dir("unreadable");
+            write(&local, b"keep me");
+            let result = download_large(&sftp, &remote, &local, SEGMENTED_DOWNLOAD_MIN, |_| {}).await;
+            assert!(result.is_err(), "没有读权限应当报错");
+            assert_eq!(std::fs::read(&local).unwrap(), b"keep me", "本地已有文件不能被截断");
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_file(&local).unwrap();
         }
 
         /// OpenSSH 的 limits 扩展声明句柄上限 1019，russh-sftp 按它在客户端计数、只有等到 CLOSE 回复才减一：
