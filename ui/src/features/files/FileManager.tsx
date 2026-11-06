@@ -17,14 +17,14 @@ import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
 import { useTransfer } from './useTransfer';
-import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, type DropTarget } from './file-drag';
+import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove, type DropTarget } from './file-drag';
 
 const subscribeActiveTabId = (callback: () => void) => subscribe('activeTabId', callback);
 const subscribeCurrentSessionId = (callback: () => void) => subscribe('currentSessionId', callback);
 
 type AppWindow = Window & { api?: any; fileManager?: any; connectionManager?: any };
 type PaneName = 'local' | 'remote';
-type RowDrag = { pane: PaneName; items: FileEntry[]; pointerId: number; startX: number; startY: number; active: boolean };
+type RowDrag = { pane: PaneName; items: FileEntry[]; pointerId: number; startX: number; startY: number; lastX: number; lastY: number; active: boolean };
 const DRAG_THRESHOLD = 5;
 const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 type Selected = Record<PaneName, Set<string>>;
@@ -226,6 +226,7 @@ export function FileManager() {
 
   // 拖拽：两侧互拖 = 上传 / 下载（指针事件），从 Finder 拖进远程 = 上传（Tauri 拖放事件，带本地路径）。见 file-drag.ts。
   const rowDragRef = useRef<RowDrag | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const suppressClickRef = useRef(false);
   const [rowDrag, setRowDrag] = useState<{ pane: PaneName; items: FileEntry[]; x: number; y: number; target: DropTarget | null } | null>(null);
   const [finderTarget, setFinderTarget] = useState<DropTarget | null>(null);
@@ -236,17 +237,35 @@ export function FileManager() {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || !sessionId) return;
     const items = dragItems(entry, selected[pane], pane === 'local' ? local.files : remote.files);
     if (!items.length) return;
-    rowDragRef.current = { pane, items, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false };
+    rowDragRef.current = { pane, items, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, active: false };
   }, [local.files, remote.files, selected, sessionId]);
 
   useEffect(() => {
     const targetAt = (x: number, y: number) => dropTargetFrom(document.elementFromPoint(x, y));
+    const cancel = () => {
+      if (!rowDragRef.current) return;
+      rowDragRef.current = null;
+      setRowDrag(null);
+    };
     const move = (event: PointerEvent) => {
       const drag = rowDragRef.current;
       if (!drag || drag.pointerId !== event.pointerId) return;
+      if ((event.buttons & 1) === 0) {
+        // 左键已松开却没收到 pointerup（实测 WKWebView 拖拽后常丢 pointerup / mouseup）：见 releasedMove
+        if (releasedMove(drag, event.clientX, event.clientY, DRAG_THRESHOLD) === 'drop') finish(event);
+        else cancel();
+        return;
+      }
       // 阈值之下算点击，轻碰一下不进入拖拽
       if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD) return;
+      if (!drag.active) {
+        // 捕获指针（同会话标签、连接树的拖拽）：实测 pointerup 仍会丢，但捕获后松手时立刻补来那个
+        // 松开状态的 pointermove（不捕获时要等下一次移动鼠标），releasedMove 据此当场完成拖放
+        try { rootRef.current?.setPointerCapture(event.pointerId); } catch {}
+      }
       drag.active = true;
+      drag.lastX = event.clientX;
+      drag.lastY = event.clientY;
       event.preventDefault();
       const target = targetAt(event.clientX, event.clientY);
       const ok = planDrop(drag.pane, target, dragContext.current.dirs);
@@ -258,6 +277,7 @@ export function FileManager() {
       if (!drag || drag.pointerId !== event.pointerId) return;
       rowDragRef.current = null;
       setRowDrag(null);
+      try { rootRef.current?.releasePointerCapture(drag.pointerId); } catch {}
       if (!drag.active || event.type === 'pointercancel') return;
       // 拖完松手别再当成点了一下这一行
       suppressClickRef.current = true;
@@ -269,10 +289,13 @@ export function FileManager() {
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', finish, true);
     window.addEventListener('pointercancel', finish, true);
+    // 切到别的应用（窗口失焦）时拖拽作废
+    window.addEventListener('blur', cancel);
     return () => {
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', finish, true);
       window.removeEventListener('pointercancel', finish, true);
+      window.removeEventListener('blur', cancel);
     };
   }, []);
 
@@ -478,7 +501,7 @@ export function FileManager() {
 
   const permissionGroupLabels = ['所有者', '组', '其他用户'];
   return (
-    <div className="relative flex h-full min-h-0 flex-col gap-2.5" data-file-manager>
+    <div ref={rootRef} className="relative flex h-full min-h-0 flex-col gap-2.5" data-file-manager>
       <div className="flex min-h-0 flex-1 overflow-hidden" id="file-manager-split-pane">
         <div className="flex min-h-0 min-w-0 flex-1" data-file-pane="local" onMouseDownCapture={() => { activePane.current = 'local'; }}>
           <FilePane

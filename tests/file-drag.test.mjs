@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop } from '../ui/src/features/files/file-drag.ts';
+import { dragItems, dragLabel, dropPointToCss, dropTargetFrom, planDrop, releasedMove } from '../ui/src/features/files/file-drag.ts';
 
 // 只实现 closest / getAttribute 的假 DOM 节点
 function node(attrs, parent = null) {
@@ -52,4 +52,12 @@ test('拖哪些：按住的行在选中里就拖整组选中，否则只拖这�
 test('Finder 落点坐标：macOS 上已是 CSS 像素，其他平台是物理像素', () => {
   assert.deepEqual(dropPointToCss({ x: 300, y: 120 }, true, 2), { x: 300, y: 120 });
   assert.deepEqual(dropPointToCss({ x: 600, y: 240 }, false, 2), { x: 300, y: 120 });
+});
+
+test('没收到 pointerup 的松手：在最后拖拽位置附近算松手，离得远（窗口外松手）算取消', () => {
+  const drag = { active: true, lastX: 1112, lastY: 196 };
+  assert.equal(releasedMove(drag, 1112, 196, 5), 'drop', '实测：WKWebView 丢了 pointerup，紧跟一个同位置的松开状态移动');
+  assert.equal(releasedMove(drag, 1115, 199, 5), 'drop');
+  assert.equal(releasedMove(drag, 300, 600, 5), 'cancel');
+  assert.equal(releasedMove({ ...drag, active: false }, 1112, 196, 5), 'cancel', '还没真正拖起来');
 });
