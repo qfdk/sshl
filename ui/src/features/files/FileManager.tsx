@@ -12,7 +12,7 @@ import { FilePane, type FileContextMenuItem } from './FilePane';
 import { remoteDeleteCommands } from './remote-delete';
 import { alertDialog, confirmDialog, passwordDialog } from '../../lib/dialogs';
 import sessionManager from '../../lib/session-manager';
-import { getDeclinedUser, getFileIdentity, nextDeclinedUser, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from './file-user';
+import { getDeclinedUser, getFileIdentity, recordSyncResult, subscribeFileIdentity, syncFileUser } from './file-user';
 import { savedPasswordChoices, sudoErrorMessage } from './sudo-upload';
 import { deletePrompt } from './delete-prompt';
 import { useFileSelectionFallback } from './shortcuts';
@@ -213,8 +213,8 @@ export const FileManager = memo(function FileManager() {
           return answer === null ? null : 'choice' in answer ? { credential: answer.choice } : answer;
         },
       });
-      if (result.fileUser) setFileIdentity(sessionId, { loginUser, fileUser: result.fileUser, terminalUser });
-      setDeclinedUser(sessionId, nextDeclinedUser(declinedUser, result));
+      // 会话在等密码时已被移除：丢弃结果，不写记录、不刷新、不弹报错
+      if (!recordSyncResult(sessionId, result, { loginUser, terminalUser, declinedUser })) return;
       if (result.status === 'switched') {
         remote.clearCache();
         void remote.load(await resolveRemoteHome(sessionId) || '/', true);

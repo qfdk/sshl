@@ -81,6 +81,23 @@ export function nextDeclinedUser(previous: string | null, result: SyncResult) {
   return result.terminalUser === null || result.terminalUser === previous ? previous : null;
 }
 
+/**
+ * 一次同步的结果写回这个会话的记录（文件管理身份、拒绝记录）。同步要等探测、等用户输密码，途中会话可能
+ * 已被移除（断开 / 远端关闭）：那就丢弃结果、什么都不写，否则 onSessionRemoved 清过的记录又被写回来。
+ * 返回是否写回（false = 会话已不在，调用方也别再刷新列表、弹报错）。
+ */
+export function recordSyncResult(sessionId: string, result: SyncResult, { loginUser, terminalUser, declinedUser }: {
+  loginUser: string;
+  terminalUser: string;
+  /** 同步开始时读到的拒绝记录。 */
+  declinedUser: string | null;
+}) {
+  if (!sessionManager.getSession(sessionId)) return false;
+  if (result.fileUser) setFileIdentity(sessionId, { loginUser, fileUser: result.fileUser, terminalUser });
+  setDeclinedUser(sessionId, nextDeclinedUser(declinedUser, result));
+  return true;
+}
+
 // 会话没了（断开 / 远端关闭）就丢掉它的身份和取消记录，否则按 sessionId 只增不删
 sessionManager.onSessionRemoved(sessionId => {
   setFileIdentity(sessionId, null);

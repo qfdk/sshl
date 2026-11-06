@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getDeclinedUser, getFileIdentity, nextDeclinedUser, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
+import { getDeclinedUser, getFileIdentity, nextDeclinedUser, recordSyncResult, setDeclinedUser, setFileIdentity, subscribeFileIdentity, syncFileUser } from '../ui/src/features/files/file-user.ts';
 import sessionManager from '../ui/src/lib/session-manager.ts';
 
 const wrong = { success: false, error: 'SUDO_PASSWORD_INCORRECT: su: Authentication failure' };
@@ -171,4 +171,33 @@ test('自动同步时取消过输密码的记录：按会话记，会话被移�
   setDeclinedUser('declined-staying', null);
   assert.equal(getDeclinedUser('declined-staying'), null, '切换成功 / 终端换了用户时主动清掉');
   sessionManager.removeSession('declined-staying');
+});
+
+test('密码框开着时会话被移除（断开 / 远端关闭）：之后取消或切换成功，结果丢弃，不留身份和拒绝记录', async () => {
+  const who = { ...alice, user: 'root', via: 'su', credential: null };
+  for (const [name, passwords, status] of [['gone-cancel', [], 'cancelled'], ['gone-switch', [{ password: 'rootpw' }], 'switched']]) {
+    sessionManager.addSession(name, 'c1');
+    const result = await syncFileUser({
+      identify: async () => who,
+      switchUser: async (_target, secret) => secret ? { success: true } : { success: false, error: 'SUDO_PASSWORD_REQUIRED: x' },
+      // 用户还在看密码框时会话没了
+      askPassword: async () => { sessionManager.removeSession(name); return passwords.shift() ?? null; },
+      interactive: false,
+    });
+    assert.equal(result.status, status);
+    assert.equal(recordSyncResult(name, result, { loginUser: 'alice', terminalUser: 'root', declinedUser: null }), false, name);
+    assert.equal(getFileIdentity(name), null, name);
+    assert.equal(getDeclinedUser(name), null, name);
+  }
+});
+
+test('会话还在：同步结果写回身份和拒绝记录', () => {
+  sessionManager.addSession('alive', 'c1');
+  assert.equal(recordSyncResult('alive', { status: 'cancelled', fileUser: 'alice', terminalUser: 'root' }, { loginUser: 'alice', terminalUser: 'root', declinedUser: null }), true);
+  assert.deepEqual(getFileIdentity('alive'), { loginUser: 'alice', fileUser: 'alice', terminalUser: 'root' });
+  assert.equal(getDeclinedUser('alive'), 'root');
+  assert.equal(recordSyncResult('alive', { status: 'switched', fileUser: 'root', terminalUser: 'root' }, { loginUser: 'alice', terminalUser: 'root', declinedUser: 'root' }), true);
+  assert.deepEqual(getFileIdentity('alive'), { loginUser: 'alice', fileUser: 'root', terminalUser: 'root' });
+  assert.equal(getDeclinedUser('alive'), null);
+  sessionManager.removeSession('alive');
 });
