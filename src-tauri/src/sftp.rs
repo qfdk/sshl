@@ -49,8 +49,10 @@ const DOWNLOAD_SEGMENTS: usize = (IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64) as us
 const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
 
 /// 目录传输同时在传的文件数上限。小文件的耗时几乎全是 open / 读写 / close 的往返（各一个 RTT），
-/// 串行时几千个小文件就是几千轮往返；数据量另由 IN_FLIGHT_BYTES 限，这里限的是同时开着的句柄数。
-const DIR_FILE_CONCURRENCY: usize = 16;
+/// 串行时几千个小文件就是几千轮往返；数据量另由 IN_FLIGHT_BYTES 限，这里限的是同时开着的句柄数
+/// （远端远低于 OpenSSH 的 1019，本地远低于 macOS 默认 256 个 fd）。50ms RTT、3000 个小文件实测：
+/// 16 路上传 / 下载 33s / 36s，32 路 17s / 19s。
+const DIR_FILE_CONCURRENCY: usize = 32;
 
 /// 目录传输时同一层内建目录 / 列目录的并发度。每个 MKDIR 一个 RTT，每次列目录至少三个
 /// （opendir、readdir、close），请求和回复都很小。
@@ -2340,7 +2342,7 @@ mod tests {
         result.unwrap();
         assert_eq!(started.len(), 60);
         // 小文件的耗时几乎全是 open / 读写 / close 的往返（约 3 RTT），并发数直接决定速度：
-        // 50ms RTT 下 16 路约 100 个文件 / 秒，原来的 4 路只有 ~27 个。
+        // 50ms RTT 下 4 路只有 ~27 个文件 / 秒。
         assert_eq!(peak, DIR_FILE_CONCURRENCY);
         assert!(peak >= 16, "tiny files ran only {peak} at a time");
     }
