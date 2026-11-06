@@ -33,6 +33,10 @@ const TRANSFER_CHUNK: usize = 255 * 1024;
 /// 串行时 /usr/lib 这类几百个 .so 链接的目录要几百个 RTT。
 const SYMLINK_STAT_CONCURRENCY: usize = 32;
 
+/// 一条 SFTP 通道上同时在途的数据上限 ≈ SSH 默认通道窗口（russh 2MB）：再多也只是在窗口外排队，
+/// 还让排在后面的请求（OPEN / CLOSE / READ 的回复）更晚才到，慢链路上撞 SFTP 请求超时（见 new_sftp）。
+const IN_FLIGHT_BYTES: u64 = 8 * TRANSFER_CHUNK as u64;
+
 /// 大文件分段并发下载的段数。单句柄下载一问一答（吞吐 ≈ 块大小 / RTT），
 /// 开 N 个句柄读不相交区间，在途 READ 就是 N 个：8 × 255KB = IN_FLIGHT_BYTES ≈ SSH 通道窗口，
 /// 与上传的 8 路写 pipeline 在途量持平。
@@ -43,10 +47,6 @@ const DOWNLOAD_SEGMENTS: usize = (IN_FLIGHT_BYTES / TRANSFER_CHUNK as u64) as us
 /// 多读一次 EOF）。2 块时两者打平、分段还多开句柄；4 块时分段 4 个 RTT 对单句柄 6 个。再往上调
 /// 只会让 1–2MB 的文件白等往返，所以保持 4 块（≈1MB）。
 const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
-
-/// 一条 SFTP 通道上同时在途的数据上限 ≈ SSH 默认通道窗口（russh 2MB）：再多也只是在窗口外排队，
-/// 还让排在后面的请求（OPEN / CLOSE / READ 的回复）更晚才到，慢链路上撞 SFTP 请求超时（见 new_sftp）。
-const IN_FLIGHT_BYTES: u64 = 8 * TRANSFER_CHUNK as u64;
 
 /// 目录传输同时在传的文件数上限。小文件的耗时几乎全是 open / 读写 / close 的往返（各一个 RTT），
 /// 串行时几千个小文件就是几千轮往返；数据量另由 IN_FLIGHT_BYTES 限，这里限的是同时开着的句柄数。
@@ -739,7 +739,6 @@ fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
 /// 本地各段都用 `open_local` 开独立句柄。seek 到段首后顺序读写，返回累计字节数。本地文件不预分配长度——
 /// 各段写到自己的偏移，最终长度自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，
 /// 直接报错，不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
-#[allow(clippy::too_many_arguments)]
 async fn download_segmented<R, W, OR, ORF, OL, OLF>(
     total: u64,
     segments: usize,
