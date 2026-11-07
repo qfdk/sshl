@@ -1,8 +1,8 @@
 /* 终端基本样式 —— font-family/font-size/line-height 交给 xterm options 控制 */
-/* 内边距与用户 Ghostty 的 window-padding-x/y = 8 一致；8px 仍避得开 14px 圆角，首尾字符不会被切到。
+/* 内边距 4px：边框尽量窄（用户要求）。14px 圆角在离边 4px 处只切掉约 0.2px，首个字符看不出被切。
    排不满整行/整列的余量由 useTerminal 的 centerScreenInPadding 平分到两侧 */
 .terminal-container .xterm {
-    padding: 8px !important;
+    padding: 4px !important;
     background-color: transparent !important;
 }
 
