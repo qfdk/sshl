@@ -1,5 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react';
 import { pickEdgeBg } from './edge-bg';
+import { centerOffset } from './screen-fit';
 import { overlayOpen, shouldRefocusTerminal } from './refocus';
 import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
@@ -243,27 +244,26 @@ function releaseWebgl(webgl: WebglAddon | null) {
   try { webgl.dispose(); } catch (_) {}
 }
 
-// 渲染器把行高量化成整数 px → 渲染区(canvas)比可用高度矮几~十几 px，
-// 默认贴顶，底部多出一道空隙（与终端同色但位置突兀，用户感知为"底部多一行"）。
-// 这里把渲染区精确贴底：强制 .xterm-screen 高度 = canvas 高度（覆盖 CSS 的 height:100%，
-// 否则 screen 会被撑满到可用高度），再用 relative 把整段余量推到顶部，底部只剩正常 padding。
-// 左右 padding 不受影响；xterm 用 screen 的真实 getBoundingClientRect 算鼠标坐标，
-// relative 偏移已包含在 rect 内，贴底不影响选择/点击。
-function alignScreenToBottom(host: HTMLElement) {
+// 渲染器按整 cell 排版 → 渲染区(canvas)比可用区域小一点（不足一行 / 一列）。
+// 余量堆在一侧就是一道更宽的边：贴顶时底部像多一行，贴底时顶部宽出最多一整行（vim 底色和 padding
+// 不同色时就是一圈粗黑框）。这里把余量平分到上下、左右（同 Ghostty 的 window-padding-balance）：
+// 强制 .xterm-screen 尺寸 = canvas 尺寸（覆盖 CSS 的 100%），再用 relative 偏移居中。
+// xterm 用 screen 的真实 getBoundingClientRect 算鼠标坐标，偏移已包含在 rect 内，不影响选择/点击。
+function centerScreenInPadding(host: HTMLElement) {
   if (!host) return;
-  const xt = host.querySelector('.xterm');
-  const sc = host.querySelector('.xterm-screen');
+  const xt = host.querySelector<HTMLElement>('.xterm');
+  const sc = host.querySelector<HTMLElement>('.xterm-screen');
   const cv = host.querySelector('.xterm-screen canvas');
   if (!xt || !sc || !cv) return;
-  const padTop = parseFloat(getComputedStyle(xt).paddingTop) || 0;
-  const padBot = parseFloat(getComputedStyle(xt).paddingBottom) || 0;
-  const avail = (xt as HTMLElement).clientHeight - padTop - padBot;
-  const cvH = cv.getBoundingClientRect().height;
-  if (!cvH) return;
-  const leftover = Math.max(0, Math.round(avail - cvH));
-  (sc as HTMLElement).style.setProperty('height', cvH + 'px', 'important');
-  (sc as HTMLElement).style.setProperty('position', 'relative', 'important');
-  (sc as HTMLElement).style.setProperty('top', leftover + 'px', 'important');
+  const style = getComputedStyle(xt);
+  const pad = (side: string) => parseFloat(style.getPropertyValue(`padding-${side}`)) || 0;
+  const { width, height } = cv.getBoundingClientRect();
+  if (!width || !height) return;
+  sc.style.setProperty('width', width + 'px', 'important');
+  sc.style.setProperty('height', height + 'px', 'important');
+  sc.style.setProperty('position', 'relative', 'important');
+  sc.style.setProperty('left', centerOffset(xt.clientWidth - pad('left') - pad('right'), width) + 'px', 'important');
+  sc.style.setProperty('top', centerOffset(xt.clientHeight - pad('top') - pad('bottom'), height) + 'px', 'important');
 }
 
 // 字形度量依赖字体已加载：内置 Nerd Font 是 2MB 级 TTF，没加载完就 open 会按回退字体量 cell。
@@ -335,7 +335,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
     }, wait);
   };
 
-  // 窗口/容器尺寸变化：每个动画帧重排一次（像原生终端那样拖动中实时跟随），并立刻贴底。
+  // 窗口/容器尺寸变化：每个动画帧重排一次（像原生终端那样拖动中实时跟随），并立刻把渲染区在 padding 内居中。
   const resizeNow = () => {
     const sessionId = activeSessionIdRef.current;
     const fitAddon = terminalFitAddonRef.current;
@@ -343,7 +343,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
     try {
       fitAddon.fit();
       const host = terminalsRef.current.get(sessionId)?.host;
-      if (host) alignScreenToBottom(host);
+      if (host) centerScreenInPadding(host);
       schedulePtySize(sessionId, fitAddon);
     } catch (err) {
       console.error('调整终端大小失败:', err);
@@ -516,7 +516,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       const renderTick = debounce(() => {
         const baseBg = terminalsRef.current.get(sessionId)?.defaultBg || DEFAULT_TERM_BG;
         applyBg(sampleEdgeBg(term, baseBg) || baseBg);
-        alignScreenToBottom(host);
+        centerScreenInPadding(host);
         if (activeSessionIdRef.current === sessionId) {
           try { (window as AppWindow).uiManager?.setFillPasswordPromptVisible(isPasswordPromptVisible(term)); } catch (_) {}
         }
@@ -554,7 +554,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       requestAnimationFrame(() => {
         try {
           fitAddon.fit();
-          alignScreenToBottom(host);
+          centerScreenInPadding(host);
           sendPtySize(sessionId, fitAddon);
         } catch (err) { console.warn('[initTerminal] fit 失败:', err); }
       });

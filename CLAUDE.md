@@ -75,7 +75,7 @@ pnpm build             # Tauri application build
   place or cancel, never start a drag) and clear stale press state on the next window pointerdown.
 - **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` loads the GPU renderer
   (WebglAddon, falling back to CanvasAddon on failure or context loss) after `term.open()`,
-  Unicode11 registration, bottom alignment, ANSI background sampling, and PTY resize
+  Unicode11 registration, grid centering (`centerScreenInPadding`), ANSI background sampling, and PTY resize
   synchronization. Do not reorder those paths. xterm and its addons are a lazy chunk
   (`loadXterm`); do not import them statically. A hidden spare terminal is prebuilt at idle and
   claimed by `initTerminal`; its fitted size is sent as `cols`/`rows` with `ssh_connect` so the
@@ -89,5 +89,8 @@ pnpm build             # Tauri application build
   sentences mid-line), and its `confirm` returns a Promise, so `if (!confirm(..))` never blocks.
 - **Dialog mounting** — Dialogs must not use `forceMount`; `TabsContent` in `App.tsx`
   intentionally keeps `forceMount` so xterm instances survive tab switches.
-- **xterm** is pinned to 5.3.0. Do not upgrade to v6.
+- **xterm** is pinned to 5.3.0. Do not upgrade to v6. `xterm-addon-webgl@0.16.0` carries a backported upstream fix in
+  `patches/` (bun `patchedDependencies`): its background-rectangle buffer was one rectangle short, so a full screen
+  where every cell has its own background (terminal image viewers) drew nothing at all. `tests/xterm-webgl-patch.test.mjs`
+  fails if the patch is not applied.
 - **Rust scope** — do not modify `src-tauri/**/*.rs` for frontend migration work.
