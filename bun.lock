@@ -41,6 +41,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "xterm-addon-webgl@0.16.0": "patches/xterm-addon-webgl@0.16.0.patch",
+  },
   "packages": {
     "@floating-ui/core": ["@floating-ui/core@1.8.0", "", { "dependencies": { "@floating-ui/utils": "0.2.12" } }, "sha512-0CIZ5itps/8x7BG8dEIhs53BvCUH2PCoogtakwRTut+Arm58sJooJ0AuZhLw2HJYIR5cMLNPBSS728sPho2khQ=="],
 

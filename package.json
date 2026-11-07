@@ -50,5 +50,8 @@
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
   },
-  "packageManager": "bun@1.4.0"
+  "packageManager": "bun@1.4.0",
+  "patchedDependencies": {
+    "xterm-addon-webgl@0.16.0": "patches/xterm-addon-webgl@0.16.0.patch"
+  }
 }
