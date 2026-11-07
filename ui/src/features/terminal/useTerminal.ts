@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react';
+import { pickEdgeBg } from './edge-bg';
 import { overlayOpen, shouldRefocusTerminal } from './refocus';
 import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
@@ -135,7 +136,7 @@ function cellBgHex(cell: any, base: string, pal: string[] | null) {
   return null;
 }
 
-// 采样 xterm 渲染区「四条边缘」cell 的众数 bg → "#rrggbb" 或 null。
+// 采样 xterm 渲染区边缘 cell 的 bg → "#rrggbb" 或 null，取色规则见 pickEdgeBg。
 // padding 紧贴屏幕边缘，取边缘 cell 的背景最能消除色缝：
 //   - 全屏 TUI（vim/nvim/htop）边缘即其根背景 → padding 完美贴合，切主题也无缝；
 //   - 居中对话框（whiptail）不触边，四边纯净 → 不被中间对话框/装饰色带偏。
@@ -145,28 +146,12 @@ function cellBgHex(cell: any, base: string, pal: string[] | null) {
 function sampleEdgeBg(term: Terminal, defaultBg: string) {
   try {
     const buf = term.buffer.active;
-    const rows = term.rows, cols = term.cols;
-    if (!rows || !cols) return null;
     const base = (defaultBg || DEFAULT_TERM_BG).toLowerCase();
     const pal = getAnsiPalette(term);
-    const counts = new Map<string, number>();
-    let total = 0;
-    const sample = (x: number, y: number) => {
-      const line = buf.getLine(buf.viewportY + y);
-      if (!line) return;
-      const cell = line.getCell(x);
-      if (!cell) return;
-      total++;
-      const hex = cellBgHex(cell, base, pal);
-      if (hex) counts.set(hex, (counts.get(hex) || 0) + 1);
-    };
-    for (let x = 0; x < cols; x++) { sample(x, 0); sample(x, rows - 1); }
-    for (let y = 0; y < rows; y++) { sample(0, y); sample(cols - 1, y); }
-    if (!total || counts.size === 0) return null;
-    let best: string | null = null, max = 0;
-    for (const [key, value] of counts) if (value > max) { best = key; max = value; }
-    if (!best || max / total < 0.5) return null;
-    return best;
+    return pickEdgeBg(term.cols, term.rows, (x, y) => {
+      const cell = buf.getLine(buf.viewportY + y)?.getCell(x);
+      return cell ? cellBgHex(cell, base, pal) : null;
+    });
   } catch (_) {
     return null;
   }
