@@ -172,7 +172,7 @@ export function FilePane({
     : { start: 0, end: rows.length, padTop: 0, padBottom: 0 };
 
   return (
-    <section className={cn('flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-border bg-card shadow-[0_1px_2px_rgba(22,24,29,0.06),0_8px_24px_rgba(22,24,29,0.06)] transition-shadow', dropActive && 'border-primary ring-2 ring-primary/30')}>
+    <section className={cn('flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[8px] border border-border bg-card shadow-[0_1px_2px_rgba(22,24,29,0.06),0_8px_24px_rgba(22,24,29,0.06)] transition-shadow', dropActive && 'border-primary ring-2 ring-primary/30')}>
       <header className="flex items-center gap-1.5 px-3.5 pb-2.5 pt-3">
         <span className="mr-1 shrink-0 text-sm font-semibold">{isRemote ? '远程文件' : '本地文件'}</span>
         {badge}
