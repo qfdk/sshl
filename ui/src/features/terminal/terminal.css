@@ -1,6 +1,6 @@
 /* 终端基本样式 —— font-family/font-size/line-height 交给 xterm options 控制 */
-/* 内边距 4px：边框尽量窄（用户要求）。14px 圆角在离边 4px 处只切掉约 0.2px，首个字符看不出被切。
-   排不满整行/整列的余量由 useTerminal 的 centerScreenInPadding 平分到两侧 */
+/* 内边距 4px，四边一样：卡片圆角 8px（Terminal.tsx），离边 4px 处只切掉约 1px，首行色块和字符看不出被切。
+   排不满整行/整列的余量由 useTerminal 的 centerScreenInPadding 让到卡片外（snapMargin），不留在深色卡片里 */
 .terminal-container .xterm {
     padding: 4px !important;
     background-color: transparent !important;

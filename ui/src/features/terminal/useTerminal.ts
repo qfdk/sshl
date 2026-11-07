@@ -1,6 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react';
 import { pickEdgeBg } from './edge-bg';
-import { centerOffset } from './screen-fit';
+import { centerOffset, snapMargin } from './screen-fit';
 import { overlayOpen, shouldRefocusTerminal } from './refocus';
 import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
@@ -245,11 +245,12 @@ function releaseWebgl(webgl: WebglAddon | null) {
 }
 
 // 渲染器按整 cell 排版 → 渲染区(canvas)比可用区域小一点（不足一行 / 一列）。
-// 余量堆在一侧就是一道更宽的边：贴顶时底部像多一行，贴底时顶部宽出最多一整行（vim 底色和 padding
-// 不同色时就是一圈粗黑框）。这里把余量平分到上下、左右（同 Ghostty 的 window-padding-balance）：
-// 强制 .xterm-screen 尺寸 = canvas 尺寸（覆盖 CSS 的 100%），再用 relative 偏移居中。
-// xterm 用 screen 的真实 getBoundingClientRect 算鼠标坐标，偏移已包含在 rect 内，不影响选择/点击。
-function centerScreenInPadding(host: HTMLElement) {
+// 余量留在深色卡片里就是一道更宽的边（贴顶时底部像多一行，贴底时顶部宽出最多一整行）。
+// 卡片吸附整行整列：底部 / 右侧让出不足一行 / 一列的余量（交给卡片外的浅色背景），卡片四边只剩 padding。
+// 让出前后（窗口刚缩放的那一帧）仍有余量时平分到两侧：强制 .xterm-screen 尺寸 = canvas 尺寸
+// （覆盖 CSS 的 100%），再用 relative 偏移居中。xterm 用 screen 的真实 getBoundingClientRect 算鼠标坐标，
+// 偏移已包含在 rect 内，不影响选择/点击。
+function centerScreenInPadding(host: HTMLElement, term: Terminal) {
   if (!host) return;
   const xt = host.querySelector<HTMLElement>('.xterm');
   const sc = host.querySelector<HTMLElement>('.xterm-screen');
@@ -264,6 +265,15 @@ function centerScreenInPadding(host: HTMLElement) {
   sc.style.setProperty('position', 'relative', 'important');
   sc.style.setProperty('left', centerOffset(xt.clientWidth - pad('left') - pad('right'), width) + 'px', 'important');
   sc.style.setProperty('top', centerOffset(xt.clientHeight - pad('top') - pad('bottom'), height) + 'px', 'important');
+  // 卡片（Terminal.tsx 的圆角深色块）是 .terminal-container 的父元素，再上一层是它的整块可用区域
+  const card = host.closest<HTMLElement>('.terminal-container')?.parentElement;
+  const area = card?.parentElement;
+  if (!card || !area || !area.clientHeight || !term.rows || !term.cols) return;
+  const snap = (property: string, margin: number) => {
+    if (Math.abs((parseFloat(card.style.getPropertyValue(property)) || 0) - margin) > 0.5) card.style.setProperty(property, `${margin}px`);
+  };
+  snap('margin-bottom', snapMargin(area.clientHeight, pad('top') + pad('bottom'), height / term.rows));
+  snap('margin-right', snapMargin(area.clientWidth, pad('left') + pad('right'), width / term.cols));
 }
 
 // 字形度量依赖字体已加载：内置 Nerd Font 是 2MB 级 TTF，没加载完就 open 会按回退字体量 cell。
@@ -343,7 +353,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
     try {
       fitAddon.fit();
       const host = terminalsRef.current.get(sessionId)?.host;
-      if (host) centerScreenInPadding(host);
+      if (host) centerScreenInPadding(host, activeTerminalRef.current);
       schedulePtySize(sessionId, fitAddon);
     } catch (err) {
       console.error('调整终端大小失败:', err);
@@ -516,7 +526,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       const renderTick = debounce(() => {
         const baseBg = terminalsRef.current.get(sessionId)?.defaultBg || DEFAULT_TERM_BG;
         applyBg(sampleEdgeBg(term, baseBg) || baseBg);
-        centerScreenInPadding(host);
+        centerScreenInPadding(host, term);
         if (activeSessionIdRef.current === sessionId) {
           try { (window as AppWindow).uiManager?.setFillPasswordPromptVisible(isPasswordPromptVisible(term)); } catch (_) {}
         }
@@ -554,7 +564,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
       requestAnimationFrame(() => {
         try {
           fitAddon.fit();
-          centerScreenInPadding(host);
+          centerScreenInPadding(host, term);
           sendPtySize(sessionId, fitAddon);
         } catch (err) { console.warn('[initTerminal] fit 失败:', err); }
       });

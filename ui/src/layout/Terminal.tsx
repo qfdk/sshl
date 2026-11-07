@@ -20,7 +20,7 @@ export const Terminal = memo(function Terminal() {
   // 与 xterm 的 padding 保持同色。
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-[14px] shadow-[0_1px_2px_rgba(22,24,29,0.10),0_8px_24px_rgba(22,24,29,0.10)]" style={{ backgroundColor: 'var(--term-bg, #1d1d1d)' }}>
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-[8px] shadow-[0_1px_2px_rgba(22,24,29,0.10),0_8px_24px_rgba(22,24,29,0.10)]" style={{ backgroundColor: 'var(--term-bg, #1d1d1d)' }}>
         <div ref={containerRef} id="terminal-container" className="terminal-container h-full w-full" />
         <div id="terminal-placeholder" className={`absolute inset-0 grid place-items-center bg-[#1d1d1d] ${sessionId ? 'hidden' : ''}`}>
           <div className="text-sm text-slate-300">点击左侧连接或创建新连接开始使用</div>

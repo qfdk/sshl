@@ -75,7 +75,7 @@ pnpm build             # Tauri application build
   place or cancel, never start a drag) and clear stale press state on the next window pointerdown.
 - **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` loads the GPU renderer
   (WebglAddon, falling back to CanvasAddon on failure or context loss) after `term.open()`,
-  Unicode11 registration, grid centering (`centerScreenInPadding`), ANSI background sampling, and PTY resize
+  Unicode11 registration, card snapping + grid centering (`centerScreenInPadding`), ANSI background sampling, and PTY resize
   synchronization. Do not reorder those paths. xterm and its addons are a lazy chunk
   (`loadXterm`); do not import them statically. A hidden spare terminal is prebuilt at idle and
   claimed by `initTerminal`; its fitted size is sent as `cols`/`rows` with `ssh_connect` so the
