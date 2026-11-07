@@ -33,3 +33,40 @@ export function pickEdgeBg(cols: number, rows: number, colorAt: ColorAt) {
   }
   return majority(center, false);
 }
+
+export type EdgeExtension = {
+  /** 首行每格的底色（整行都有底色时），否则 null */
+  top: string[] | null;
+  /** 末行每格的底色（整行都有底色时），否则 null */
+  bottom: string[] | null;
+  /** 每行最左一格的底色（该行整行都有底色时），否则 null */
+  left: (string | null)[];
+  /** 每行最右一格的底色（该行整行都有底色时），否则 null */
+  right: (string | null)[];
+};
+
+// padding 延伸边缘格子的底色（同 Ghostty 的 window-padding-color = extend）：状态栏、标签栏贴到卡片边，
+// cursorline 这类整行高亮延伸到左右边，padding 里不再夹一道根背景色的缝。
+// 只延伸「整行都有底色」的行：shell 提示符、ls 着色只占半行，抹进 padding 反而难看。colorAt 对默认底色返回 null。
+export function edgeExtension(cols: number, rows: number, colorAt: ColorAt): EdgeExtension {
+  const left: (string | null)[] = [];
+  const right: (string | null)[] = [];
+  let top: string[] | null = null;
+  let bottom: string[] | null = null;
+  for (let y = 0; y < rows; y++) {
+    const edgeRow = y === 0 || y === rows - 1;
+    const colors: string[] = [];
+    let full = cols > 0;
+    for (let x = 0; x < cols; x++) {
+      const color = colorAt(x, y);
+      if (!color) { full = false; break; }
+      if (edgeRow) colors.push(color);
+      else if (x === 0 || x === cols - 1) colors[x === 0 ? 0 : 1] = color;
+    }
+    left.push(full ? colors[0] : null);
+    right.push(full ? colors[colors.length - 1] : null);
+    if (full && y === 0) top = colors;
+    if (full && y === rows - 1) bottom = colors;
+  }
+  return { top, bottom, left, right };
+}

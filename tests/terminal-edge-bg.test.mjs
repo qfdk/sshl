@@ -1,6 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickEdgeBg } from '../ui/src/features/terminal/edge-bg.ts';
+import { edgeExtension, pickEdgeBg } from '../ui/src/features/terminal/edge-bg.ts';
+
+test('nvim: the status bar and every painted row reach the card edge, cell by cell', () => {
+  // 6×4：首行编辑区，第 2 行 cursorline，末行状态栏（NORMAL 蓝 | 中间深 | 时钟蓝）；null = 默认底色
+  const rows = [
+    ['#222436', '#222436', '#222436', '#222436', '#222436', '#222436'],
+    ['#2f334d', '#2f334d', '#2f334d', '#2f334d', '#2f334d', '#2f334d'],
+    ['#222436', '#222436', '#222436', '#222436', '#222436', '#222436'],
+    ['#82aaff', '#82aaff', '#1e2030', '#1e2030', '#82aaff', '#82aaff'],
+  ];
+  const ext = edgeExtension(6, 4, (x, y) => rows[y][x]);
+  assert.deepEqual(ext.top, rows[0]);
+  assert.deepEqual(ext.bottom, rows[3]);
+  assert.deepEqual(ext.left, ['#222436', '#2f334d', '#222436', '#82aaff']);
+  assert.deepEqual(ext.right, ['#222436', '#2f334d', '#222436', '#82aaff']);
+});
+
+test('a shell keeps its padding: partly colored rows are not extended', () => {
+  // 提示符 / ls 着色只占半行：不往 padding 里抹
+  const rows = [
+    [null, null, null, null],
+    ['#00ff74', '#00ff74', null, null],
+    [null, null, '#ee5396', '#ee5396'],
+    ['#78a9ff', '#78a9ff', null, null],
+  ];
+  const ext = edgeExtension(4, 4, (x, y) => rows[y][x]);
+  assert.equal(ext.top, null);
+  assert.equal(ext.bottom, null);
+  assert.deepEqual(ext.left, [null, null, null, null]);
+  assert.deepEqual(ext.right, [null, null, null, null]);
+});
 
 const grid = (cols, rows, paint) => (x, y) => paint(x, y, cols, rows);
 

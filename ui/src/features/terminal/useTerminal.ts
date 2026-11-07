@@ -1,5 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react';
-import { pickEdgeBg } from './edge-bg';
+import { edgeExtension, pickEdgeBg } from './edge-bg';
 import { centerOffset, snapMargin } from './screen-fit';
 import { overlayOpen, shouldRefocusTerminal } from './refocus';
 import type { Terminal } from 'xterm';
@@ -124,10 +124,7 @@ function paletteToHex(idx: number, pal: string[] | null) {
 
 const DEFAULT_TERM_BG = TERM_THEME.background;
 
-function cellBgHex(cell: any, base: string, pal: string[] | null) {
-  const mode = cell.getBgColorMode();
-  if (mode === 0) return base;
-  const c = cell.getBgColor();
+function colorHex(mode: number, c: number, pal: string[] | null) {
   if (mode === (1 << 24) || mode === (2 << 24)) return paletteToHex(c, pal);
   if (mode === (3 << 24)) {
     return '#' + ((c >>> 16) & 0xff).toString(16).padStart(2, '0')
@@ -135,6 +132,82 @@ function cellBgHex(cell: any, base: string, pal: string[] | null) {
       + (c & 0xff).toString(16).padStart(2, '0');
   }
   return null;
+}
+
+function cellBgHex(cell: any, base: string, pal: string[] | null) {
+  const mode = cell.getBgColorMode();
+  return mode === 0 ? base : colorHex(mode, cell.getBgColor(), pal);
+}
+
+// 格子实际画出来的底色：反显（状态栏常用）时是前景色；默认底色返回 null，不往 padding 里延伸。
+function paintedBg(cell: any, fg: string, pal: string[] | null) {
+  if (cell.isInverse()) {
+    const mode = cell.getFgColorMode();
+    return mode === 0 ? fg : colorHex(mode, cell.getFgColor(), pal);
+  }
+  const mode = cell.getBgColorMode();
+  return mode === 0 ? null : colorHex(mode, cell.getBgColor(), pal);
+}
+
+// padding 延伸（规则见 edgeExtension）：host 底下垫一层 canvas（在 .xterm 之下、不接收指针），
+// 按边缘格子的底色逐格画四条 padding；没延伸的地方透明，露出卡片的 --term-bg。
+function paintPaddingExtension(host: HTMLElement, term: Terminal) {
+  const grid = host.querySelector('.xterm-screen canvas');
+  if (!grid || !term.rows || !term.cols) return;
+  let layer = host.querySelector<HTMLCanvasElement>(':scope > canvas.term-padding');
+  if (!layer) {
+    layer = document.createElement('canvas');
+    layer.className = 'term-padding';
+    layer.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
+    host.prepend(layer);
+  }
+  const box = host.getBoundingClientRect();
+  const cells = grid.getBoundingClientRect();
+  if (!box.width || !box.height || !cells.width || !cells.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(box.width * dpr), H = Math.round(box.height * dpr);
+  if (layer.width !== W || layer.height !== H) { layer.width = W; layer.height = H; }
+  const ctx = layer.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, W, H);
+
+  const buf = term.buffer.active;
+  const pal = getAnsiPalette(term);
+  const fg = String(term.options.theme?.foreground || TERM_THEME.foreground).toLowerCase();
+  const reuse = buf.getNullCell();
+  const ext = edgeExtension(term.cols, term.rows, (x, y) => {
+    const cell = buf.getLine(buf.viewportY + y)?.getCell(x, reuse);
+    return cell ? paintedBg(cell, fg, pal) : null;
+  });
+
+  // 设备像素坐标，格子边界取整，相邻色块之间不留发丝缝
+  const gx0 = Math.round((cells.left - box.left) * dpr), gx1 = Math.round((cells.right - box.left) * dpr);
+  const gy0 = Math.round((cells.top - box.top) * dpr), gy1 = Math.round((cells.bottom - box.top) * dpr);
+  const cw = (gx1 - gx0) / term.cols, ch = (gy1 - gy0) / term.rows;
+  const fill = (color: string, x0: number, y0: number, x1: number, y1: number) => {
+    if (x1 <= x0 || y1 <= y0) return;
+    ctx.fillStyle = color;
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+  };
+  // 一整条（含两头的角）：相邻同色的格子合成一块画
+  const strip = (colors: string[], y0: number, y1: number) => {
+    fill(colors[0], 0, y0, gx0, y1);
+    let start = 0;
+    for (let x = 1; x <= colors.length; x++) {
+      if (x < colors.length && colors[x] === colors[start]) continue;
+      fill(colors[start], Math.round(gx0 + start * cw), y0, Math.round(gx0 + x * cw), y1);
+      start = x;
+    }
+    fill(colors[colors.length - 1], gx1, y0, W, y1);
+  };
+  if (ext.top) strip(ext.top, 0, gy0);
+  if (ext.bottom) strip(ext.bottom, gy1, H);
+  for (let y = 0; y < term.rows; y++) {
+    const y0 = Math.round(gy0 + y * ch), y1 = Math.round(gy0 + (y + 1) * ch);
+    const l = ext.left[y], r = ext.right[y];
+    if (l) fill(l, 0, y0, gx0, y1);
+    if (r) fill(r, gx1, y0, W, y1);
+  }
 }
 
 // 采样 xterm 渲染区边缘 cell 的 bg → "#rrggbb" 或 null，取色规则见 pickEdgeBg。
@@ -527,6 +600,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
         const baseBg = terminalsRef.current.get(sessionId)?.defaultBg || DEFAULT_TERM_BG;
         applyBg(sampleEdgeBg(term, baseBg) || baseBg);
         centerScreenInPadding(host, term);
+        try { paintPaddingExtension(host, term); } catch (err) { console.warn('[renderTick] padding 延伸失败:', err); }
         if (activeSessionIdRef.current === sessionId) {
           try { (window as AppWindow).uiManager?.setFillPasswordPromptVisible(isPasswordPromptVisible(term)); } catch (_) {}
         }
