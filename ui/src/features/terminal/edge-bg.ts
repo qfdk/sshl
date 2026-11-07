@@ -14,6 +14,8 @@ function majority(colors: (string | null)[], strict: boolean) {
 // 只看四条边时，宽屏上首末两行（各 cols 格）压过两侧：vim 光标停在首行时首行是 cursorline 色、末行是状态栏，
 // 根背景只剩约 24%，padding 回落默认色，四周露出一圈黑框。
 // 两列凑不出严格过半（左右分属不同面板）再按四条边取众数（≥50%）。
+// 四条边也定不下来（左边文件树、右边编辑区、首行标签栏、末行状态栏各一种色）时，取屏幕中央的主色：
+// 中央是正文区，padding 跟正文同色，回落默认色反而四周一圈黑框。
 export function pickEdgeBg(cols: number, rows: number, colorAt: ColorAt) {
   if (!cols || !rows) return null;
   const sides: (string | null)[] = [];
@@ -22,5 +24,12 @@ export function pickEdgeBg(cols: number, rows: number, colorAt: ColorAt) {
   if (side) return side;
   const edges = [...sides];
   for (let x = 0; x < cols; x++) edges.push(colorAt(x, 0), colorAt(x, rows - 1));
-  return majority(edges, false);
+  const edge = majority(edges, false);
+  if (edge) return edge;
+  // 中央一半区域隔格取样，够定主色，也免得每帧读上千个 cell
+  const center: (string | null)[] = [];
+  for (let y = Math.floor(rows / 4); y < Math.ceil((rows * 3) / 4); y += 2) {
+    for (let x = Math.floor(cols / 4); x < Math.ceil((cols * 3) / 4); x += 2) center.push(colorAt(x, y));
+  }
+  return majority(center, false);
 }

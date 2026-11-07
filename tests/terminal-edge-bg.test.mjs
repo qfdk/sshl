@@ -29,6 +29,16 @@ test('when the two side columns disagree, all four edges decide', () => {
   assert.equal(pickEdgeBg(100, 30, colorAt), '#222222');
 });
 
+test('file tree + tabline + status bar: the edges disagree, the editor in the middle decides', () => {
+  // 左侧文件树一种底色、右侧编辑区另一种；首行标签栏、末行状态栏各一种。两列打平，四边谁也不过半。
+  const colorAt = grid(120, 40, (x, y, _cols, rows) => {
+    if (y === 0) return '#3b4261';
+    if (y === rows - 1) return '#82aaff';
+    return x < 30 ? '#1a1b26' : '#222436';
+  });
+  assert.equal(pickEdgeBg(120, 40, colorAt), '#222436');
+});
+
 test('no color reaches a majority anywhere: no opinion', () => {
   const colorAt = grid(40, 40, (x, y) => ['#111111', '#222222', '#333333'][(x + y) % 3]);
   assert.equal(pickEdgeBg(40, 40, colorAt), null);
