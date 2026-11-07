@@ -247,6 +247,7 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
           <button
             type="button"
             className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"
+            aria-label={isUngrouped ? undefined : group}
             aria-expanded={isExpanded}
             onClick={() => toggle(group)}
           >
@@ -271,6 +272,7 @@ export function GroupTree({ connections, groups, onMoveConnection, onReorderGrou
               size="icon"
               className="h-7 w-7 shrink-0 text-destructive"
               title="删除分组（机器移到未分组）"
+              aria-label={`删除分组：${group}`}
               onClick={() => onRemoveGroup(group)}
             >
               <Trash2 className="h-3.5 w-3.5" />

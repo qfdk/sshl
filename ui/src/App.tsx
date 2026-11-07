@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from 'react
 import { ChevronDown, KeyRound, Power } from 'lucide-react';
 import { getActiveTabId, getCurrentSessionId, setActiveTabId, subscribe } from './lib/app-state';
 import sessionManager from './lib/session-manager';
+import { distinctHost } from './lib/session-tabs';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
@@ -125,7 +126,7 @@ export function App() {
           </Tabs>
         </main>
       </div>
-      <div className="flex h-7 shrink-0 items-center gap-2 px-4 text-xs text-muted-foreground"><span>{status.connected ? `已连接: ${status.name}${status.host ? ` · ${status.host}` : ''}` : '未连接'}</span></div>
+      <div className="flex h-7 shrink-0 items-center gap-2 px-4 text-xs text-muted-foreground"><span>{status.connected ? `已连接: ${status.name}${distinctHost(status.name, status.host) ? ` · ${status.host}` : ''}` : '未连接'}</span></div>
       {connections.loadingText && <div className="fixed inset-0 z-50 grid place-items-center bg-background/70 backdrop-blur-sm"><div className="flex items-center gap-3 rounded-lg border border-border bg-card px-5 py-4 shadow-xl"><span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" /><span>{connections.loadingText}</span><button type="button" className="rounded border border-border px-2 py-1 text-xs hover:bg-muted" onClick={() => void connections.cancel()}>取消</button></div></div>}
       <Suspense fallback={null}>
         <ConnectionDialog manager={connections} />

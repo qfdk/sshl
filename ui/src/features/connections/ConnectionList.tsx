@@ -46,8 +46,7 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
   const itemDiv = (
         <div
           className={cn(
-            'group relative flex min-h-11 cursor-pointer select-none items-center rounded-[10px] border py-1.5 text-sm transition-colors',
-            collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5',
+            'group relative flex min-h-11 cursor-pointer select-none items-stretch rounded-[10px] border text-sm transition-colors',
             active ? 'border-border bg-card shadow-sm' : 'border-transparent hover:bg-foreground/[0.04]',
             dragging && 'opacity-40',
             // 插入线：看得出会落在这一项的上边还是下边
@@ -60,6 +59,17 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
           data-connected={connected ? 'true' : 'false'}
           onDoubleClick={() => void manager.connectToSaved(connection.id)}
         >
+          {/* 鼠标单击不连接，双击才连（双击由外层 div 处理）。键盘 Enter / 空格和辅助功能的「按下」
+              派发的 click 不带点击次数（detail 为 0），这种直接连接：键盘用户和 VoiceOver 才连得上。 */}
+          <button
+            type="button"
+            className={cn(
+              'flex min-w-0 flex-1 cursor-pointer items-center rounded-[10px] py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              collapsed ? 'justify-center px-0' : 'gap-2.5 px-2.5',
+            )}
+            aria-label={collapsed ? connection.name : undefined}
+            onClick={event => { if (event.detail === 0) void manager.connectToSaved(connection.id); }}
+          >
           {collapsed
             ? (
               // 收起后一排相同的小圆点分不出哪台机器，改成名称缩写徽章，状态点退到角上
@@ -87,6 +97,7 @@ function ConnectionItem({ connection, manager, collapsed = false, dragging = fal
                 </span>
               </>
             )}
+          </button>
           {/* 悬停时浮在行右侧、盖住「在线」标记；用透明度而非 display 切换，键盘仍能 Tab 进来 */}
           <div className={`absolute right-1.5 top-1/2 -translate-y-1/2 items-center gap-0.5 rounded-lg bg-card opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 ${collapsed ? 'hidden' : 'flex'}`} data-connection-actions>
             {connected && <button type="button" className="rounded-md p-1 hover:bg-muted" title="断开连接" data-disconnect-connection onClick={event => { event.stopPropagation(); void manager.disconnect(session!.sessionId); }}><Power className="h-3.5 w-3.5" /></button>}
@@ -177,7 +188,8 @@ export function ConnectionList({ manager, query, collapsed = false }: Connection
   };
 
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
+    // 条目主体本身也是按钮，只排除右侧的断开/编辑/删除
+    if (event.button !== 0 || (event.target as HTMLElement).closest('[data-connection-actions]')) return;
     const item = (event.target as HTMLElement).closest<HTMLElement>('[data-connection-item]');
     if (!item?.dataset.id) return;
     pointerRef.current = { connectionId: item.dataset.id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, active: false };

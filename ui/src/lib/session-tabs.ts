@@ -27,17 +27,24 @@ export function moveTabId(ids: string[], dragged: string, target: string, side: 
   return [...rest.slice(0, at), dragged, ...rest.slice(at)];
 }
 
+// 名称旁边的主机名：连接就是以主机名命名时不再重复显示一遍。
+export function distinctHost(name: string, host: string | undefined): string {
+  if (!host) return '';
+  return name.trim().toLowerCase() === host.trim().toLowerCase() ? '' : host;
+}
+
 // 顶栏会话标签：每个已打开的会话一个，按打开顺序排列。名称优先取保存的连接（可能被改过名），
 // 连接已不在列表里时退回会话建立时记下的名称。
 export function toSessionTabs(sessions: OpenSession[], connections: SavedConnection[], currentSessionId: string | null): SessionTab[] {
   const byId = new Map(connections.map(connection => [connection.id, connection]));
   return sessions.map(session => {
     const connection = byId.get(session.connectionId);
+    const name = connection?.name || String(session.name || '');
     return {
       sessionId: session.id,
       connectionId: session.connectionId,
-      name: connection?.name || String(session.name || ''),
-      host: connection?.host || '',
+      name,
+      host: distinctHost(name, connection?.host),
       active: session.id === currentSessionId,
     };
   });

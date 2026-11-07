@@ -31,6 +31,16 @@ test('takes the current name from the saved connection, falling back to the sess
   assert.ok(tabs.every(tab => !tab.active));
 });
 
+test('host is left out when the connection is named after it, so the tab does not repeat itself', () => {
+  const named = [
+    { id: 'h1', name: 'fro1.qfdk.me', host: 'fro1.qfdk.me' },
+    { id: 'h2', name: ' FRO2.qfdk.me ', host: 'fro2.qfdk.me' },
+  ];
+  const tabs = toSessionTabs([{ id: 's1', connectionId: 'h1' }, { id: 's2', connectionId: 'h2' }], named, 's1');
+  assert.deepEqual(tabs.map(tab => tab.host), ['', '']);
+  assert.equal(tabs[0].name, 'fro1.qfdk.me');
+});
+
 test('no sessions means no tabs', () => {
   assert.deepEqual(toSessionTabs([], connections, null), []);
 });
