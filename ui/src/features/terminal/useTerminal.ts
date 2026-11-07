@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react';
+import { DEFAULT_CURSOR, isCursorReset } from './cursor-style';
 import { edgeExtension, pickEdgeBg } from './edge-bg';
 import { centerOffset, snapMargin } from './screen-fit';
 import { overlayOpen, shouldRefocusTerminal } from './refocus';
@@ -269,8 +270,7 @@ function debounce<T extends (...args: any[]) => void>(func: T, wait: number) {
 function createXtermInstance(mods: XtermModules, options: Record<string, unknown>) {
   const userSettings = getTerminalSettings();
   return new mods.Terminal({
-    cursorBlink: true,
-    cursorStyle: 'bar',
+    ...DEFAULT_CURSOR,
     cursorInactiveStyle: 'bar',
     fontSize: userSettings.fontSize,
     fontFamily: userSettings.fontFamily,
@@ -466,7 +466,7 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
   const sessionTermOptions = () => {
     const userSettings = getTerminalSettings();
     return {
-      cursorBlink: true, cursorStyle: 'bar', fontSize: userSettings.fontSize, fontFamily: userSettings.fontFamily,
+      ...DEFAULT_CURSOR, fontSize: userSettings.fontSize, fontFamily: userSettings.fontFamily,
       theme: { ...TERM_THEME }, allowTransparency: true, blinkInterval: 500,
     };
   };
@@ -606,6 +606,16 @@ export function useTerminal(containerRef: RefObject<HTMLDivElement | null>) {
         }
       }, 60);
       try { term.onRender(renderTick); } catch (err) { console.warn('[initTerminal] onRender 订阅失败:', err); }
+
+      // 「恢复默认光标」回到 SSHL 的默认（闪烁竖线），见 isCursorReset；明确的形状照常交给 xterm
+      try {
+        term.parser.registerCsiHandler({ intermediates: ' ', final: 'q' }, params => {
+          if (!isCursorReset(params)) return false;
+          term.options.cursorStyle = DEFAULT_CURSOR.cursorStyle;
+          term.options.cursorBlink = DEFAULT_CURSOR.cursorBlink;
+          return true;
+        });
+      } catch (err) { console.warn('[initTerminal] DECSCUSR handler 注册失败:', err); }
 
       try {
         term.parser.registerOscHandler(11, (data) => {
