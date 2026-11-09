@@ -75,6 +75,14 @@ fn compare_names(a: &str, b: &str) -> Ordering {
 }
 
 /// 文件夹在前，再按名称。
+/// 排好序、按开关去掉点开头的隐藏文件，返回 (显示的, 隐藏了几个)。
+pub fn visible_files(files: Vec<FileEntry>, show_hidden: bool) -> (Vec<FileEntry>, usize) {
+    let total = files.len();
+    let shown: Vec<FileEntry> = sort_files(files).into_iter().filter(|f| show_hidden || !f.name.starts_with('.')).collect();
+    let hidden = total - shown.len();
+    (shown, hidden)
+}
+
 pub fn sort_files(mut files: Vec<FileEntry>) -> Vec<FileEntry> {
     files.sort_by(|a, b| b.is_directory.cmp(&a.is_directory).then_with(|| compare_names(&a.name, &b.name)));
     files
@@ -313,6 +321,17 @@ mod tests {
 
     fn entry(name: &str, dir: bool) -> FileEntry {
         FileEntry { name: name.into(), path: format!("/x/{name}"), is_directory: dir, size: 0, modified: None, permissions: None, owner: None }
+    }
+
+    #[test]
+    fn hidden_files_are_left_out_and_counted() {
+        let files = vec![entry(".bashrc", false), entry("b.txt", false), entry(".ssh", true), entry("app", true)];
+        let (shown, hidden) = visible_files(files.clone(), false);
+        assert_eq!(shown.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["app", "b.txt"]);
+        assert_eq!(hidden, 2);
+        let (shown, hidden) = visible_files(files, true);
+        assert_eq!(shown.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), [".ssh", "app", ".bashrc", "b.txt"]);
+        assert_eq!(hidden, 0);
     }
 
     #[test]

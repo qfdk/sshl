@@ -29,7 +29,7 @@ use super::identity::{
 use super::model::{
     FileEntry, ListCache, PaneKind, basename, checks_to_permissions, format_date, format_file_size,
     format_permissions, is_root_path, join_path, normalize_remote_path, parent_path, permissions_to_checks,
-    readable_permissions, remote_home_from, sort_files, valid_octal,
+    readable_permissions, remote_home_from, valid_octal, visible_files,
 };
 use super::progress::{TransferProgress, TransferStatus, describe_progress};
 use super::sudo::{Outcome, Secret, saved_password_choices, sudo_error_message, upload_with_sudo_fallback};
@@ -39,7 +39,7 @@ use crate::prompts::{self, Choice, Options, PasswordAnswer};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
 
-actions!(files, [SelectAllFiles, ClearFileSelection, PathNext, PathPrev, PathComplete, PathDismiss]);
+actions!(files, [SelectAllFiles, ClearFileSelection, PathNext, PathPrev, PathComplete, PathDismiss, ToggleHiddenFiles, ToggleBookmark]);
 
 /// 文件管理用的会话：切会话 / 断开时由工作区设置。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +65,8 @@ fn bind_keys(cx: &mut App) {
         // 晚于 gpui-base 绑定：同一节点上后绑的优先，地址栏里的方向键 / Tab / Esc 先给补全
         cx.bind_keys([
             KeyBinding::new("cmd-a", SelectAllFiles, Some("FileManager")),
+            KeyBinding::new("cmd-shift-.", ToggleHiddenFiles, Some("FileManager")),
+            KeyBinding::new("cmd-d", ToggleBookmark, Some("FileManager")),
             KeyBinding::new("escape", ClearFileSelection, Some("FileManager")),
             KeyBinding::new("down", PathNext, Some("FilePathBar > Input")),
             KeyBinding::new("up", PathPrev, Some("FilePathBar > Input")),
@@ -149,6 +151,8 @@ struct Pane {
     /// 上次进入的目录：进入新目录时回到顶部，同目录刷新保留滚动位置。
     listed_path: String,
     selected: HashSet<String>,
+    /// 这个目录里没显示的隐藏文件（点开头）个数。
+    hidden: usize,
 }
 
 impl Pane {
@@ -170,6 +174,7 @@ impl Pane {
             scroll: UniformListScrollHandle::new(),
             listed_path: String::new(),
             selected: HashSet::new(),
+            hidden: 0,
         }
     }
 
@@ -576,11 +581,12 @@ impl FileManager {
                 PaneKind::Remote => self.remote_cache.get(&key),
             }
         };
+        let show_hidden = crate::settings::get(cx).show_hidden_files;
         let pane = self.pane_mut(kind);
         pane.request += 1;
         let request = pane.request;
         if let Some(cached) = &cached {
-            pane.files = sort_files(cached.clone());
+            (pane.files, pane.hidden) = visible_files(cached.clone(), show_hidden);
         }
         pane.loading = cached.is_none();
         pane.error = None;
@@ -605,8 +611,9 @@ impl FileManager {
                         if kind == PaneKind::Remote && current != Some(path.as_str()) {
                             return;
                         }
+                        let show_hidden = crate::settings::get(cx).show_hidden_files;
                         let pane = this.pane_mut(kind);
-                        pane.files = sort_files(files);
+                        (pane.files, pane.hidden) = visible_files(files, show_hidden);
                         pane.loading = false;
                         this.after_files_changed(kind);
                     }
@@ -1234,6 +1241,15 @@ impl FileManager {
         self.status.active.then_some(&self.status)
     }
 
+    /// 显示 / 隐藏点开头的文件（⌘⇧.）。两侧都从缓存重新套用，不重新列目录。
+    fn toggle_hidden_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::settings::update(cx, |s| s.show_hidden_files = !s.show_hidden_files);
+        self.load(PaneKind::Local, None, false, window, cx);
+        if self.session.is_some() && !self.remote.path.is_empty() {
+            self.load(PaneKind::Remote, None, false, window, cx);
+        }
+    }
+
     // ---------------------------------------------------------------- 远程目录收藏
 
     fn reload_bookmarks(&mut self) {
@@ -1478,7 +1494,9 @@ impl FileManager {
                 PaneKind::Remote => MenuItem::new("新建文件夹", on(|fm, w, cx| fm.open_new_folder(w, cx))).icon(Icon::FolderPlus).disabled(!connected),
                 PaneKind::Local => MenuItem::new("选择文件夹上传", on(|fm, w, cx| fm.select_folder_to_upload(w, cx))).icon(Icon::Upload).disabled(!connected),
             };
-            return vec![MenuEntry::Item(first), MenuEntry::Item(refresh)];
+            let hidden_label = if crate::settings::get(cx).show_hidden_files { "不显示隐藏文件" } else { "显示隐藏文件" };
+            let hidden = MenuItem::new(hidden_label, on(|fm, w, cx| fm.toggle_hidden_files(w, cx)));
+            return vec![MenuEntry::Item(first), MenuEntry::Item(refresh), MenuEntry::Separator, MenuEntry::Item(hidden)];
         };
         let items = self.selected_items(kind);
         let selected = if items.iter().any(|i| i.path == target.path) { items } else { vec![target.clone()] };
@@ -1736,6 +1754,7 @@ impl FileManager {
         let input = pane.input.clone();
         let loading = pane.loading;
         let rows = pane.row_count();
+        let hidden = if pane.loading { 0 } else { pane.hidden };
         let list_focus = pane.list_focus.clone();
         let scroll = pane.scroll.clone();
         let empty: Option<AnyElement> = if loading {
@@ -1902,6 +1921,29 @@ impl FileManager {
                     .w_full()
                     .flex_1()
                     .into_any_element(),
+            })
+            .when(hidden > 0, |d| {
+                d.child(
+                    div()
+                        .id(("hidden-files", kind as usize))
+                        .h(px(30.))
+                        .flex_shrink_0()
+                        .px(px(14.))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(theme::color(ui::BORDER))
+                        .text_size(px(12.))
+                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                        .role(Role::Button)
+                        .aria_label("显示隐藏文件")
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
+                        .child(format!("已隐藏 {hidden} 个隐藏文件"))
+                        .child(div().text_color(theme::color(ui::PRIMARY)).child("显示  ⌘⇧."))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_hidden_files(window, cx))),
+                )
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -2167,6 +2209,12 @@ impl Render for FileManager {
             .gap(px(10.))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(|this, _: &ToggleHiddenFiles, window, cx| this.toggle_hidden_files(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleBookmark, window, cx| {
+                if this.session.is_some() {
+                    this.toggle_bookmark(window, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseDownEvent, window, cx| {

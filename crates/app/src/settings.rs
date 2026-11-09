@@ -18,6 +18,8 @@ pub struct Settings {
     pub sidebar_collapsed: bool,
     /// 文件管理本地栏占的比例（旧版 sshl.localPaneFlex）。
     pub local_pane_flex: Option<f32>,
+    /// 文件管理显示点开头的隐藏文件（⌘⇧.）。
+    pub show_hidden_files: bool,
 }
 
 impl Default for Settings {
@@ -28,6 +30,7 @@ impl Default for Settings {
             collapsed_groups: Vec::new(),
             sidebar_collapsed: false,
             local_pane_flex: None,
+            show_hidden_files: false,
         }
     }
 }
