@@ -18,6 +18,15 @@ use gpui::{
     point, px,
 };
 
+/// `SSHL_DEV_DISPLAY=secondary`：窗口开在非主屏上（测试全屏时不占用户主屏的工作区）。
+pub fn display_override(cx: &App) -> Option<std::rc::Rc<dyn gpui::PlatformDisplay>> {
+    if std::env::var("SSHL_DEV_DISPLAY").ok().as_deref() != Some("secondary") {
+        return None;
+    }
+    let primary = cx.primary_display().map(|d| d.id());
+    cx.displays().into_iter().find(|d| Some(d.id()) != primary)
+}
+
 pub fn start(window: AnyWindowHandle, cx: &mut App) {
     let Ok(path) = std::env::var("SSHL_DEV_SOCKET") else { return };
     let _ = std::fs::remove_file(&path);

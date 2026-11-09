@@ -6,6 +6,7 @@ mod devhook;
 mod files;
 mod groups;
 mod prompts;
+mod screen;
 mod settings;
 mod settings_dialog;
 mod sidebar;
@@ -88,12 +89,17 @@ fn main() {
         ]);
 
         // 主窗口直接按主屏可用区域创建
-        let bounds = cx
-            .primary_display()
+        // 主窗口开在鼠标所在的屏幕上，铺满那块屏幕的可用区域（只让出菜单栏和 Dock），不进原生全屏
+        let display = screen::display_under_mouse(cx).or_else(|| cx.primary_display());
+        #[cfg(any(debug_assertions, feature = "devhook"))]
+        let display = devhook::display_override(cx).or(display);
+        let bounds = display
+            .as_ref()
             .map(|display| display.visible_bounds())
             .unwrap_or_else(|| Bounds::centered(None, gpui::size(px(1280.), px(800.)), cx));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            display_id: display.map(|display| display.id()),
             titlebar: Some(TitlebarOptions {
                 title: Some("SSHL".into()),
                 appears_transparent: true,
