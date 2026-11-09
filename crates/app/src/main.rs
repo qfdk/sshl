@@ -140,15 +140,12 @@ fn main() {
 }
 
 fn bind_keys(cx: &mut App) {
-    use terminal::view::{Copy, Paste, SelectAll};
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("cmd-alt-h", HideOthers, None),
         KeyBinding::new("cmd-m", workspace::Minimize, None),
-        KeyBinding::new("cmd-c", Copy, Some("Terminal")),
-        KeyBinding::new("cmd-v", Paste, Some("Terminal")),
-        KeyBinding::new("cmd-a", SelectAll, Some("Terminal")),
     ]);
+    cx.bind_keys(terminal::view::key_bindings());
     workspace::bind_keys(cx);
 }

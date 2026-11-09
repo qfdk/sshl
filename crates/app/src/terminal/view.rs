@@ -11,8 +11,8 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     App, BorderStyle, Bounds, BoxShadow, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
-    Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
+    Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
     StrikethroughStyle, Style, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
     fill, font, point, prelude::FluentBuilder, px, quad, relative, size,
 };
@@ -26,6 +26,20 @@ use crate::backend;
 use crate::theme::{self, CARD_RADIUS, TERMINAL_PADDING};
 
 actions!(terminal, [Copy, Paste, SelectAll]);
+
+const CONTEXT: &str = "Terminal";
+
+/// 终端里的按键绑定。Tab / Shift-Tab 被 gpui-base 的 Root 绑去切换焦点，在终端里压掉，
+/// 让它们落到 key_down 编码给远端（补全、反向补全）。
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
+        KeyBinding::new("cmd-v", Paste, Some(CONTEXT)),
+        KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("tab", NoAction, Some(CONTEXT)),
+        KeyBinding::new("shift-tab", NoAction, Some(CONTEXT)),
+    ]
+}
 
 // 测试口用：把选中文字打进日志（不碰系统剪贴板）。
 #[cfg(any(debug_assertions, feature = "devhook"))]
@@ -436,7 +450,7 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window) && window.is_window_active();
         div()
             .id("terminal")
-            .key_context("Terminal")
+            .key_context(CONTEXT)
             .track_focus(&self.focus)
             .size_full()
             .on_action(cx.listener(Self::paste))
@@ -811,5 +825,32 @@ fn text_run(cell: &super::frame::Cell, len: usize, fonts: &Fonts) -> TextRun {
             wavy: cell.has(flags::UNDERLINE_CURLY),
         }),
         strikethrough: cell.has(flags::STRIKE).then(|| StrikethroughStyle { thickness: px(1.), color: Some(color) }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{KeyContext, Keymap, Keystroke};
+
+    use super::*;
+
+    gpui::actions!(test, [FocusNext]);
+
+    fn resolve(keymap: &Keymap, key: &'static str) -> usize {
+        let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0.len()
+    }
+
+    #[test]
+    fn tab_reaches_the_terminal_instead_of_moving_focus() {
+        // 同 gpui-base Root：tab / shift-tab 切换焦点
+        let mut keymap = Keymap::new(vec![
+            KeyBinding::new("tab", FocusNext, Some("Root")),
+            KeyBinding::new("shift-tab", FocusNext, Some("Root")),
+        ]);
+        keymap.add_bindings(key_bindings());
+        assert_eq!(resolve(&keymap, "tab"), 0);
+        assert_eq!(resolve(&keymap, "shift-tab"), 0);
+        assert_eq!(resolve(&keymap, "cmd-c"), 1);
     }
 }
