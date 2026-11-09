@@ -42,9 +42,17 @@ impl Workspace {
             self.dragging = None;
         }
         let collapsed = self.sidebar_collapsed(cx);
+        let new_connection = kit::button("new-connection", Variant::Ghost)
+            .w(px(32.))
+            .h(px(32.))
+            .px_0()
+            .aria_label("新建连接")
+            .tooltip(|window, cx| kit::tooltip("新建连接  ⌘N".into(), window, cx))
+            .child(kit::icon(Icon::Plus))
+            .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx)));
         let toggle = kit::icon_button("toggle-sidebar", Variant::Ghost, if collapsed { Icon::ChevronRight } else { Icon::ChevronLeft }, if collapsed { "展开侧边栏" } else { "收起侧边栏" })
-            .w(px(36.))
-            .h(px(36.))
+            .w(px(32.))
+            .h(px(32.))
             .on_click(cx.listener(|_, _, _, cx| {
                 settings::update(cx, |s| s.sidebar_collapsed = !s.sidebar_collapsed);
                 cx.notify();
@@ -61,7 +69,7 @@ impl Workspace {
             .child(drag_region("sidebar-titlebar").h(px(if window.is_fullscreen() { 6. } else { 50. })).flex_shrink_0())
             .map(|s| {
                 if collapsed {
-                    s.child(div().flex().justify_center().pb_1().child(toggle))
+                    s.child(div().flex().flex_col().items_center().gap_1().pb_1().child(toggle).child(new_connection))
                 } else {
                     s.child(
                         drag_region("sidebar-header")
@@ -74,7 +82,7 @@ impl Workspace {
                             .gap_2()
                             .child(img(APP_ICON).size(px(30.)).m(px(-3.)))
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("SSHL"))
-                            .child(div().ml_auto().child(toggle)),
+                            .child(div().ml_auto().flex().items_center().gap_1().child(new_connection).child(toggle)),
                     )
                     .child(
                         div().px_3().pb_2().child(
@@ -95,29 +103,18 @@ impl Workspace {
             })
             .child(div().mt_1().flex_1().min_h_0().child(self.connection_list(collapsed, window, cx)))
             .child(
-                div()
-                    .mt_auto()
-                    .flex()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .map(|f| if collapsed { f.flex_col().items_center().p_2() } else { f.p_3() })
-                    .child(
-                        kit::button("new-connection", Variant::Primary)
-                            .aria_label("新建连接")
-                            .h(px(32.))
-                            .gap(px(6.))
-                            .text_size(px(13.))
-                            .map(|b| if collapsed { b.w(px(32.)).px_0() } else { b.flex_1() })
-                            .child(kit::icon_sized(Icon::Plus, 14.))
-                            .when(!collapsed, |b| b.child("新建连接"))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
-                    )
-                    .child(
-                        kit::icon_button("open-settings", Variant::Outline, Icon::Settings, "设置")
-                            .w(px(32.))
-                            .h(px(32.))
-                            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-                    ),
+                div().mt_auto().flex_shrink_0().map(|f| if collapsed { f.flex().justify_center().p_2() } else { f.px_3().py_2() }).child(
+                    kit::button("open-settings", Variant::Ghost)
+                        .h(px(32.))
+                        .aria_label("设置")
+                        .tooltip(|window, cx| kit::tooltip("设置  ⌘,".into(), window, cx))
+                        .text_size(px(13.))
+                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                        .map(|b| if collapsed { b.w(px(32.)).px_0() } else { b.w_full().justify_start().px_2().gap(px(8.)) })
+                        .child(kit::icon(Icon::Settings))
+                        .when(!collapsed, |b| b.child("设置"))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                ),
             )
             .into_any_element()
     }

@@ -894,7 +894,15 @@ impl Render for Workspace {
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
-                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child("点击左侧连接或创建新连接开始使用")),
+                                                .flex_col()
+                                                .gap_4()
+                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child("点击左侧连接或创建新连接开始使用"))
+                                                .child(
+                                                    kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), "新建连接")
+                                                        .h(px(32.))
+                                                        .text_size(px(13.))
+                                                        .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
+                                                ),
                                         ),
                                     }),
                             ),
