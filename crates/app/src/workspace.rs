@@ -312,6 +312,10 @@ impl Workspace {
                 prompts::alert_later(window, cx, Options::new("连接失败").message(error.clone()));
                 cx.notify();
             }
+            TerminalEvent::Declined if is_pending => {
+                self.pending = None;
+                cx.notify();
+            }
             TerminalEvent::Closed => {
                 if let Some(index) = self.sessions.iter().position(|s| &s.view == view) {
                     let session = self.sessions.remove(index);

@@ -65,6 +65,11 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **连接流程**（`workspace.rs`）：一个连接只开一个会话；连上才出标签，慢于 300ms 才显示连接遮罩（Esc / 取消可中止）。
   切换到已开会话是乐观切换，探活在后台，失效且用户仍停在该会话上时自动重连；用户主动断开不算失效。
   所有断开入口都先确认。新建连接先连接、连上再保存。
+- **主机密钥**（`crates/core/src/known_hosts.rs`）：信任记在 `~/.sshl/known_hosts`；`~/.ssh/known_hosts` 只读不写，那里认过的直接信任。
+  没记录 / 密钥变了由界面弹确认框（`HostKeyCheck` 的 prompt），确认才写入；拒绝报 `AppError::HostKeyDeclined`，界面不再弹「连接失败」。
+  预热池没人可问（prompt 为 None），没确认过的主机不预热。测试用 `HostKeyCheck::trust_any_for_tests()`，不碰开发机的记录。
+- **终端里的 Tab**：gpui-base 的 Root 把 tab / shift-tab 绑成切换焦点，终端上下文里用 `NoAction` 压掉（`terminal::view::key_bindings`），
+  否则补全键会把焦点跳到搜索框。
 - **IPC 已不存在**：界面直接调 `sshl_core`。后端跑在独立 tokio 运行时（`backend.rs`），界面用 `backend::spawn` 在 GPUI 执行器里
   await 结果；后端事件（传输进度、连接列表变化）经 `sshl_core::events::Events` 回调转回界面线程。
 - **预热池**归后端所有（`sshl_core::warm::run`），界面不发预热调用。

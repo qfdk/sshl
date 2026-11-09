@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
+use futures::channel::oneshot;
 use gpui::{
     App, BorderStyle, Bounds, BoxShadow, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
@@ -17,12 +18,15 @@ use gpui::{
     fill, font, point, prelude::FluentBuilder, px, quad, relative, size,
 };
 use libghostty_vt::{key, mouse};
+use sshl_core::error::AppError;
+use sshl_core::known_hosts::{HostKeyCheck, HostKeyPrompt, HostKeyQuestion};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
 use super::frame::{Frame, Rgb, flags};
 use super::keys;
 use crate::backend;
+use crate::prompts::{self, Options};
 use crate::theme::{self, CARD_RADIUS, TERMINAL_PADDING};
 
 actions!(terminal, [Copy, Paste, SelectAll]);
@@ -94,6 +98,8 @@ pub enum Status {
 pub enum TerminalEvent {
     Connected,
     Failed(String),
+    /// 用户在主机身份确认框里取消了：不连，也不用再报错。
+    Declined,
     Closed,
     /// 光标行出现 / 离开密码提示（当前状态见 `password_prompt()`）。
     PasswordPrompt,
@@ -121,6 +127,50 @@ impl TerminalSink for Sink {
 }
 
 static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+
+/// 主机身份确认：后端握手时问到这里，在界面线程弹应用内确认框，答案送回去。
+fn host_key_prompt(window: &mut Window, cx: &mut Context<TerminalView>) -> HostKeyPrompt {
+    let (tx, mut rx) = unbounded::<(HostKeyQuestion, oneshot::Sender<bool>)>();
+    cx.spawn_in(window, async move |_, cx| {
+        while let Some((question, reply)) = rx.next().await {
+            let answer = cx.update(|window, cx| prompts::confirm(window, cx, host_key_options(&question)));
+            let trusted = match answer {
+                Ok(answer) => answer.await.unwrap_or(false),
+                Err(_) => false,
+            };
+            let _ = reply.send(trusted);
+        }
+    })
+    .detach();
+    Arc::new(move |question| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            let (reply, answer) = oneshot::channel();
+            if tx.unbounded_send((question, reply)).is_err() {
+                return false;
+            }
+            answer.await.unwrap_or(false)
+        })
+    })
+}
+
+fn host_key_options(question: &HostKeyQuestion) -> Options {
+    let host = if question.port == 22 { question.host.clone() } else { format!("{}:{}", question.host, question.port) };
+    let fingerprint = format!("{} 密钥指纹\n{}", question.key_type, question.fingerprint);
+    if question.changed {
+        let mut options = Options::new(format!("{host} 的主机密钥变了"))
+            .message(format!(
+                "和上次记录的不一样。可能是服务器重装或换了密钥，也可能有人在冒充它（中间人攻击）。不确定就取消，先问问服务器管理员。\n\n{fingerprint}"
+            ))
+            .confirm("信任新密钥");
+        options.destructive = true;
+        options
+    } else {
+        Options::new(format!("第一次连接 {host}"))
+            .message(format!("请核对服务器的密钥指纹，确认无误再连接。之后再连同一台服务器不会再问。\n\n{fingerprint}"))
+            .confirm("信任并连接")
+    }
+}
 
 pub struct TerminalView {
     handle: TerminalHandle,
@@ -165,8 +215,9 @@ impl TerminalView {
         details.rows = u32::from(grid.rows);
         let attempt = attempt_id.clone();
         let connect_shell = shell.clone();
+        let host_key = HostKeyCheck::user(Some(host_key_prompt(window, cx)));
         let connecting = backend::spawn(async move {
-            ssh::connect(&backend::get().state, details, &attempt, connect_shell, shell_rx, sink).await
+            ssh::connect(&backend::get().state, details, &attempt, connect_shell, shell_rx, sink, host_key).await
         });
 
         let connect_task = cx.spawn(async move |this, cx| {
@@ -176,6 +227,10 @@ impl TerminalView {
                     Some(Ok(session_id)) => {
                         view.status = Status::Connected { session_id };
                         cx.emit(TerminalEvent::Connected);
+                    }
+                    Some(Err(AppError::HostKeyDeclined)) => {
+                        view.status = Status::Failed("未信任主机".into());
+                        cx.emit(TerminalEvent::Declined);
                     }
                     Some(Err(error)) => {
                         let message = error.to_string();
@@ -839,6 +894,25 @@ mod tests {
     fn resolve(keymap: &Keymap, key: &'static str) -> usize {
         let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0.len()
+    }
+
+    #[test]
+    fn host_key_prompt_shows_the_full_fingerprint_and_warns_on_change() {
+        let question = HostKeyQuestion {
+            host: "srv.example".into(),
+            port: 2200,
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:nYEchQnrpBDtWk7pRcxxfXQN63cacfPSE6hRM1VmckY".into(),
+            changed: false,
+        };
+        let first = host_key_options(&question);
+        assert!(first.title.contains("srv.example:2200"));
+        assert!(first.message.as_ref().unwrap().contains(&question.fingerprint));
+        assert!(!first.destructive);
+        let changed = host_key_options(&HostKeyQuestion { port: 22, changed: true, ..question.clone() });
+        assert!(changed.title.contains("srv.example") && !changed.title.contains(":22"));
+        assert!(changed.message.as_ref().unwrap().contains(&question.fingerprint));
+        assert!(changed.destructive, "密钥变了用红色按钮");
     }
 
     #[test]

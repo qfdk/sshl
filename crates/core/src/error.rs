@@ -14,6 +14,9 @@ pub enum AppError {
     SessionNotFound(String),
     #[error("config error: {0}")]
     Config(String),
+    /// 用户在主机身份确认框里拒绝了。
+    #[error("host key not accepted")]
+    HostKeyDeclined,
     #[error("{0}")]
     Other(String),
 }

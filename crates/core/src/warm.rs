@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 
 use crate::config_store::{self, load_secret};
+use crate::known_hosts::HostKeyCheck;
 use crate::ssh;
 use crate::state::{self, AppState};
 
@@ -107,6 +108,8 @@ async fn maintain_warm_pool(state: &AppState, failed_at: &mut HashMap<String, In
                 password.as_deref(),
                 c.private_key.as_deref(),
                 passphrase.as_deref(),
+                // 用户不在场：没确认过的主机先不连，等他点连接时再问
+                HostKeyCheck::user(None),
             )
             .await
             {

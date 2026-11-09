@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::config_store::load_secret;
 use crate::error::{AppError, AppResult};
+use crate::known_hosts::{self, HostKeyCheck, Verdict};
 use crate::state::AppState;
 
 #[derive(Debug, Clone)]
@@ -220,15 +221,22 @@ pub(crate) async fn do_handshake(
     password: Option<&str>,
     private_key: Option<&str>,
     passphrase: Option<&str>,
+    host_key: HostKeyCheck,
 ) -> AppResult<Arc<russh::client::Handle<ClientHandler>>> {
     let addr = format!("{}:{}", host, port);
     let tcp = connect_tcp(&addr).await?;
     tcp.set_nodelay(true).ok();
 
-    let handler = ClientHandler { host: host.to_string(), port };
+    let rejected = Arc::new(std::sync::Mutex::new(None));
+    let handler = ClientHandler { host: host.to_string(), port, host_key, rejected: rejected.clone() };
     let mut handle = russh::client::connect_stream(russh_config(), tcp, handler)
         .await
-        .map_err(|e| AppError::Ssh(format!("ssh handshake: {e}")))?;
+        .map_err(|e| match rejected.lock().unwrap().take() {
+            Some(HostKeyRejection::Declined) => AppError::HostKeyDeclined,
+            Some(HostKeyRejection::Untrusted { changed: true }) => AppError::Ssh(format!("host key for {addr} changed")),
+            Some(HostKeyRejection::Untrusted { changed: false }) => AppError::Ssh(format!("host key for {addr} not trusted yet")),
+            None => AppError::Ssh(format!("ssh handshake: {e}")),
+        })?;
 
     let authed = if let Some(pk) = private_key {
         // 用户可能传路径或 PEM 内容。PEM 以 "-----BEGIN" 开头，否则按路径读文件。
@@ -262,6 +270,17 @@ pub(crate) async fn do_handshake(
 pub struct ClientHandler {
     host: String,
     port: u16,
+    host_key: HostKeyCheck,
+    /// 主机密钥没过的原因，握手失败后 do_handshake 据此报错。
+    rejected: Arc<std::sync::Mutex<Option<HostKeyRejection>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostKeyRejection {
+    /// 用户在确认框里拒绝了。
+    Declined,
+    /// 没人可问（后台预热）。
+    Untrusted { changed: bool },
 }
 
 #[async_trait::async_trait]
@@ -272,39 +291,26 @@ impl russh::client::Handler for ClientHandler {
         &mut self,
         server_public_key: &russh_keys::key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TOFU known_hosts 校验：
-        // - 已知且匹配 → 接受
-        // - 已知但密钥变更（KeyChanged）→ 拒绝（可能的中间人攻击）
-        // - 未知 / known_hosts 文件不存在 → 首次信任并写入 ~/.ssh/known_hosts
-        match russh_keys::check_known_hosts(&self.host, self.port, server_public_key) {
-            Ok(true) => Ok(true),
-            Ok(false) => {
-                if let Err(e) =
-                    russh_keys::learn_known_hosts(&self.host, self.port, server_public_key)
-                {
-                    tracing::warn!("learn_known_hosts {}:{} failed: {e}", self.host, self.port);
-                }
-                Ok(true)
-            }
-            Err(russh_keys::Error::KeyChanged { line }) => {
-                tracing::error!(
-                    "known_hosts: host key CHANGED for {}:{} (entry line {line}) — rejecting connection",
-                    self.host,
-                    self.port
-                );
-                Ok(false)
-            }
-            Err(e) => {
-                // known_hosts 文件缺失等非密钥变更错误：按未知主机处理，TOFU 学习。
-                tracing::warn!(
-                    "known_hosts read issue for {}:{}: {e}; treating as new host",
-                    self.host,
-                    self.port
-                );
-                let _ = russh_keys::learn_known_hosts(&self.host, self.port, server_public_key);
-                Ok(true)
-            }
+        let verdict = known_hosts::verdict(&self.host, self.port, server_public_key, &self.host_key.ours, self.host_key.openssh.as_deref());
+        if verdict == Verdict::Known {
+            return Ok(true);
         }
+        let changed = verdict == Verdict::Changed;
+        if changed {
+            tracing::warn!("host key for {}:{} differs from the recorded one", self.host, self.port);
+        }
+        let Some(prompt) = self.host_key.prompt.clone() else {
+            *self.rejected.lock().unwrap() = Some(HostKeyRejection::Untrusted { changed });
+            return Ok(false);
+        };
+        if !prompt(known_hosts::question(&self.host, self.port, server_public_key, changed)).await {
+            *self.rejected.lock().unwrap() = Some(HostKeyRejection::Declined);
+            return Ok(false);
+        }
+        if let Err(error) = known_hosts::trust(&self.host, self.port, server_public_key, &self.host_key.ours) {
+            tracing::warn!("remember host key for {}:{}: {error}", self.host, self.port);
+        }
+        Ok(true)
     }
 }
 
@@ -317,6 +323,7 @@ pub async fn connect(
     shell: ShellHandle,
     shell_rx: ShellReceiver,
     sink: Arc<dyn TerminalSink>,
+    host_key: HostKeyCheck,
 ) -> AppResult<String> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
@@ -325,7 +332,7 @@ pub async fn connect(
     tracing::info!("ssh connect start attempt={attempt_id} target={target}");
     state.pending_insert(attempt_id.to_string(), abort_handle).await;
     let result = Abortable::new(
-        connect_session(state, details, session_id.clone(), shell, shell_rx, sink),
+        connect_session(state, details, session_id.clone(), shell, shell_rx, sink, host_key),
         abort_registration,
     )
     .await;
@@ -358,6 +365,7 @@ async fn connect_session(
     shell: ShellHandle,
     shell_rx: ShellReceiver,
     sink: Arc<dyn TerminalSink>,
+    host_key: HostKeyCheck,
 ) -> AppResult<()> {
     let password = details.password.clone().or_else(|| {
         details.id.as_deref().and_then(|cid| load_secret(cid, "password"))
@@ -378,6 +386,7 @@ async fn connect_session(
                 password.as_deref(),
                 details.private_key.as_deref(),
                 passphrase.as_deref(),
+                host_key.clone(),
             )
             .await?,
             false,
@@ -395,6 +404,7 @@ async fn connect_session(
                 password.as_deref(),
                 details.private_key.as_deref(),
                 passphrase.as_deref(),
+                host_key,
             )
             .await?;
             open_terminal_channel(&handle_arc, Duration::from_secs(5)).await?
@@ -724,6 +734,69 @@ mod tests {
         }
     }
 
+    /// 真实 sshd 上的主机身份确认：第一次问、拒绝就不连；确认后记下，再连不问；密钥变了再问并标明「变了」。
+    /// 任意 sshd 即可（认证在核对之后，这里不需要能登录）：
+    /// `SSHL_HOSTKEY_IT=127.0.0.1:2222 SSHL_HOSTKEY_IT_FP=SHA256:… cargo test --lib host_key_confirmation_against_real_sshd -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 SSHL_HOSTKEY_IT=host:port 指向任一 sshd"]
+    async fn host_key_confirmation_against_real_sshd() {
+        use crate::error::AppError;
+        use crate::known_hosts::{HostKeyCheck, HostKeyQuestion};
+        use std::sync::Arc;
+        let Ok(target) = std::env::var("SSHL_HOSTKEY_IT") else { return };
+        let (host, port) = target.split_once(':').unwrap();
+        let port: u16 = port.parse().unwrap();
+        let dir = std::env::temp_dir().join(format!("sshl-hostkey-it-{}", uuid::Uuid::new_v4()));
+        let ours = dir.join("known_hosts");
+        let asked: Arc<std::sync::Mutex<Vec<HostKeyQuestion>>> = Arc::default();
+        let check = |answer: bool| {
+            let asked = asked.clone();
+            HostKeyCheck {
+                ours: ours.clone(),
+                openssh: None,
+                prompt: Some(Arc::new(move |q| {
+                    asked.lock().unwrap().push(q);
+                    Box::pin(async move { answer })
+                })),
+            }
+        };
+        let handshake = |check| super::do_handshake(host, port, "nobody", None, None, None, check);
+
+        let declined = handshake(check(false)).await.err().unwrap();
+        assert!(matches!(declined, AppError::HostKeyDeclined), "{declined}");
+        assert!(!ours.exists(), "拒绝了不记");
+        let first = asked.lock().unwrap().pop().unwrap();
+        assert!(!first.changed);
+        if let Ok(expected) = std::env::var("SSHL_HOSTKEY_IT_FP") {
+            assert_eq!(first.fingerprint, expected, "指纹同 ssh-keygen -lf");
+        }
+
+        // 确认：握手继续（没给凭据，停在认证），密钥记下
+        let err = handshake(check(true)).await.err().unwrap();
+        assert!(!matches!(err, AppError::HostKeyDeclined) && err.to_string().contains("no password or private key"), "{err}");
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        asked.lock().unwrap().clear();
+        handshake(check(false)).await.err().map(|e| assert!(!matches!(e, AppError::HostKeyDeclined), "已信任不该再问：{e}"));
+        assert!(asked.lock().unwrap().is_empty());
+
+        // 没人可问（后台预热）：未知主机直接不连
+        let warm = HostKeyCheck { ours: dir.join("empty"), openssh: None, prompt: None };
+        assert!(handshake(warm).await.err().unwrap().to_string().contains("not trusted yet"));
+
+        // 记录里换成另一把同类型的密钥：问，且标明变了
+        let recorded = std::fs::read_to_string(&ours).unwrap();
+        let kind = recorded.split_whitespace().nth(1).unwrap().to_string();
+        let other = match kind.as_str() {
+            "ssh-ed25519" => russh_keys::key::KeyPair::generate_ed25519().unwrap(),
+            other => panic!("测试服务器的主机密钥类型 {other}：本测试只造 ed25519"),
+        };
+        std::fs::remove_file(&ours).unwrap();
+        crate::known_hosts::trust(host, port, &other.clone_public_key().unwrap(), &ours).unwrap();
+        assert!(matches!(handshake(check(false)).await.err().unwrap(), AppError::HostKeyDeclined));
+        assert!(asked.lock().unwrap().pop().unwrap().changed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 真实 sshd：终端通道不确认就停在一个窗口内，同连接的其他通道照常跑；确认后继续流动。
     /// 容器见 tests/fixtures-sudo.Dockerfile（以 alice 登录）：
     /// `SSHL_SFTP_IT=127.0.0.1:2233 cargo test --lib terminal_window_against_real_sshd -- --ignored --nocapture`
@@ -733,7 +806,7 @@ mod tests {
         use russh::ChannelMsg;
         let Ok(target) = std::env::var("SSHL_SFTP_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
-        let h = super::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None).await.unwrap();
+        let h = super::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None, super::HostKeyCheck::trust_any_for_tests()).await.unwrap();
         let mut term = super::open_terminal_channel(&h, Duration::from_secs(5)).await.unwrap();
         term.request_pty(false, "xterm-256color", 120, 40, 0, 0, &[]).await.unwrap();
         term.request_shell(false).await.unwrap();
