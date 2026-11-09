@@ -11,7 +11,8 @@ use futures::future::{AbortHandle, Abortable};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::config_store::load_secret;
+use crate::auto_auth;
+use crate::config_store::{load_secret, AuthKind};
 use crate::error::{AppError, AppResult};
 use crate::known_hosts::{self, HostKeyCheck, Verdict};
 use crate::state::AppState;
@@ -26,9 +27,20 @@ pub struct ConnectionDetails {
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub passphrase: Option<String>,
+    pub auth: AuthKind,
     /// PTY 按终端区的真实网格开：不带尺寸时 shell 先按 80 列画提示符 / MOTD，终端出来后再重排，一连上就跳一下。
     pub cols: u32,
     pub rows: u32,
+}
+
+/// 登录凭据。
+#[derive(Debug, Clone, Copy)]
+pub enum Credentials<'a> {
+    Password(&'a str),
+    /// 私钥：路径或 PEM 内容。
+    Key { key: &'a str, passphrase: Option<&'a str> },
+    /// 免密：见 [`auto_auth`]。
+    Auto,
 }
 
 /// 终端通道的输出去处。
@@ -218,53 +230,73 @@ pub(crate) async fn do_handshake(
     host: &str,
     port: u16,
     username: &str,
-    password: Option<&str>,
-    private_key: Option<&str>,
-    passphrase: Option<&str>,
+    credentials: Credentials<'_>,
     host_key: HostKeyCheck,
 ) -> AppResult<Arc<russh::client::Handle<ClientHandler>>> {
+    let mut handle = connect_unauthenticated(host, port, host_key).await?;
+    authenticate(&mut handle, host, port, username, credentials).await?;
+    Ok(Arc::new(handle))
+}
+
+/// TCP + SSH 握手（含主机密钥核对），还没认证。
+pub(crate) async fn connect_unauthenticated(
+    host: &str,
+    port: u16,
+    host_key: HostKeyCheck,
+) -> AppResult<russh::client::Handle<ClientHandler>> {
     let addr = format!("{}:{}", host, port);
     let tcp = connect_tcp(&addr).await?;
     tcp.set_nodelay(true).ok();
 
     let rejected = Arc::new(std::sync::Mutex::new(None));
     let handler = ClientHandler { host: host.to_string(), port, host_key, rejected: rejected.clone() };
-    let mut handle = russh::client::connect_stream(russh_config(), tcp, handler)
+    russh::client::connect_stream(russh_config(), tcp, handler)
         .await
         .map_err(|e| match rejected.lock().unwrap().take() {
             Some(HostKeyRejection::Declined) => AppError::HostKeyDeclined,
             Some(HostKeyRejection::Untrusted { changed: true }) => AppError::Ssh(format!("host key for {addr} changed")),
             Some(HostKeyRejection::Untrusted { changed: false }) => AppError::Ssh(format!("host key for {addr} not trusted yet")),
             None => AppError::Ssh(format!("ssh handshake: {e}")),
-        })?;
+        })
+}
 
-    let authed = if let Some(pk) = private_key {
-        // 用户可能传路径或 PEM 内容。PEM 以 "-----BEGIN" 开头，否则按路径读文件。
-        let pem = if pk.trim_start().starts_with("-----BEGIN") {
-            pk.to_string()
-        } else {
-            tokio::fs::read_to_string(pk)
+async fn authenticate(
+    handle: &mut russh::client::Handle<ClientHandler>,
+    host: &str,
+    port: u16,
+    username: &str,
+    credentials: Credentials<'_>,
+) -> AppResult<()> {
+    let authed = match credentials {
+        Credentials::Key { key: pk, passphrase } => {
+            // 用户可能传路径或 PEM 内容。PEM 以 "-----BEGIN" 开头，否则按路径读文件。
+            let pem = if pk.trim_start().starts_with("-----BEGIN") {
+                pk.to_string()
+            } else {
+                tokio::fs::read_to_string(pk)
+                    .await
+                    .map_err(|e| AppError::Ssh(format!("read key file {pk}: {e}")))?
+            };
+            let key = russh_keys::decode_secret_key(&pem, passphrase)
+                .map_err(|e| AppError::Ssh(format!("decode key: {e}")))?;
+            handle
+                .authenticate_publickey(username, Arc::new(key))
                 .await
-                .map_err(|e| AppError::Ssh(format!("read key file {pk}: {e}")))?
-        };
-        let key = russh_keys::decode_secret_key(&pem, passphrase)
-            .map_err(|e| AppError::Ssh(format!("decode key: {e}")))?;
-        handle
-            .authenticate_publickey(username, Arc::new(key))
-            .await
-            .map_err(|e| AppError::Ssh(format!("pubkey auth: {e}")))?
-    } else if let Some(pw) = password {
-        handle
+                .map_err(|e| AppError::Ssh(format!("pubkey auth: {e}")))?
+        }
+        Credentials::Password(pw) => handle
             .authenticate_password(username, pw)
             .await
-            .map_err(|e| AppError::Ssh(format!("password auth: {e}")))?
-    } else {
-        return Err(AppError::Ssh("no password or private key provided".into()));
+            .map_err(|e| AppError::Ssh(format!("password auth: {e}")))?,
+        Credentials::Auto => {
+            auto_auth::authenticate(handle, host, port, username).await?;
+            true
+        }
     };
     if !authed {
         return Err(AppError::Ssh("authentication rejected".into()));
     }
-    Ok(Arc::new(handle))
+    Ok(())
 }
 
 pub struct ClientHandler {
@@ -373,6 +405,16 @@ async fn connect_session(
     let passphrase = details.passphrase.clone().or_else(|| {
         details.id.as_deref().and_then(|cid| load_secret(cid, "passphrase"))
     });
+    let credentials = match details.auth {
+        AuthKind::Password => Credentials::Password(
+            password.as_deref().ok_or_else(|| AppError::Ssh("no password provided".into()))?,
+        ),
+        AuthKind::Key => Credentials::Key {
+            key: details.private_key.as_deref().ok_or_else(|| AppError::Ssh("no private key provided".into()))?,
+            passphrase: passphrase.as_deref(),
+        },
+        AuthKind::Auto => Credentials::Auto,
+    };
 
     let key = warm_key(&details.host, details.port, &details.username);
     let (mut handle_arc, used_warm_connection) = if let Some(warm) = state.warm_take(&key).await {
@@ -383,9 +425,7 @@ async fn connect_session(
                 &details.host,
                 details.port,
                 &details.username,
-                password.as_deref(),
-                details.private_key.as_deref(),
-                passphrase.as_deref(),
+                credentials,
                 host_key.clone(),
             )
             .await?,
@@ -401,9 +441,7 @@ async fn connect_session(
                 &details.host,
                 details.port,
                 &details.username,
-                password.as_deref(),
-                details.private_key.as_deref(),
-                passphrase.as_deref(),
+                credentials,
                 host_key,
             )
             .await?;
@@ -735,7 +773,7 @@ mod tests {
     }
 
     /// 真实 sshd 上的主机身份确认：第一次问、拒绝就不连；确认后记下，再连不问；密钥变了再问并标明「变了」。
-    /// 任意 sshd 即可（认证在核对之后，这里不需要能登录）：
+    /// 任意 sshd 即可（认证在核对之后，这里不需要能登录；OpenSSH 9.8+ 要配 `PerSourcePenalties no`）：
     /// `SSHL_HOSTKEY_IT=127.0.0.1:2222 SSHL_HOSTKEY_IT_FP=SHA256:… cargo test --lib host_key_confirmation_against_real_sshd -- --ignored`
     #[tokio::test]
     #[ignore = "需要 SSHL_HOSTKEY_IT=host:port 指向任一 sshd"]
@@ -760,7 +798,7 @@ mod tests {
                 })),
             }
         };
-        let handshake = |check| super::do_handshake(host, port, "nobody", None, None, None, check);
+        let handshake = |check| super::do_handshake(host, port, "nobody", super::Credentials::Password("x"), check);
 
         let declined = handshake(check(false)).await.err().unwrap();
         assert!(matches!(declined, AppError::HostKeyDeclined), "{declined}");
@@ -771,9 +809,9 @@ mod tests {
             assert_eq!(first.fingerprint, expected, "指纹同 ssh-keygen -lf");
         }
 
-        // 确认：握手继续（没给凭据，停在认证），密钥记下
+        // 确认：握手继续（停在认证：nobody / 错密码），密钥记下
         let err = handshake(check(true)).await.err().unwrap();
-        assert!(!matches!(err, AppError::HostKeyDeclined) && err.to_string().contains("no password or private key"), "{err}");
+        assert!(!matches!(err, AppError::HostKeyDeclined) && err.to_string().contains("auth"), "{err}");
         assert_eq!(asked.lock().unwrap().len(), 1);
         asked.lock().unwrap().clear();
         handshake(check(false)).await.err().map(|e| assert!(!matches!(e, AppError::HostKeyDeclined), "已信任不该再问：{e}"));
@@ -806,7 +844,7 @@ mod tests {
         use russh::ChannelMsg;
         let Ok(target) = std::env::var("SSHL_SFTP_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
-        let h = super::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None, super::HostKeyCheck::trust_any_for_tests()).await.unwrap();
+        let h = super::do_handshake(host, port.parse().unwrap(), "alice", super::Credentials::Password("alicepw"), super::HostKeyCheck::trust_any_for_tests()).await.unwrap();
         let mut term = super::open_terminal_channel(&h, Duration::from_secs(5)).await.unwrap();
         term.request_pty(false, "xterm-256color", 120, 40, 0, 0, &[]).await.unwrap();
         term.request_shell(false).await.unwrap();

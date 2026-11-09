@@ -8,7 +8,7 @@ use gpui::{
     Subscription, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
-use sshl_core::config_store::StoredConnection;
+use sshl_core::config_store::{AuthKind, StoredConnection};
 
 use crate::assets::Icon;
 use crate::ssh_keys;
@@ -22,7 +22,7 @@ pub struct ConnectionForm {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub use_key: bool,
+    pub auth: AuthKind,
     pub password: String,
     pub private_key: String,
     pub passphrase: String,
@@ -52,7 +52,7 @@ enum Field {
 pub struct ConnectionDialog {
     editing: Option<StoredConnection>,
     inputs: Vec<(Field, Entity<InputState>)>,
-    use_key: bool,
+    auth: AuthKind,
     /// ~/.ssh 下找到的私钥；第一次用到私钥方式时才扫描。
     keys: Option<Vec<PathBuf>>,
     save_password: bool,
@@ -106,14 +106,14 @@ impl ConnectionDialog {
             }));
             inputs.push((field, input));
         }
-        let use_key = editing.as_ref().is_some_and(|c| c.private_key.is_some());
+        let auth = editing.as_ref().map_or(AuthKind::Password, |c| c.auth);
         let this = Self {
             // 编辑时密码从不回显（密文只在后端）；不勾「保存密码」就不改已存的密码
             save_password: editing.is_none(),
             editing,
             inputs,
-            use_key,
-            keys: use_key.then(ssh_keys::discover),
+            auth,
+            keys: (auth == AuthKind::Key).then(ssh_keys::discover),
             focused: None,
             error: None,
             focus: cx.focus_handle(),
@@ -150,7 +150,7 @@ impl ConnectionDialog {
             _ => return Err("端口应为 1–65535".into()),
         };
         let private_key = self.text(Field::PrivateKey, cx);
-        if self.use_key && private_key.trim().is_empty() {
+        if self.auth == AuthKind::Key && private_key.trim().is_empty() {
             return Err("请选择私钥文件".into());
         }
         Ok(ConnectionForm {
@@ -159,7 +159,7 @@ impl ConnectionDialog {
             host,
             port,
             username,
-            use_key: self.use_key,
+            auth: self.auth,
             password: self.text(Field::Password, cx),
             private_key,
             passphrase: self.text(Field::Passphrase, cx),
@@ -180,9 +180,9 @@ impl ConnectionDialog {
         }
     }
 
-    fn set_use_key(&mut self, use_key: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.use_key = use_key;
-        if use_key {
+    fn set_auth(&mut self, auth: AuthKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.auth = auth;
+        if auth == AuthKind::Key {
             // 切到私钥且还没填：默认用 ~/.ssh 里找到的第一把（id_ed25519 优先），一把都没有就留空
             let first = self.keys.get_or_insert_with(ssh_keys::discover).first().cloned();
             if let Some(first) = first
@@ -315,15 +315,25 @@ impl Render for ConnectionDialog {
                             .child(
                                 div().flex().flex_col().gap(px(6.)).child(kit::field_label("认证方式")).child(kit::segmented(
                                     "auth-type",
-                                    &[(false, Some(Icon::Lock), "密码".into()), (true, Some(Icon::KeyRound), "私钥".into())],
-                                    self.use_key,
-                                    move |use_key, window, cx| {
-                                        let _ = this.update(cx, |this, cx| this.set_use_key(use_key, window, cx));
+                                    &[
+                                        (AuthKind::Password, Some(Icon::Lock), "密码".into()),
+                                        (AuthKind::Key, Some(Icon::KeyRound), "私钥".into()),
+                                        (AuthKind::Auto, Some(Icon::Zap), "免密".into()),
+                                    ],
+                                    self.auth,
+                                    move |auth, window, cx| {
+                                        let _ = this.update(cx, |this, cx| this.set_auth(auth, window, cx));
                                     },
                                 )),
                             )
-                            .map(|d| {
-                                if self.use_key {
+                            .map(|d| match self.auth {
+                                AuthKind::Auto => d.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                                        .child("依次尝试服务器免认证、SSH Agent 和私钥文件，私钥按 ~/.ssh/config 为这台主机配的来，没配就用 ~/.ssh 里的默认私钥。"),
+                                ),
+                                AuthKind::Key => {
                                     d.child(
                                         div()
                                             .flex()
@@ -343,11 +353,10 @@ impl Render for ConnectionDialog {
                                             .when_some(self.key_choices(cx), |d, choices| d.child(choices)),
                                     )
                                     .child(self.field("私钥密码", Some("（可选）"), Field::Passphrase))
-                                } else {
-                                    d.child(self.field("密码", None, Field::Password))
                                 }
+                                AuthKind::Password => d.child(self.field("密码", None, Field::Password)),
                             })
-                            .child(
+                            .when(self.auth != AuthKind::Auto, |d| d.child(
                                 div()
                                     .flex()
                                     .items_center()
@@ -367,7 +376,7 @@ impl Render for ConnectionDialog {
                                             })),
                                     )
                                     .child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("· AES 加密保存在本机")),
-                            )
+                            ))
                             .when_some(self.error.clone(), |d, error| d.child(div().text_sm().text_color(theme::color(ui::DESTRUCTIVE)).child(error))),
                     ),
             )

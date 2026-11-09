@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 
-use crate::config_store::{self, load_secret};
+use crate::config_store::{self, load_secret, AuthKind};
 use crate::known_hosts::HostKeyCheck;
 use crate::ssh;
 use crate::state::{self, AppState};
@@ -98,16 +98,18 @@ async fn maintain_warm_pool(state: &AppState, failed_at: &mut HashMap<String, In
             // secrets 库才是凭据真相来源，无条件按 id 读取。
             let password = load_secret(&c.id, "password");
             let passphrase = load_secret(&c.id, "passphrase");
-            if password.is_none() && c.private_key.is_none() {
-                return None;
-            }
+            let credentials = match (c.auth, &password, &c.private_key) {
+                (AuthKind::Password, Some(password), _) => ssh::Credentials::Password(password),
+                (AuthKind::Key, _, Some(key)) => ssh::Credentials::Key { key, passphrase: passphrase.as_deref() },
+                (AuthKind::Auto, _, _) => ssh::Credentials::Auto,
+                // 没存密码 / 没选私钥：连的时候要问用户，预热不了
+                _ => return None,
+            };
             match ssh::do_handshake(
                 &c.host,
                 c.port,
                 &c.username,
-                password.as_deref(),
-                c.private_key.as_deref(),
-                passphrase.as_deref(),
+                credentials,
                 // 用户不在场：没确认过的主机先不连，等他点连接时再问
                 HostKeyCheck::user(None),
             )

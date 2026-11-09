@@ -68,6 +68,10 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **主机密钥**（`crates/core/src/known_hosts.rs`）：信任记在 `~/.sshl/known_hosts`；`~/.ssh/known_hosts` 只读不写，那里认过的直接信任。
   没记录 / 密钥变了由界面弹确认框（`HostKeyCheck` 的 prompt），确认才写入；拒绝报 `AppError::HostKeyDeclined`，界面不再弹「连接失败」。
   预热池没人可问（prompt 为 None），没确认过的主机不预热。测试用 `HostKeyCheck::trust_any_for_tests()`，不碰开发机的记录。
+- **认证方式**（`config_store::AuthKind`，库里 `connections.auth` 列；空 = 旧数据，按有没有私钥推断）：密码 / 私钥 / 免密。
+  免密（`auto_auth.rs`）依次试 none、SSH Agent、私钥文件，私钥和 Agent 按 `ssh -G` 解析的 `~/.ssh/config`
+  （IdentityFile / IdentityAgent / IdentitiesOnly），解析不了退到默认私钥；失败时说明试了哪些、哪把设了密码。
+  密码方式没存密码时，连接前先弹框问（只用这一次）。预热池按 `user@host:port` 复用，不区分认证方式。
 - **终端里的 Tab**：gpui-base 的 Root 把 tab / shift-tab 绑成切换焦点，终端上下文里用 `NoAction` 压掉（`terminal::view::key_bindings`），
   否则补全键会把焦点跳到搜索框。
 - **IPC 已不存在**：界面直接调 `sshl_core`。后端跑在独立 tokio 运行时（`backend.rs`），界面用 `backend::spawn` 在 GPUI 执行器里

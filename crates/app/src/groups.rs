@@ -147,6 +147,7 @@ mod tests {
             has_password: false,
             has_passphrase: false,
             group: group.into(),
+            auth: Default::default(),
         }
     }
 

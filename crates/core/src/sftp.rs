@@ -1778,7 +1778,7 @@ mod tests {
             exec(h, &format!("test -e {}", shell_quote(path)), None).await.0 != 0
         }
         let dest = "/home/bob/uploads";
-        let alice = crate::ssh::do_handshake(host, port, "alice", Some("alicepw"), None, None, crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
+        let alice = crate::ssh::do_handshake(host, port, "alice", crate::ssh::Credentials::Password("alicepw"), crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
         assert_ne!(exec(&alice, "touch /home/bob/uploads/x", None).await.0, 0, "前提：alice 不能直接写 bob 的目录");
 
         // 上传前的 sudo 预检：密码错 / 没给密码在传文件之前就能识别，且不建暂存区
@@ -1842,7 +1842,7 @@ mod tests {
         assert_eq!(out, "root:root 755 .\nroot:root 755 existing\nroot:root 755 existing/sub\nroot:root 644 existing/sub/new.txt\n",
             "目标目录属 root 时上传的条目全归 root、权限按 umask");
 
-        let carol =crate::ssh::do_handshake(host, port, "carol", Some("carolpw"), None, None, crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
+        let carol =crate::ssh::do_handshake(host, port, "carol", crate::ssh::Credentials::Password("carolpw"), crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
         let (st, out, err) = exec(&carol, &sudo_prepare_command(true), Some(b"carolpw\n")).await;
         assert!(staging_from_prepare(st, &out, &err).unwrap_err().to_string().starts_with("SUDO_NOT_ALLOWED: "), "{err}");
         let (_, staging, _) = exec(&carol, "mktemp -d /var/tmp/.sshl-upload.XXXXXXXX", None).await;
@@ -1852,7 +1852,7 @@ mod tests {
         assert_eq!(sudo_failure(&err), "SUDO_NOT_ALLOWED", "{err}");
         assert!(gone(&carol, &staging).await);
 
-        let dave = crate::ssh::do_handshake(host, port, "dave", Some("davepw"), None, None, crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
+        let dave = crate::ssh::do_handshake(host, port, "dave", crate::ssh::Credentials::Password("davepw"), crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
         let staging = stage(&dave, "dave", None).await;
         let (st, _, err) = exec(&dave, &sudo_extract_command(false, &staging, dest, "existing"), None).await;
         assert_eq!(st, 0, "免密 sudo 走 -n：{err}");
@@ -1914,7 +1914,7 @@ mod tests {
             open_sftp_as(channel(h).await, user, via, pw).await.err().expect("应当失败").to_string()
         }
 
-        let alice = crate::ssh::do_handshake(host, port, "alice", Some("alicepw"), None, None, crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
+        let alice = crate::ssh::do_handshake(host, port, "alice", crate::ssh::Credentials::Password("alicepw"), crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
         let uid_of = |name: &'static str| { let alice = alice.clone(); async move { exec(&alice, &format!("id -u {name}"), None).await.1.trim().parse::<u32>().unwrap() } };
         let (alice_uid, bob_uid) = (uid_of("alice").await, uid_of("bob").await);
         let mut term = channel(&alice).await;
@@ -3104,7 +3104,7 @@ mod tests {
         async fn login() -> Option<H> {
             let target = std::env::var("SSHL_SFTP_IT").ok()?;
             let (host, port) = target.split_once(':').unwrap();
-            Some(crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", Some("alicepw"), None, None, crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap())
+            Some(crate::ssh::do_handshake(host, port.parse().unwrap(), "alice", crate::ssh::Credentials::Password("alicepw"), crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap())
         }
 
         async fn connect() -> Option<(H, Sftp)> {

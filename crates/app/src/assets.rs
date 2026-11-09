@@ -60,6 +60,7 @@ icons! {
     Upload => "upload",
     UserRound => "user-round",
     X => "x",
+    Zap => "zap",
 }
 
 pub const APP_ICON: &str = "icon.png";

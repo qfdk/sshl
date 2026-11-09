@@ -10,7 +10,8 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, Task, Window, actions, canvas, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
-use sshl_core::config_store::{self, SaveConnectionInput, StoredConnection};
+use sshl_core::config_store::{self, AuthKind, SaveConnectionInput, StoredConnection};
+use sshl_core::crypto_store;
 use sshl_core::events::CoreEvent;
 use sshl_core::ssh::{self, ConnectionDetails};
 
@@ -18,7 +19,7 @@ use crate::backend;
 use crate::connection_dialog::{ConnectionDialog, ConnectionDialogEvent, ConnectionForm};
 use crate::files::{FileManager, FileManagerEvent, FileSession};
 use crate::groups::{self, Side};
-use crate::prompts::{self, Options};
+use crate::prompts::{self, Options, PasswordAnswer};
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use crate::terminal::{Metrics, TerminalEvent, TerminalView};
 use crate::theme::{self, ui};
@@ -227,7 +228,7 @@ impl Workspace {
             return;
         }
         let Some(conn) = self.connection(id).cloned() else { return };
-        let details = ConnectionDetails {
+        let mut details = ConnectionDetails {
             id: Some(conn.id.clone()),
             host: conn.host.clone(),
             port: conn.port,
@@ -235,9 +236,28 @@ impl Workspace {
             password: None,
             private_key: conn.private_key.clone(),
             passphrase: None,
+            auth: conn.auth,
             cols: 0,
             rows: 0,
         };
+        // 密码方式但没存密码：先问（只用这一次，不保存）
+        if conn.auth == AuthKind::Password && !crypto_store::has(&conn.id, "password") {
+            let target = format!("{}@{}", conn.username, conn.host);
+            let options = Options::new(format!("连接 {}", conn.name)).message(format!("输入 {target} 的密码。")).confirm("连接");
+            let answer = prompts::password(window, cx, options, "密码", Vec::new());
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(Some(PasswordAnswer::Password(password))) = answer.await else { return };
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.pending.is_some() || this.session(&conn.id).is_some() {
+                        return;
+                    }
+                    details.password = Some(password);
+                    this.start_connect(conn.id.clone(), conn.name.clone().into(), details, None, window, cx);
+                });
+            })
+            .detach();
+            return;
+        }
         self.start_connect(conn.id.clone(), conn.name.clone().into(), details, None, window, cx);
     }
 
@@ -698,30 +718,34 @@ fn new_connection_id() -> String {
 
 impl ConnectionForm {
     pub fn to_details(&self, id: Option<String>) -> ConnectionDetails {
+        let key = self.auth == AuthKind::Key;
         ConnectionDetails {
             id,
             host: self.host.trim().to_string(),
             port: self.port,
             username: self.username.trim().to_string(),
-            password: (!self.use_key).then(|| self.password.clone()),
-            private_key: self.use_key.then(|| self.private_key.clone()),
-            passphrase: (self.use_key && !self.passphrase.is_empty()).then(|| self.passphrase.clone()),
+            password: (self.auth == AuthKind::Password).then(|| self.password.clone()),
+            private_key: key.then(|| self.private_key.clone()),
+            passphrase: (key && !self.passphrase.is_empty()).then(|| self.passphrase.clone()),
+            auth: self.auth,
             cols: 0,
             rows: 0,
         }
     }
 
     pub fn to_save_input(&self, id: Option<String>, save_password: bool) -> SaveConnectionInput {
+        let key = self.auth == AuthKind::Key;
         SaveConnectionInput {
             id,
             name: self.name.trim().to_string(),
             host: self.host.trim().to_string(),
             port: self.port,
             username: self.username.trim().to_string(),
-            password: (!self.use_key && save_password).then(|| self.password.clone()),
-            private_key: self.use_key.then(|| self.private_key.clone()),
-            passphrase: (self.use_key && save_password && !self.passphrase.is_empty()).then(|| self.passphrase.clone()),
+            password: (self.auth == AuthKind::Password && save_password).then(|| self.password.clone()),
+            private_key: key.then(|| self.private_key.clone()),
+            passphrase: (key && save_password && !self.passphrase.is_empty()).then(|| self.passphrase.clone()),
             group: self.group.trim().to_string(),
+            auth: self.auth,
         }
     }
 }
@@ -874,5 +898,44 @@ impl Workspace {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn form(auth: AuthKind) -> ConnectionForm {
+        ConnectionForm {
+            name: " web ".into(),
+            group: "".into(),
+            host: " example.com ".into(),
+            port: 22,
+            username: "root".into(),
+            auth,
+            password: "pw".into(),
+            private_key: "/k/id_ed25519".into(),
+            passphrase: "".into(),
+            save_password: true,
+        }
+    }
+
+    #[test]
+    fn each_auth_method_carries_only_its_own_credentials() {
+        let auto = form(AuthKind::Auto);
+        let details = auto.to_details(None);
+        assert_eq!((details.password, details.private_key, details.auth), (None, None, AuthKind::Auto));
+        let saved = auto.to_save_input(None, true);
+        assert_eq!((saved.password, saved.private_key, saved.auth), (None, None, AuthKind::Auto), "免密不存密码 / 私钥");
+
+        let key = form(AuthKind::Key);
+        let details = key.to_details(None);
+        assert_eq!((details.password, details.private_key.as_deref(), details.passphrase), (None, Some("/k/id_ed25519"), None));
+        assert_eq!(key.to_save_input(None, true).auth, AuthKind::Key);
+
+        let password = form(AuthKind::Password);
+        assert_eq!(password.to_details(None).password.as_deref(), Some("pw"));
+        assert_eq!(password.to_save_input(None, false).password, None, "不勾保存密码就不存");
+        assert_eq!(password.to_save_input(Some("1".into()), true).host, "example.com");
     }
 }

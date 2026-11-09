@@ -65,6 +65,7 @@ fn open() -> AppResult<Connection> {
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
     let has_group_name = column_names.iter().any(|name| name == "group_name");
+    let has_auth = column_names.iter().any(|name| name == "auth");
     drop(columns);
     if !has_group_name {
         conn.execute(
@@ -72,6 +73,11 @@ fn open() -> AppResult<Connection> {
             [],
         )
         .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
+    }
+    // 认证方式：空 = 加这一列之前存的，按有没有私钥推断（AuthKind::from_db）
+    if !has_auth {
+        conn.execute("ALTER TABLE connections ADD COLUMN auth TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
     }
 
     #[cfg(unix)]

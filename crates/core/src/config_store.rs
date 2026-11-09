@@ -8,6 +8,38 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::events::{CoreEvent, Events};
 
+/// 认证方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthKind {
+    #[default]
+    Password,
+    Key,
+    /// 免密：依次试服务器免认证、SSH Agent、私钥文件（按 ~/.ssh/config），见 auto_auth。
+    Auto,
+}
+
+impl AuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthKind::Password => "password",
+            AuthKind::Key => "key",
+            AuthKind::Auto => "auto",
+        }
+    }
+
+    /// 库里的值；加这一列之前存的连接（空）按有没有私钥推断。
+    pub fn from_db(value: &str, private_key: Option<&str>) -> Self {
+        match value {
+            "password" => AuthKind::Password,
+            "key" => AuthKind::Key,
+            "auto" => AuthKind::Auto,
+            _ if private_key.is_some() => AuthKind::Key,
+            _ => AuthKind::Password,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredConnection {
@@ -26,6 +58,8 @@ pub struct StoredConnection {
     pub has_passphrase: bool,
     #[serde(default)]
     pub group: String,
+    #[serde(default)]
+    pub auth: AuthKind,
 }
 
 fn default_port() -> u16 {
@@ -36,20 +70,23 @@ fn default_port() -> u16 {
 pub fn connections() -> AppResult<Vec<StoredConnection>> {
         db::with_db(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id,name,host,port,username,private_key,has_password,has_passphrase,group_name
+                "SELECT id,name,host,port,username,private_key,has_password,has_passphrase,group_name,auth
                  FROM connections ORDER BY sort_order, rowid",
             )?;
             let rows = stmt.query_map([], |r| {
+                let private_key: Option<String> = r.get(5)?;
+                let auth = AuthKind::from_db(&r.get::<_, String>(9)?, private_key.as_deref());
                 Ok(StoredConnection {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     host: r.get(2)?,
                     port: r.get::<_, i64>(3)? as u16,
                     username: r.get(4)?,
-                    private_key: r.get(5)?,
+                    private_key,
                     has_password: r.get::<_, i64>(6)? != 0,
                     has_passphrase: r.get::<_, i64>(7)? != 0,
                     group: r.get(8)?,
+                    auth,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -80,6 +117,8 @@ pub struct SaveConnectionInput {
     pub passphrase: Option<String>,
     #[serde(default)]
     pub group: String,
+    #[serde(default)]
+    pub auth: AuthKind,
 }
 
 pub fn save_connection(events: &Events, connection: SaveConnectionInput) -> AppResult<StoredConnection> {
@@ -107,6 +146,7 @@ pub fn save_connection(events: &Events, connection: SaveConnectionInput) -> AppR
         has_password,
         has_passphrase,
         group: connection.group.trim().to_string(),
+        auth: connection.auth,
     };
 
     // upsert：已存在则保留原排序，否则追加到末尾（sort_order = max+1）
@@ -126,13 +166,13 @@ pub fn save_connection(events: &Events, connection: SaveConnectionInput) -> AppR
             })?;
         conn.execute(
             "INSERT INTO connections
-                (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order,group_name)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order,group_name,auth)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, host=excluded.host, port=excluded.port,
                 username=excluded.username, private_key=excluded.private_key,
                 has_password=excluded.has_password, has_passphrase=excluded.has_passphrase,
-                group_name=excluded.group_name",
+                group_name=excluded.group_name, auth=excluded.auth",
             rusqlite::params![
                 stored.id,
                 stored.name,
@@ -144,6 +184,7 @@ pub fn save_connection(events: &Events, connection: SaveConnectionInput) -> AppR
                 stored.has_passphrase as i64,
                 order,
                 stored.group,
+                stored.auth.as_str(),
             ],
         )?;
         if !stored.group.is_empty() {
