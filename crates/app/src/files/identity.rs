@@ -182,8 +182,22 @@ pub struct SessionRecord {
     pub declined: Option<String>,
     /// 已保存密码自动试过、被服务器拒绝的用户（要谁的密码）。
     pub rejected_saved: HashSet<String>,
-    /// 这个会话的文件管理停在哪个远程目录（空 = 还没打开过，第一次从远程 home 开始）。
+    /// 这个会话的文件管理停在哪个远程目录（空 = 还没打开过，第一次从终端所在目录 / 远程 home 开始）。
     pub remote_path: String,
+    /// 上次跟过去的终端目录。
+    pub terminal_cwd: Option<String>,
+}
+
+impl SessionRecord {
+    /// 终端目录变了才跟过去，返回要去的目录：用户在文件管理里自己点进别处后，终端没再 cd 就不把他拽回去。
+    pub fn follow_terminal_cwd(&mut self, cwd: Option<String>) -> Option<String> {
+        let cwd = cwd?;
+        if self.terminal_cwd.as_deref() == Some(cwd.as_str()) {
+            return None;
+        }
+        self.terminal_cwd = Some(cwd.clone());
+        Some(cwd)
+    }
 }
 
 /// 一次同步之后该记谁为「已拒绝」：取消了记这位终端用户；切换成功或终端已换了人就清掉；探测失败保持原样。
@@ -236,6 +250,18 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
+
+    #[test]
+    fn follows_the_terminal_only_when_it_changed_directory() {
+        let mut record = SessionRecord::default();
+        assert_eq!(record.follow_terminal_cwd(Some("/srv/app".into())).as_deref(), Some("/srv/app"));
+        // 终端没再 cd：文件管理里点到别处也不拽回去
+        assert_eq!(record.follow_terminal_cwd(Some("/srv/app".into())), None);
+        // 读不到终端目录：原地不动，也不忘记上次的
+        assert_eq!(record.follow_terminal_cwd(None), None);
+        assert_eq!(record.follow_terminal_cwd(Some("/srv/app".into())), None);
+        assert_eq!(record.follow_terminal_cwd(Some("/var/log".into())).as_deref(), Some("/var/log"));
+    }
 
     fn wrong() -> Outcome {
         Outcome::Failed("SUDO_PASSWORD_INCORRECT: su: Authentication failure".into())

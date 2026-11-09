@@ -88,9 +88,24 @@ fn leads_to_foreground(procs: &[Proc], start: &Proc) -> bool {
     false
 }
 
+/// 终端此刻最深的那个 shell：用户、目录都跟它走。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalShell {
+    pub pid: u32,
+    /// 终端当前用户的有效 uid。
+    pub uid: u32,
+    /// 怎么切过去的；没切换为 None。
+    pub via: Option<Via>,
+}
+
 /// 终端当前用户：(有效 uid, 怎么切过去的)。没切换时 via 为 None。
 /// 找不到终端 shell（比如服务器开了 hidepid、进程不可见）返回 None，调用方按登录用户处理。
 pub fn terminal_user(sshd: u32, procs: &[Proc]) -> Option<(u32, Option<Via>)> {
+    terminal_shell(sshd, procs).map(|shell| (shell.uid, shell.via))
+}
+
+/// 从登录 shell 顺着通往前台的那条链往下走，找最深的 shell（见模块说明）。
+pub fn terminal_shell(sshd: u32, procs: &[Proc]) -> Option<TerminalShell> {
     let login = procs.iter().find(|p| p.ppid == sshd && p.has_tty && is_shell(&p.comm))?;
     let (mut cur, mut shell, mut via) = (login, login, None);
     for _ in 0..64 {
@@ -115,12 +130,28 @@ pub fn terminal_user(sshd: u32, procs: &[Proc]) -> Option<(u32, Option<Via>)> {
         }
         cur = next;
     }
-    if shell.uid == login.uid {
-        Some((login.uid, None))
+    let via = if shell.uid == login.uid {
+        None
     } else {
         // 链上没有 su/sudo（runuser、machinectl 等）：按 su 处理，要的是目标用户自己的密码
-        Some((shell.uid, Some(via.unwrap_or(Via::Su))))
-    }
+        Some(via.unwrap_or(Via::Su))
+    };
+    Some(TerminalShell { pid: shell.pid, uid: shell.uid, via })
+}
+
+/// 读进程 `pid` 的当前目录。Linux 读 /proc（只能读自己的进程，root 的 shell 要以 root 身份读），
+/// 没有 /proc 的（macOS / BSD）退到 lsof。包一层 sh：登录 shell 不一定是 POSIX sh。
+pub fn cwd_command(pid: u32) -> String {
+    let script = format!(
+        "if [ -d /proc/self ]; then readlink /proc/{pid}/cwd; else lsof -a -p {pid} -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'; fi"
+    );
+    format!("sh -c {}", quote(&script))
+}
+
+/// cwd_command 的输出 → 绝对路径；读不到（没权限、进程没了）为 None。
+pub fn parse_cwd(out: &str) -> Option<String> {
+    let line = out.lines().next()?;
+    line.starts_with('/').then(|| line.to_string())
 }
 
 /// 文件管理当前以谁的身份运行（终端切换了用户之后）。密码只留在后端内存里，会话结束即丢弃。
@@ -294,6 +325,41 @@ mod tests {
         // 进程表里找不到终端 shell
         let (sshd, procs) = probe("");
         assert_eq!(terminal_user(sshd, &procs), None);
+    }
+
+    #[test]
+    fn deepest_shell_is_where_the_terminal_is() {
+        let shell = |rows| { let (sshd, procs) = probe(rows); terminal_shell(sshd, &procs).map(|s| s.pid) };
+        assert_eq!(shell("  101   100  1001 pts/0    Ss+  bash\n"), Some(101));
+        // su 之后是 root 的 shell；它里面开着的 vim 不算
+        assert_eq!(shell("  101   100  1001 pts/0    Ss   bash\n  102   101     0 pts/0    S    su\n  103   102     0 pts/0    S    bash\n  104   103     0 pts/0    S+   vim\n"), Some(103));
+        // 同一用户再开一层 shell：跟最里面那层
+        assert_eq!(shell("  101   100  1001 pts/0    Ss   bash\n  102   101  1001 pts/0    S+   zsh\n"), Some(102));
+        // sudo vim：没有更深的 shell，还是登录 shell
+        assert_eq!(shell("  101   100  1001 pts/0    Ss   bash\n  102   101     0 pts/0    S+   sudo\n  103   102     0 pts/0    S+   vim\n"), Some(101));
+    }
+
+    #[test]
+    fn reads_the_working_directory_of_another_process() {
+        let dir = std::env::temp_dir().join(format!("sshl-cwd {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = std::process::Command::new("sleep").arg("30").current_dir(&dir).spawn().unwrap();
+        let out = std::process::Command::new("sh").arg("-c").arg(cwd_command(child.id())).output().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let expected = std::fs::canonicalize(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(parse_cwd(&String::from_utf8_lossy(&out.stdout)).as_deref(), expected.to_str());
+    }
+
+    #[test]
+    fn unreadable_working_directory_is_none() {
+        assert_eq!(parse_cwd(""), None);
+        assert_eq!(parse_cwd("readlink: /proc/103/cwd: Permission denied\n"), None);
+        assert_eq!(parse_cwd("/home/alice/my dir\n"), Some("/home/alice/my dir".into()));
+        // 进程不存在：命令本身不报错也不输出
+        let out = std::process::Command::new("sh").arg("-c").arg(cwd_command(u32::MAX - 1)).output().unwrap();
+        assert_eq!(parse_cwd(&String::from_utf8_lossy(&out.stdout)), None);
     }
 
     #[test]

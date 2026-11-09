@@ -490,16 +490,45 @@ impl FileManager {
             self.load(PaneKind::Remote, None, false, window, cx);
             return;
         }
-        // 这个会话第一次打开文件管理：从远程 home 开始。取 home 期间切了会话，这次结果作废。
+        // 这个会话第一次打开文件管理：从终端所在目录开始，读不到就从远程 home 开始。期间切了会话，这次结果作废。
         self.remote.request += 1;
         let ticket = self.remote.request;
         self.remote.loading = true;
-        let home = backend::spawn(sftp::file_remote_home(&backend::get().state, session_id));
+        let start = backend::spawn(async move {
+            let state = &backend::get().state;
+            let (cwd, home) = futures::join!(sftp::file_terminal_cwd(state, session_id.clone()), sftp::file_remote_home(state, session_id));
+            (cwd.ok().flatten(), home.ok())
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let home = remote_home_from(home.await.and_then(Result::ok).as_deref());
+            let (cwd, home) = start.await.unwrap_or_default();
+            let home = remote_home_from(home.as_deref());
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.remote.request == ticket {
-                    let path = if home.is_empty() { "/".to_string() } else { home };
+                if this.remote.request != ticket {
+                    return;
+                }
+                // 第一次打开（或刚换了身份）：终端在哪就从哪开始，不管上次跟没跟过
+                if let (Some(cwd), Some(record)) = (&cwd, this.session_id().and_then(|sid| this.records.get_mut(&sid))) {
+                    record.terminal_cwd = Some(cwd.clone());
+                }
+                let path = cwd.unwrap_or(if home.is_empty() { "/".to_string() } else { home });
+                this.load(PaneKind::Remote, Some(path), false, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 终端 cd 到了别处：文件管理跟过去（只在文件管理与终端是同一个用户时，见 sync_identity）。
+    fn follow_terminal_cwd(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let sid = session_id.clone();
+        let cwd = backend::spawn(async move { sftp::file_terminal_cwd(&backend::get().state, sid).await });
+        cx.spawn_in(window, async move |this, cx| {
+            let cwd = cwd.await.and_then(Result::ok).flatten();
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.session_id().as_deref() != Some(session_id.as_str()) || this.remote.path.is_empty() {
+                    return;
+                }
+                let Some(path) = this.records.get_mut(&session_id).and_then(|record| record.follow_terminal_cwd(cwd)) else { return };
+                if path != this.remote.path {
                     this.load(PaneKind::Remote, Some(path), false, window, cx);
                 }
             });
@@ -1162,7 +1191,8 @@ impl FileManager {
 
     // ---------------------------------------------------------------- 跟随终端用户
 
-    /// 切到文件管理 / 刷新时看终端此刻是谁，变了就切换身份并回到他的主目录。`interactive`：点徽标。
+    /// 切到文件管理 / 刷新时看终端此刻是谁，变了就切换身份并去终端所在目录（读不到就去他的主目录）；
+    /// 没变就看终端是否 cd 到了别处，跟过去。`interactive`：点徽标。
     fn sync_identity(&mut self, interactive: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else { return };
         if self.syncing {
@@ -1224,6 +1254,10 @@ impl FileManager {
                     return;
                 }
                 match result.status {
+                    // 第一次打开时 remote.path 还空着：load_remote_initial 会去终端目录
+                    SyncStatus::Same if this.session_id().as_deref() == Some(sid.as_str()) && !this.remote.path.is_empty() => {
+                        this.follow_terminal_cwd(sid.clone(), window, cx);
+                    }
                     SyncStatus::Switched => {
                         if this.session_id().as_deref() == Some(sid.as_str()) {
                             this.remote_cache.clear();

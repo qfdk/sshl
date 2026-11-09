@@ -550,6 +550,19 @@ pub async fn file_terminal_user(state: &AppState, session_id: String) -> AppResu
     Ok(TerminalIdentity { login_user, user, via: via.map(Via::as_str), credential, file_user })
 }
 
+/// 终端此刻所在的目录（最深那个 shell 的 cwd），以文件管理当前身份读：终端成了 root 而文件管理还没跟过去时读不到。
+/// 读不到（没权限、看不到进程、服务器既没 /proc 也没 lsof）为 None。
+pub async fn file_terminal_cwd(state: &AppState, session_id: String) -> AppResult<Option<String>> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let (_, out, _) = exec_capture(open_exec_channel(&session).await?, terminal_user::PROBE_COMMAND, None).await?;
+    let Some(shell) = terminal_user::parse_probe(&out).and_then(|(sshd, procs)| terminal_user::terminal_shell(sshd, &procs)) else {
+        return Ok(None);
+    };
+    let out = run_as_file_user(&session, &terminal_user::cwd_command(shell.pid)).await.unwrap_or_default();
+    Ok(terminal_user::parse_cwd(&out))
+}
+
 /// 切换文件管理的身份。`user` 为 None 或登录用户 → 回到登录用户；否则以 `via`（su / sudo）切过去，
 /// 密码：点选的已保存密码 > 手动输入 > 无（仅免密 sudo）。成功后这条连接的 SFTP、删除、chmod、chown 都以新身份进行。
 pub async fn file_switch_user(
@@ -1853,7 +1866,7 @@ mod tests {
     #[ignore = "需要 SSHL_SUDO_IT=host:port 指向 sudo 测试容器"]
     async fn follows_terminal_user_against_real_linux() {
         use super::{exec_capture, open_sftp_as};
-        use crate::terminal_user::{parse_probe, run_as_command, terminal_user, Via, PROBE_COMMAND};
+        use crate::terminal_user::{cwd_command, parse_cwd, parse_probe, run_as_command, terminal_shell, terminal_user, Via, PROBE_COMMAND};
         use tokio::io::AsyncWriteExt;
         let Ok(target) = std::env::var("SSHL_SUDO_IT") else { return };
         let (host, port) = target.split_once(':').unwrap();
@@ -1869,6 +1882,16 @@ mod tests {
         async fn identify(h: &H) -> Option<(u32, Option<Via>)> {
             let (_, out, _) = exec(h, PROBE_COMMAND, None).await;
             parse_probe(&out).and_then(|(sshd, procs)| terminal_user(sshd, &procs))
+        }
+        // 终端所在目录：as = None 以登录用户读，Some((user, pw)) 以 su 切过去的用户读
+        async fn cwd(h: &H, r#as: Option<(&str, &str)>) -> Option<String> {
+            let (_, out, _) = exec(h, PROBE_COMMAND, None).await;
+            let pid = parse_probe(&out).and_then(|(sshd, procs)| terminal_shell(sshd, &procs))?.pid;
+            let out = match r#as {
+                None => exec(h, &cwd_command(pid), None).await.1,
+                Some((user, pw)) => exec(h, &run_as_command(user, Via::Su, true, &cwd_command(pid)), Some(format!("{pw}\n").as_bytes())).await.1,
+            };
+            parse_cwd(&out)
         }
         // 往终端里敲一行，等输出里出现 `until`
         async fn type_line(term: &mut Ch, line: &str, until: &str) {
@@ -1899,11 +1922,16 @@ mod tests {
         term.request_shell(false).await.unwrap();
         type_line(&mut term, "echo ready", "ready").await;
         assert_eq!(identify(&alice).await, Some((alice_uid, None)), "没切换：就是登录用户");
+        type_line(&mut term, "cd /usr/share && echo moved", "moved").await;
+        assert_eq!(cwd(&alice, None).await.as_deref(), Some("/usr/share"), "文件管理跟随终端目录");
 
         // su - root
         type_line(&mut term, "su - root", "Password:").await;
         type_line(&mut term, "rootpw", "# ").await;
         assert_eq!(identify(&alice).await, Some((0, Some(Via::Su))));
+        type_line(&mut term, "cd /etc", "# ").await;
+        assert_eq!(cwd(&alice, None).await, None, "root 的 shell 以 alice 身份读不到");
+        assert_eq!(cwd(&alice, Some(("root", "rootpw"))).await.as_deref(), Some("/etc"), "以 root 身份读得到");
         type_line(&mut term, "sleep 30 &", "# ").await;
         type_line(&mut term, "vim -u NONE /tmp/x 2>/dev/null || sleep 3", "").await;
         assert_eq!(identify(&alice).await, Some((0, Some(Via::Su))), "root shell 里开着程序 / 后台任务也还是 root");
