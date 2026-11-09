@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, KeyDownEvent, ModifiersChangedEvent, MouseButton, ParentElement, Pixels, Point, Render, SharedString,
+    AnyElement, App, AppContext, Bounds, Context, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseMoveEvent, ParentElement, Pixels, PlatformInput, Point, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, Window, actions, canvas, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
@@ -779,6 +779,20 @@ impl Render for Workspace {
             .text_size(px(14.))
             .key_context("Workspace")
             .track_focus(&self.focus)
+            // GPUI 在最后一次输入是键盘时把所有元素都当作没被悬停，而 Finder 的拖放事件不会切回鼠标：
+            // 刚在终端敲完 cd、或按 ⌘2 切到文件管理，再从 Finder 拖文件进来，松手什么都不会发生。
+            // 拖进窗口时补一个鼠标移动，把输入方式切回鼠标，终端和文件管理的 on_drop 才收得到。
+            .on_drag_move::<ExternalPaths>(|event: &DragMoveEvent<ExternalPaths>, window, cx| {
+                if window.last_input_was_keyboard() {
+                    let position = event.event.position;
+                    window.defer(cx, move |window, cx| {
+                        window.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }),
+                            cx,
+                        );
+                    });
+                }
+            })
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::minimize))
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.set_main_tab(MainTab::Terminal, window, cx)))
