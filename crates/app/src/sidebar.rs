@@ -104,15 +104,18 @@ impl Workspace {
                     .child(
                         kit::button("new-connection", Variant::Primary)
                             .aria_label("新建连接")
-                            .map(|b| if collapsed { b.w(px(36.)).px_0() } else { b.flex_1() })
-                            .child(kit::icon(Icon::Plus))
+                            .h(px(32.))
+                            .gap(px(6.))
+                            .text_size(px(13.))
+                            .map(|b| if collapsed { b.w(px(32.)).px_0() } else { b.flex_1() })
+                            .child(kit::icon_sized(Icon::Plus, 14.))
                             .when(!collapsed, |b| b.child("新建连接"))
                             .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
                     )
                     .child(
                         kit::icon_button("open-settings", Variant::Outline, Icon::Settings, "设置")
-                            .w(px(36.))
-                            .h(px(36.))
+                            .w(px(32.))
+                            .h(px(32.))
                             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
                     ),
             )
