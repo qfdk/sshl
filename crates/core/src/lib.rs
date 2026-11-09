@@ -9,6 +9,7 @@ pub mod error;
 pub mod events;
 pub mod known_hosts;
 pub mod local_fs;
+pub mod server_info;
 pub mod sftp;
 pub mod sftp_stall;
 pub mod ssh;

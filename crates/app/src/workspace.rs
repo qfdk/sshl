@@ -19,6 +19,7 @@ use crate::backend;
 use crate::connection_dialog::{ConnectionDialog, ConnectionDialogEvent, ConnectionForm};
 use crate::import_dialog::{ImportDialog, ImportDialogEvent};
 use crate::files::{FileManager, FileManagerEvent, FileSession};
+use crate::system_panel::SystemPanel;
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options, PasswordAnswer};
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
@@ -26,13 +27,14 @@ use crate::terminal::{Metrics, TerminalEvent, TerminalView};
 use crate::theme::{self, ui};
 use crate::ui as kit;
 
-actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, NewConnection, OpenSettings]);
+actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, NewConnection, OpenSettings]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-1", ShowTerminal, Some("Workspace")),
         KeyBinding::new("cmd-2", ShowFiles, Some("Workspace")),
+        KeyBinding::new("cmd-3", ShowSystem, Some("Workspace")),
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
     ]);
@@ -49,6 +51,8 @@ const HINT_DELAY: Duration = Duration::from_millis(250);
 pub enum MainTab {
     Terminal,
     Files,
+    /// 进程、端口、负载。
+    System,
 }
 
 pub struct Session {
@@ -134,6 +138,7 @@ pub struct Workspace {
     settings_dialog: Option<Entity<SettingsDialog>>,
     prompts: Entity<prompts::PromptHost>,
     pub(crate) file_manager: Entity<FileManager>,
+    system_panel: Entity<SystemPanel>,
     pub(crate) focus: FocusHandle,
     /// 当前会话的往返延迟（连接 id，None = 超时）；切会话时清掉，量到再显示。
     pub(crate) latency: Option<(String, Option<std::time::Duration>)>,
@@ -145,6 +150,7 @@ impl Workspace {
     pub fn new(prompts: Entity<prompts::PromptHost>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索连接..."));
         let file_manager = cx.new(|cx| FileManager::new(window, cx));
+        let system_panel = cx.new(|cx| SystemPanel::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&file_manager, window, |this, _, event: &FileManagerEvent, window, cx| match event {
                 FileManagerEvent::Reconnect(connection_id) => this.connect_to_saved(connection_id, window, cx),
@@ -199,6 +205,7 @@ impl Workspace {
             settings_dialog: None,
             prompts,
             file_manager,
+            system_panel,
             focus: cx.focus_handle(),
             latency: None,
             _latency_task: cx.spawn(async move |this, cx| {
@@ -406,6 +413,7 @@ impl Workspace {
                             files.set_session(None, window, cx);
                             files.show_remote_empty("连接已断开，请重新连接到服务器", Some(connection_id), window, cx);
                         });
+                        self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
                     }
                     cx.notify();
                 }
@@ -466,6 +474,8 @@ impl Workspace {
         });
         let disconnected = self.session(connection_id).is_some_and(|s| s.view.read(cx).is_disconnected());
         let id = connection_id.to_string();
+        let system_session = file_session.as_ref().map(|s| s.session_id.clone());
+        self.system_panel.update(cx, |panel, cx| panel.set_session(system_session, cx));
         self.file_manager.update(cx, |files, cx| {
             files.set_session(file_session, window, cx);
             if disconnected {
@@ -581,10 +591,12 @@ impl Workspace {
         });
         if was_active {
             self.active = None;
-            if self.main_tab == MainTab::Files {
+            if self.main_tab != MainTab::Terminal {
                 self.main_tab = MainTab::Terminal;
                 self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
+                self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
             }
+            self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
             self.fill_menu = None;
             window.focus(&self.focus, cx);
         }
@@ -712,6 +724,11 @@ impl Workspace {
             window.focus(&focus, cx);
             return;
         }
+        if self.main_tab == MainTab::System && self.active.is_some() {
+            let focus = self.system_panel.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            return;
+        }
         if self.main_tab == MainTab::Terminal
             && let Some(session) = self.active_session() {
                 let focus = session.view.read(cx).focus_handle(cx);
@@ -810,6 +827,11 @@ impl Workspace {
         self.main_tab = tab;
         self.fill_menu = None;
         self.file_manager.update(cx, |files, cx| files.set_active(tab == MainTab::Files, window, cx));
+        // 系统页的命令以文件管理当前身份跑：先跟上终端此刻的用户（sudo -i 之后是 root）
+        if tab == MainTab::System {
+            self.file_manager.update(cx, |files, cx| files.sync_identity_quietly(window, cx));
+        }
+        self.system_panel.update(cx, |panel, cx| panel.set_active(tab == MainTab::System, window, cx));
         self.refocus(window, cx);
         cx.notify();
     }
@@ -960,6 +982,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::minimize))
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.set_main_tab(MainTab::Terminal, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.set_main_tab(MainTab::Files, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.set_main_tab(MainTab::System, window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
@@ -1002,6 +1025,7 @@ impl Render for Workspace {
                                             .child(div().absolute().size_full().child(view))
                                             .when_some(self.transfer_shown.clone(), |area, (progress, info)| area.child(transfer_toast(progress, info))),
                                         (Some(_), MainTab::Files) => area.child(div().absolute().size_full().child(self.file_manager.clone())),
+                                        (Some(_), MainTab::System) => area.child(div().absolute().size_full().child(self.system_panel.clone())),
                                         (None, _) => area.child(
                                             div()
                                                 .absolute()

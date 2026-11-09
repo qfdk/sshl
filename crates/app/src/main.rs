@@ -11,6 +11,7 @@ mod screen;
 mod settings;
 mod settings_dialog;
 mod sidebar;
+mod system_panel;
 mod terminal;
 mod theme;
 mod topbar;

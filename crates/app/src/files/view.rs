@@ -1238,6 +1238,13 @@ impl FileManager {
         .detach();
     }
 
+    /// 「系统」页要以终端此刻的用户跑命令：切过去时同步一下身份（不弹密码框，已拒绝过的不再问）。
+    pub fn sync_identity_quietly(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_some() {
+            self.sync_identity(false, window, cx);
+        }
+    }
+
     /// 正在进行或刚结束的传输（终端界面上也要看得到进度）。
     pub fn transfer_status(&self) -> Option<&TransferStatus> {
         self.status.active.then_some(&self.status)

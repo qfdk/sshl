@@ -85,15 +85,22 @@ impl Workspace {
             .relative()
             .child(kit::segmented(
                 "main-tabs",
-                &[(MainTab::Terminal, None, "终端".into()), (MainTab::Files, None, "文件管理".into())],
+                &[(MainTab::Terminal, None, "终端".into()), (MainTab::Files, None, "文件管理".into()), (MainTab::System, None, "系统".into())],
                 self.main_tab,
                 move |tab, window, cx| {
                     let _ = this.update(cx, |this, cx| this.set_main_tab(tab, window, cx));
                 },
             ))
-            // 数字角标浮在两个选项的右上角（与旧版一样不挤动布局）
-            .child(div().absolute().top_0().left_0().right(px(80.)).h_full().child(hint(1, hints)))
-            .child(div().absolute().top_0().right_0().w(px(80.)).h_full().child(hint(2, hints)))
+            // 数字角标浮在每个选项的右上角（与旧版一样不挤动布局）；选项等宽，叠一层同样三等分的格子放角标
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .p(px(3.))
+                    .flex()
+                    .gap(px(2.))
+                    .children((1..=3).map(|n| div().relative().flex_1().h_full().child(hint(n, hints)))),
+            )
             .into_any_element()
     }
 

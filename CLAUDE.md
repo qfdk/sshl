@@ -92,6 +92,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **从 `~/.ssh/config` 导入**（新建连接对话框左下角，`import_dialog.rs` + `crates/core/src/ssh_config.rs`）：列出不带通配的 Host，
   逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
   同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
+- **「系统」页**（⌘3，`system_panel.rs` + `crates/core/src/server_info.rs`）：负载 / 内存 / 磁盘 / 运行时间，进程（`ps -eo`）和监听端口
+  （有 ss 用 ss、否则 Linux netstat -p、再否则 lsof），可结束进程（TERM / KILL，先确认）。命令走 `run_as_file_user`，切过来时先同步
+  文件管理身份，终端 sudo -i 之后就以 root 看全部端口、结束 root 的进程。只在这页显示时每 3 秒刷新。
 - **远程目录收藏**：按连接存在 `sshl.db` 的 `bookmarks` 表（删连接时一起删）；远程栏路径框旁的收藏按钮，
   当前目录已收藏时是蓝色，菜单里收藏 / 取消收藏当前目录、点收藏的目录直接过去。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。

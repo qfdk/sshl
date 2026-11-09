@@ -235,7 +235,7 @@ async fn exec_as_file_user(session: &SshSession, cmd: &str) -> AppResult<(u32, S
     Ok((status, terminal_user::clean_auth_noise(&out), terminal_user::clean_auth_noise(&err)))
 }
 
-async fn run_as_file_user(session: &SshSession, cmd: &str) -> AppResult<String> {
+pub(crate) async fn run_as_file_user(session: &SshSession, cmd: &str) -> AppResult<String> {
     let (status, out, err) = exec_as_file_user(session, cmd).await?;
     if status != 0 {
         return Err(AppError::Other(if err.is_empty() { format!("`{cmd}` exited {status}") } else { err }));
@@ -1514,7 +1514,7 @@ fn sudo_failure(stderr: &str) -> &'static str {
 }
 
 /// 跑一条命令：可选写入 stdin（写完即 EOF），收集退出码和 stdout/stderr。
-async fn exec_capture(
+pub(crate) async fn exec_capture(
     mut channel: russh::Channel<russh::client::Msg>,
     cmd: &str,
     stdin: Option<&[u8]>,
