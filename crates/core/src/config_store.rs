@@ -242,17 +242,45 @@ pub fn apply_connection_layout(
 }
 
 pub fn delete_connection(events: &Events, id: String) -> AppResult<()> {
-    // 连同该连接名下所有密文（password / passphrase / acct:*）一并删除
-    db::with_db(|conn| {
-        conn.execute("DELETE FROM connections WHERE id=?1", rusqlite::params![id])?;
-        conn.execute(
-            "DELETE FROM secrets WHERE key LIKE ?1",
-            rusqlite::params![format!("{id}:%")],
-        )?;
-        Ok(())
-    })?;
-
+    db::with_db(|conn| delete_connection_rows(conn, &id))?;
     events.emit(CoreEvent::ConnectionsUpdated);
+    Ok(())
+}
+
+/// 连同该连接名下所有密文（password / passphrase / acct:*）和远程目录收藏一并删除。
+fn delete_connection_rows(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM connections WHERE id=?1", rusqlite::params![id])?;
+    conn.execute("DELETE FROM secrets WHERE key LIKE ?1", rusqlite::params![format!("{id}:%")])?;
+    conn.execute("DELETE FROM bookmarks WHERE connection_id=?1", rusqlite::params![id])?;
+    Ok(())
+}
+
+/// 某连接收藏的远程目录，按收藏先后。
+pub fn bookmarks(connection_id: &str) -> AppResult<Vec<String>> {
+    db::with_db(|conn| bookmarks_in(conn, connection_id))
+}
+
+/// 收藏 / 取消收藏一个远程目录。
+pub fn set_bookmarked(connection_id: &str, path: &str, bookmarked: bool) -> AppResult<()> {
+    db::with_db(|conn| set_bookmarked_in(conn, connection_id, path, bookmarked))
+}
+
+fn bookmarks_in(conn: &rusqlite::Connection, connection_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM bookmarks WHERE connection_id=?1 ORDER BY sort_order, rowid")?;
+    let rows = stmt.query_map(rusqlite::params![connection_id], |r| r.get(0))?;
+    rows.collect()
+}
+
+fn set_bookmarked_in(conn: &rusqlite::Connection, connection_id: &str, path: &str, bookmarked: bool) -> rusqlite::Result<()> {
+    if bookmarked {
+        conn.execute(
+            "INSERT OR IGNORE INTO bookmarks(connection_id, path, sort_order)
+             SELECT ?1, ?2, COALESCE(MAX(sort_order) + 1, 0) FROM bookmarks WHERE connection_id=?1",
+            rusqlite::params![connection_id, path],
+        )?;
+    } else {
+        conn.execute("DELETE FROM bookmarks WHERE connection_id=?1 AND path=?2", rusqlite::params![connection_id, path])?;
+    }
     Ok(())
 }
 
@@ -288,4 +316,45 @@ pub fn cred_set(connection_id: String, account: String, password: String) -> App
 pub fn cred_delete(connection_id: String, account: String) -> AppResult<()> {
     crypto_store::delete(&connection_id, &format!("acct:{}", account.trim()));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(db::SCHEMA).unwrap();
+        conn
+    }
+
+    #[test]
+    fn bookmarks_are_per_connection_in_the_order_added() {
+        let conn = memory_db();
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        set_bookmarked_in(&conn, "a", "/etc/nginx", true).unwrap();
+        set_bookmarked_in(&conn, "b", "/srv", true).unwrap();
+        // 重复收藏不产生第二条，也不改顺序
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap(), ["/var/log", "/etc/nginx"]);
+        assert_eq!(bookmarks_in(&conn, "b").unwrap(), ["/srv"]);
+        set_bookmarked_in(&conn, "a", "/var/log", false).unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap(), ["/etc/nginx"]);
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap(), ["/etc/nginx", "/var/log"], "重新收藏排到最后");
+    }
+
+    #[test]
+    fn deleting_a_connection_forgets_its_bookmarks_and_secrets() {
+        let conn = memory_db();
+        conn.execute("INSERT INTO connections(id,name,host,username) VALUES ('a','web','h','root'), ('b','db','h','root')", []).unwrap();
+        conn.execute("INSERT INTO secrets(key,value) VALUES ('a:password','x'), ('b:password','y')", []).unwrap();
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        set_bookmarked_in(&conn, "b", "/srv", true).unwrap();
+        delete_connection_rows(&conn, "a").unwrap();
+        assert!(bookmarks_in(&conn, "a").unwrap().is_empty());
+        assert_eq!(bookmarks_in(&conn, "b").unwrap(), ["/srv"], "别的连接不受影响");
+        let secrets: i64 = conn.query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0)).unwrap();
+        assert_eq!(secrets, 1);
+    }
 }

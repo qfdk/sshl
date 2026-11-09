@@ -26,14 +26,8 @@ fn db_path() -> AppResult<PathBuf> {
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
-fn open() -> AppResult<Connection> {
-    let dir = dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let path = db_path()?;
-    let conn =
-        Connection::open(&path).map_err(|e| AppError::Config(format!("open sshl.db: {e}")))?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS connections (
+/// 建表（已有的表不动；后加的列见 open 里的迁移）。
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connections (
             id             TEXT PRIMARY KEY,
             name           TEXT NOT NULL,
             host           TEXT NOT NULL,
@@ -52,9 +46,21 @@ fn open() -> AppResult<Connection> {
         CREATE TABLE IF NOT EXISTS secrets (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );",
-    )
-    .map_err(|e| AppError::Config(format!("init schema: {e}")))?;
+        );
+        CREATE TABLE IF NOT EXISTS bookmarks (
+            connection_id TEXT NOT NULL,
+            path          TEXT NOT NULL,
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (connection_id, path)
+        );";
+
+fn open() -> AppResult<Connection> {
+    let dir = dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let path = db_path()?;
+    let conn =
+        Connection::open(&path).map_err(|e| AppError::Config(format!("open sshl.db: {e}")))?;
+    conn.execute_batch(SCHEMA).map_err(|e| AppError::Config(format!("init schema: {e}")))?;
 
     let mut columns = conn
         .prepare("PRAGMA table_info(connections)")

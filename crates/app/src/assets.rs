@@ -31,6 +31,7 @@ macro_rules! icons {
 icons! {
     ArrowDownUp => "arrow-down-up",
     ArrowUp => "arrow-up",
+    Bookmark => "bookmark",
     Check => "check",
     ChevronDown => "chevron-down",
     ChevronLeft => "chevron-left",

@@ -251,6 +251,9 @@ pub struct FileManager {
     status: TransferStatus,
     hide_status: Option<Task<()>>,
     menu: Option<MenuState>,
+    /// 当前连接收藏的远程目录（按收藏先后）。
+    bookmarks: Vec<String>,
+    bookmark_menu: bool,
     permission: Option<PermissionDialog>,
     new_folder: Option<NewFolderDialog>,
     dragging: Option<DragState>,
@@ -315,6 +318,8 @@ impl FileManager {
             status: TransferStatus::default(),
             hide_status: None,
             menu: None,
+            bookmarks: Vec::new(),
+            bookmark_menu: false,
             permission: None,
             new_folder: None,
             dragging: None,
@@ -362,6 +367,8 @@ impl FileManager {
             return;
         }
         self.session = session.clone();
+        self.bookmark_menu = false;
+        self.reload_bookmarks();
         self.remote.request += 1;
         self.remote.files.clear();
         self.remote.error = None;
@@ -855,7 +862,11 @@ impl FileManager {
     }
 
     fn clear_selection(&mut self, _: &ClearFileSelection, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.take().is_some() || self.new_folder.take().is_some() || self.permission.take().is_some() {
+        if self.menu.take().is_some()
+            || std::mem::take(&mut self.bookmark_menu)
+            || self.new_folder.take().is_some()
+            || self.permission.take().is_some()
+        {
             window.focus(&self.focus, cx);
             cx.notify();
             return;
@@ -1187,6 +1198,97 @@ impl FileManager {
             }
         })
         .detach();
+    }
+
+    // ---------------------------------------------------------------- 远程目录收藏
+
+    fn reload_bookmarks(&mut self) {
+        self.bookmarks = match &self.session {
+            Some(session) => config_store::bookmarks(&session.connection_id).unwrap_or_else(|error| {
+                tracing::warn!("load bookmarks: {error}");
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+    }
+
+    fn toggle_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.bookmark_menu = false;
+        let path = self.remote.path.clone();
+        let Some(session) = self.session.clone().filter(|_| !path.is_empty()) else { return };
+        let bookmarked = !self.bookmarks.contains(&path);
+        match config_store::set_bookmarked(&session.connection_id, &path, bookmarked) {
+            Ok(()) => self.reload_bookmarks(),
+            Err(error) => prompts::alert_later(window, cx, Options::new("收藏失败").message(error.to_string())),
+        }
+        cx.notify();
+    }
+
+    fn open_bookmark(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.bookmark_menu = false;
+        self.load(PaneKind::Remote, Some(path), false, window, cx);
+    }
+
+    /// 路径框旁的收藏按钮：当前目录已收藏时是蓝色；点开是「收藏 / 取消收藏当前目录」和收藏的目录。
+    fn bookmark_button(&self, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        let marked = !self.remote.path.is_empty() && self.bookmarks.contains(&self.remote.path);
+        let button = kit::button("pane-bookmark", Variant::Ghost)
+            .w(px(32.))
+            .h(px(32.))
+            .px_0()
+            .aria_label("收藏的目录")
+            .tooltip(|window, cx| kit::tooltip("收藏的目录".into(), window, cx))
+            .child(kit::icon(Icon::Bookmark).when(marked, |g| g.text_color(theme::color(ui::PRIMARY))))
+            .when(disabled, |b| b.opacity(0.5).cursor_default())
+            .when(!disabled, |b| {
+                b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.bookmark_menu = !this.bookmark_menu;
+                    cx.notify();
+                }))
+            });
+        let menu = (self.bookmark_menu && !disabled).then(|| {
+            let weak = cx.entity().downgrade();
+            let mut entries = Vec::new();
+            if !self.remote.path.is_empty() {
+                let toggle = weak.clone();
+                let label = if marked { "取消收藏当前目录" } else { "收藏当前目录" };
+                entries.push(MenuEntry::Item(
+                    MenuItem::new(label, move |window, cx| {
+                        let _ = toggle.update(cx, |this, cx| this.toggle_bookmark(window, cx));
+                    })
+                    .icon(Icon::Bookmark),
+                ));
+            }
+            if !self.bookmarks.is_empty() {
+                entries.push(MenuEntry::Separator);
+            }
+            for path in &self.bookmarks {
+                let open = weak.clone();
+                let target = path.clone();
+                entries.push(MenuEntry::Item(
+                    MenuItem::new(path.clone(), move |window, cx| {
+                        let _ = open.update(cx, |this, cx| this.open_bookmark(target.clone(), window, cx));
+                    })
+                    .icon(Icon::Folder),
+                ));
+            }
+            let dismiss = move |_: &mut Window, cx: &mut App| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.bookmark_menu = false;
+                    cx.notify();
+                });
+            };
+            let outside = dismiss.clone();
+            div().absolute().right_0().top(px(36.)).child(
+                deferred(
+                    anchored().anchor(gpui::Anchor::TopRight).child(
+                        div().occlude().on_mouse_down_out(move |_, window, cx| outside(window, cx)).child(kit::menu_panel(entries, dismiss)),
+                    ),
+                )
+                .with_priority(2),
+            )
+        });
+        div().relative().child(button).when_some(menu, |d, menu| d.child(menu)).into_any_element()
     }
 
     // ---------------------------------------------------------------- 跟随终端用户
@@ -1722,6 +1824,7 @@ impl FileManager {
             } else {
                 self.pane_button(("pane-browse", 0), Icon::FolderOpen, "选择目录", false, |this, w, cx| this.browse_local(w, cx), cx).into_any_element()
             })
+            .when(remote, |d| d.child(self.bookmark_button(disabled, cx)))
             .child(self.pane_button(("pane-home", kind as usize), Icon::House, "主目录", disabled, move |this, w, cx| this.go_home(kind, w, cx), cx))
             .child(self.pane_button(("pane-refresh", kind as usize), Icon::RefreshCw, "刷新", disabled, move |this, w, cx| this.refresh(kind, w, cx), cx));
 
