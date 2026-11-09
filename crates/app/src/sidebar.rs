@@ -57,7 +57,8 @@ impl Workspace {
             .flex_shrink_0()
             .overflow_hidden()
             // 透明标题栏：红绿灯单独占这一行，只作窗口拖动区。收起时 76px 宽刚好容下红绿灯。
-            .child(drag_region("sidebar-titlebar").h(px(50.)).flex_shrink_0())
+            // 全屏时红绿灯藏起来（鼠标移到屏幕顶端才浮出），不再给它留一行，侧栏标题和顶栏标签对齐
+            .child(drag_region("sidebar-titlebar").h(px(if window.is_fullscreen() { 6. } else { 50. })).flex_shrink_0())
             .map(|s| {
                 if collapsed {
                     s.child(div().flex().justify_center().pb_1().child(toggle))
