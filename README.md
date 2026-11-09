@@ -2,13 +2,13 @@
 
 > Connect. Type. Transfer.
 
-轻量级桌面 SSH 客户端：终端 + SFTP 文件管理放在同一个窗口。Tauri 打包，Rust 后端（russh + russh-sftp），React + xterm.js 前端。
+轻量级原生 macOS SSH 客户端：终端 + SFTP 文件管理放在同一个窗口。纯 Rust：界面用 GPUI（GPU 渲染），终端模拟用 libghostty-vt（Ghostty 内核），后端 russh + russh-sftp。不用 WebView，冷启动约 0.3 秒。
 
 ## 功能
 
 **终端**
-- xterm.js 渲染，内置 JetBrainsMono Nerd Font，图标与 Powerline 字形开箱可用
-- Unicode 11 宽度表，emoji 与中文不错位
+- libghostty-vt 解析、GPU 绘制，内置 JetBrainsMono Nerd Font，图标与 Powerline 字形开箱可用
+- 中文、emoji 宽字符对齐；中文输入法组字直接在光标处
 - 字体、字号可调，可选系统字体或自定义 `fontFamily`
 - 终端出现 sudo / su 密码提示时一键填入已保存的密码，同一台机器可存多个账号
 
@@ -40,18 +40,17 @@ codesign --force --deep -s - /Applications/SSHL.app
 
 ### 手动构建
 
-需求：[Bun](https://bun.sh)、Rust 工具链
+需求：Rust（版本由 `rust-toolchain.toml` 固定，rustup 自动安装）、[Zig](https://ziglang.org) 0.17（`brew install zig`，编译 libghostty-vt 用）
 
 ```bash
 git clone https://github.com/qfdk/sshl
 cd sshl
-bun install
-bun run dev      # 开发模式
-bun run build    # 构建 SSHL.app
-bun test         # 测试
+cargo run -p sshl             # 开发版
+cargo test --workspace        # 测试
+scripts/bundle.sh             # 构建 SSHL.app
 ```
 
-产物在 `src-tauri/target/release/bundle/macos/SSHL.app`。
+产物在 `target/release/bundle/SSHL.app`。`scripts/deploy.sh` 把它装到 /Applications（本机有 Developer ID 证书时重签）。
 
 ## 数据存储
 

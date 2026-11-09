@@ -1,0 +1,354 @@
+//! 终端线程交给界面的帧：纯数据（Send），界面线程只读它来画。
+//! 行用 Arc 共享：没变的行在帧与帧之间是同一个 Arc，界面据此复用排好的字形。
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    pub const fn hex(v: u32) -> Self {
+        Self { r: (v >> 16) as u8, g: (v >> 8) as u8, b: v as u8 }
+    }
+
+    pub const fn to_u32(self) -> u32 {
+        (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
+    }
+}
+
+pub mod flags {
+    pub const BOLD: u16 = 1 << 0;
+    pub const ITALIC: u16 = 1 << 1;
+    pub const FAINT: u16 = 1 << 2;
+    pub const UNDERLINE: u16 = 1 << 3;
+    pub const UNDERLINE_DOUBLE: u16 = 1 << 4;
+    pub const UNDERLINE_CURLY: u16 = 1 << 5;
+    pub const STRIKE: u16 = 1 << 6;
+    pub const INVISIBLE: u16 = 1 << 7;
+    /// 宽字符（占两格）的第一格。
+    pub const WIDE: u16 = 1 << 8;
+    /// 宽字符的第二格 / 软换行行尾的占位：不画字。
+    pub const SPACER: u16 = 1 << 9;
+    pub const SELECTED: u16 = 1 << 10;
+    pub const OVERLINE: u16 = 1 << 11;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cell {
+    /// 格子的第一个码点；空格子是 ' '。
+    pub ch: char,
+    /// 组合字符、emoji 修饰等第一个码点之后的部分（少见）。
+    pub extra: Option<Box<str>>,
+    /// 已解析好的前景色（反显、选中、粗体变亮都已算进去）。
+    pub fg: Rgb,
+    /// 画出来的底色；None = 终端默认底色（不单独画）。
+    pub bg: Option<Rgb>,
+    /// 不算选中时的底色：内边距取色只看程序画的，不跟着鼠标选区变。
+    pub base_bg: Option<Rgb>,
+    pub flags: u16,
+}
+
+impl Cell {
+    pub const BLANK: Cell = Cell { ch: ' ', extra: None, fg: Rgb::hex(0), bg: None, base_bg: None, flags: 0 };
+
+    pub fn has(&self, flag: u16) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Row {
+    pub cells: Vec<Cell>,
+}
+
+impl Row {
+    /// 这一行的文字（宽字符的占位格跳过），用于密码提示检测和复制。
+    pub fn text(&self) -> String {
+        let mut out = String::with_capacity(self.cells.len());
+        for cell in &self.cells {
+            if cell.has(flags::SPACER) {
+                continue;
+            }
+            out.push(cell.ch);
+            if let Some(extra) = &cell.extra {
+                out.push_str(extra);
+            }
+        }
+        out
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Bar,
+    Block,
+    Underline,
+    BlockHollow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub x: u16,
+    pub y: u16,
+    pub shape: CursorShape,
+    pub blinking: bool,
+    pub color: Rgb,
+    /// 光标所在格的字是什么颜色（方块光标里反显用）。
+    pub text_color: Rgb,
+}
+
+/// 内边距延伸：边缘一整行都有底色时，把它延伸进卡片的内边距（同 Ghostty 的 window-padding-color = extend）。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct EdgeExtension {
+    /// 首行每格的底色（整行都有底色时）。
+    pub top: Option<Vec<Rgb>>,
+    /// 末行每格的底色（整行都有底色时）。
+    pub bottom: Option<Vec<Rgb>>,
+    /// 每行最左一格的底色（该行整行都有底色时）。
+    pub left: Vec<Option<Rgb>>,
+    /// 每行最右一格的底色（该行整行都有底色时）。
+    pub right: Vec<Option<Rgb>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Frame {
+    pub cols: u16,
+    pub rows: Vec<Arc<Row>>,
+    pub cursor: Option<Cursor>,
+    /// 终端默认底色（OSC 11 改过就是改后的）。
+    pub background: Rgb,
+    /// 卡片和内边距的底色：边缘格子的主色（全屏 TUI 的根背景），定不下来时是 background。
+    pub padding: Rgb,
+    pub extension: EdgeExtension,
+    /// 光标行像密码提示（sudo / su 等），界面据此显示「填充密码」。
+    pub password_prompt: bool,
+    /// 程序开了鼠标上报（vim、htop 等）：滚轮、点击交给程序。
+    pub mouse_tracking: bool,
+    /// 在备用屏（全屏程序）上：没有回滚历史。
+    pub alternate_screen: bool,
+}
+
+fn majority(colors: &[Option<Rgb>], strict: bool) -> Option<Rgb> {
+    let mut counts: HashMap<Rgb, usize> = HashMap::new();
+    for color in colors.iter().flatten() {
+        *counts.entry(*color).or_default() += 1;
+    }
+    let (best, max) = counts.into_iter().max_by_key(|(_, count)| *count)?;
+    let enough = if strict { max * 2 > colors.len() } else { max * 2 >= colors.len() };
+    enough.then_some(best)
+}
+
+/// 终端内边距取什么底色：看贴着内边距的边缘格子。
+/// 先看左右两列：光标行、标签栏、状态栏这类横贯整行的条带在两列里各只占一格，两列最能代表 TUI 的根背景。
+/// 只看四条边时，宽屏上首末两行（各 cols 格）压过两侧：vim 光标停在首行时首行是 cursorline 色、末行是状态栏，
+/// 根背景只剩约 24%，内边距回落默认色，四周露出一圈黑框。
+/// 两列凑不出严格过半（左右分属不同面板）再按四条边取众数（≥50%）。
+/// 四条边也定不下来（左边文件树、右边编辑区、首行标签栏、末行状态栏各一种色）时，取屏幕中央的主色：
+/// 中央是正文区，内边距跟正文同色；回落默认色反而四周一圈黑框。
+pub fn pick_edge_bg(cols: usize, rows: usize, color_at: impl Fn(usize, usize) -> Option<Rgb>) -> Option<Rgb> {
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    let mut sides = Vec::with_capacity(rows * 2);
+    for y in 0..rows {
+        sides.push(color_at(0, y));
+        sides.push(color_at(cols - 1, y));
+    }
+    if let Some(side) = majority(&sides, true) {
+        return Some(side);
+    }
+    let mut edges = sides;
+    for x in 0..cols {
+        edges.push(color_at(x, 0));
+        edges.push(color_at(x, rows - 1));
+    }
+    if let Some(edge) = majority(&edges, false) {
+        return Some(edge);
+    }
+    // 中央一半区域隔格取样，够定主色，也免得每帧读上千个格子
+    let mut center = Vec::new();
+    let mut y = rows / 4;
+    while y < (rows * 3).div_ceil(4) {
+        let mut x = cols / 4;
+        while x < (cols * 3).div_ceil(4) {
+            center.push(color_at(x, y));
+            x += 2;
+        }
+        y += 2;
+    }
+    majority(&center, false)
+}
+
+/// 只延伸「整行都有底色」的行：shell 提示符、ls 着色只占半行，抹进内边距反而难看。
+/// `color_at` 对默认底色返回 None。
+pub fn edge_extension(cols: usize, rows: usize, color_at: impl Fn(usize, usize) -> Option<Rgb>) -> EdgeExtension {
+    let mut ext = EdgeExtension { left: Vec::with_capacity(rows), right: Vec::with_capacity(rows), ..Default::default() };
+    for y in 0..rows {
+        let edge_row = y == 0 || y + 1 == rows;
+        let mut colors: Vec<Rgb> = Vec::new();
+        let mut first = None;
+        let mut last = None;
+        let mut full = cols > 0;
+        for x in 0..cols {
+            let Some(color) = color_at(x, y) else {
+                full = false;
+                break;
+            };
+            if edge_row {
+                colors.push(color);
+            }
+            if x == 0 {
+                first = Some(color);
+            }
+            if x + 1 == cols {
+                last = Some(color);
+            }
+        }
+        ext.left.push(if full { first } else { None });
+        ext.right.push(if full { last } else { None });
+        if full && y == 0 {
+            ext.top = Some(colors.clone());
+        }
+        if full && y + 1 == rows {
+            ext.bottom = Some(colors);
+        }
+    }
+    ext
+}
+
+const PASSWORD_WORDS: &[&str] = &["password", "mot de passe", "passwort", "contraseña", "пароль"];
+
+/// 光标所在行像不像密码提示：含「password」等词，并以冒号结尾（sudo、su、ssh 的 keyboard-interactive）。
+pub fn is_password_prompt(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if !(trimmed.ends_with(':') || trimmed.ends_with('：')) {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    PASSWORD_WORDS.iter().any(|word| lower.contains(word))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn c(v: u32) -> Option<Rgb> {
+        Some(Rgb::hex(v))
+    }
+
+    #[test]
+    fn nvim_status_bar_and_painted_rows_reach_the_card_edge() {
+        // 6×4：首行编辑区，第 2 行 cursorline，末行状态栏（NORMAL 蓝 | 中间深 | 时钟蓝）
+        let rows = [
+            [c(0x222436); 6],
+            [c(0x2f334d); 6],
+            [c(0x222436); 6],
+            [c(0x82aaff), c(0x82aaff), c(0x1e2030), c(0x1e2030), c(0x82aaff), c(0x82aaff)],
+        ];
+        let ext = edge_extension(6, 4, |x, y| rows[y][x]);
+        assert_eq!(ext.top, Some(rows[0].iter().map(|v| v.unwrap()).collect()));
+        assert_eq!(ext.bottom, Some(rows[3].iter().map(|v| v.unwrap()).collect()));
+        assert_eq!(ext.left, vec![c(0x222436), c(0x2f334d), c(0x222436), c(0x82aaff)]);
+        assert_eq!(ext.right, vec![c(0x222436), c(0x2f334d), c(0x222436), c(0x82aaff)]);
+    }
+
+    #[test]
+    fn partly_colored_shell_rows_are_not_extended() {
+        // 提示符 / ls 着色只占半行：不往内边距里抹
+        let rows = [
+            [None, None, None, None],
+            [c(0x00ff74), c(0x00ff74), None, None],
+            [None, None, c(0xee5396), c(0xee5396)],
+            [c(0x78a9ff), c(0x78a9ff), None, None],
+        ];
+        let ext = edge_extension(4, 4, |x, y| rows[y][x]);
+        assert_eq!(ext.top, None);
+        assert_eq!(ext.bottom, None);
+        assert_eq!(ext.left, vec![None; 4]);
+        assert_eq!(ext.right, vec![None; 4]);
+    }
+
+    #[test]
+    fn vim_with_cursor_on_first_line_keeps_its_own_background() {
+        // 150×48：首行是 cursorline，末行是状态栏，其余是 vim 的根背景
+        let color = pick_edge_bg(150, 48, |x, y| {
+            if y == 0 {
+                c(0x2f334d)
+            } else if y == 47 {
+                if x < 10 { c(0x82aaff) } else { c(0x1e2030) }
+            } else {
+                c(0x222436)
+            }
+        });
+        assert_eq!(color, c(0x222436));
+    }
+
+    #[test]
+    fn plain_shell_stays_on_default_background() {
+        assert_eq!(pick_edge_bg(120, 40, |_, _| c(0x1d1d1d)), c(0x1d1d1d));
+    }
+
+    #[test]
+    fn centered_dialog_does_not_move_the_padding() {
+        let color = pick_edge_bg(100, 30, |x, y| {
+            if x > 20 && x < 80 && y > 8 && y < 22 { c(0xc0c0c0) } else { c(0x5f5fd7) }
+        });
+        assert_eq!(color, c(0x5f5fd7));
+    }
+
+    #[test]
+    fn four_edges_decide_when_side_columns_disagree() {
+        // 左侧文件树一种底色、右侧编辑区另一种：两侧打平，四边里编辑区占多数
+        assert_eq!(pick_edge_bg(100, 30, |x, _| if x < 30 { c(0x111111) } else { c(0x222222) }), c(0x222222));
+    }
+
+    #[test]
+    fn editor_in_the_middle_decides_when_edges_disagree() {
+        // 文件树 + 标签栏 + 状态栏：两列打平，四边谁也不过半，中央的编辑区定
+        let color = pick_edge_bg(120, 40, |x, y| {
+            if y == 0 {
+                c(0x3b4261)
+            } else if y == 39 {
+                c(0x82aaff)
+            } else if x < 30 {
+                c(0x1a1b26)
+            } else {
+                c(0x222436)
+            }
+        });
+        assert_eq!(color, c(0x222436));
+    }
+
+    #[test]
+    fn no_majority_anywhere_gives_no_opinion() {
+        let palette = [c(0x111111), c(0x222222), c(0x333333)];
+        assert_eq!(pick_edge_bg(40, 40, |x, y| palette[(x + y) % 3]), None);
+        assert_eq!(pick_edge_bg(0, 0, |_, _| c(0)), None);
+    }
+
+    #[test]
+    fn password_prompts_are_recognized() {
+        assert!(is_password_prompt("[sudo] password for alice: "));
+        assert!(is_password_prompt("Password:"));
+        assert!(is_password_prompt("alice@host's password: "));
+        assert!(is_password_prompt("Mot de passe :"));
+        assert!(is_password_prompt("密码 Password："));
+        assert!(!is_password_prompt("alice@host:~$ "));
+        assert!(!is_password_prompt("echo password"));
+        assert!(!is_password_prompt("password changed successfully."));
+    }
+
+    #[test]
+    fn row_text_skips_wide_char_spacers() {
+        let mut wide = Cell { ch: '中', ..Cell::BLANK };
+        wide.flags = flags::WIDE;
+        let spacer = Cell { flags: flags::SPACER, ..Cell::BLANK };
+        let row = Row { cells: vec![wide, spacer, Cell { ch: 'a', ..Cell::BLANK }] };
+        assert_eq!(row.text(), "中a");
+    }
+}

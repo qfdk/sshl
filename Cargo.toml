@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/core", "crates/app"]
+resolver = "3"
+
+[workspace.package]
+version = "0.6.1"
+authors = ["qfdk"]
+license = "GPL-3.0-only"
+
+# russh 0.45.0 + 手动接收窗口补丁（终端输出流控，见 vendor/README.md）
+[patch.crates-io]
+russh = { path = "vendor/russh" }
+
+# thin LTO：GPUI 依赖图很大，全量 LTO 一次 release 构建要好几分钟，thin 拿到大部分跨 crate 内联。
+# 不设 panic = "abort"：后台任务（shell pump 等）panic 时只结束该任务，不能拖垮整个应用。
+[profile.release]
+lto = "thin"
+strip = true

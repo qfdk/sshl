@@ -1,0 +1,47 @@
+[package]
+name = "sshl-core"
+description = "SSHL 的 SSH / SFTP / 存储后端，不依赖界面"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# SSH
+russh = "0.45"
+russh-keys = "0.45"
+russh-sftp = "2"
+
+# Filesystem & paths
+dirs = "5"
+
+# Credential storage (AES-GCM; ciphertext stored in SQLite, master.key separate)
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+# Local store: single SQLite db (connections + encrypted secrets). bundled = 自带 SQLite C 源，无需系统库
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+bytes = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+# tokio::time::pause：SFTP 卡死检测的单元测试用虚拟时钟
+tokio = { version = "1", features = ["test-util"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = "20"
+core-foundation = "0.9"

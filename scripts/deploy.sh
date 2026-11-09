@@ -5,20 +5,20 @@
 # 在铺满边角的深色 squircle 上会泛出一圈高亮/光环，且缓存顽固。把 icon.png 设为 Finder
 # 自定义图标可绕开该渲染路径，直接用原图，效果与手动「显示简介→粘贴图标」一致。
 #
-# 用法: pnpm deploy:app   (需先 pnpm build 产出 bundle)
+# 用法: scripts/bundle.sh && scripts/deploy.sh   （先产出 target/release/bundle/SSHL.app）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/src-tauri/target/release/bundle/macos/SSHL.app"
+SRC="$ROOT/target/release/bundle/SSHL.app"
 DST="/Applications/SSHL.app"
 ICON="$ROOT/icon.png"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
 
-[ -d "$SRC" ] || { echo "✗ 未找到构建产物: $SRC（先跑 pnpm build）"; exit 1; }
+[ -d "$SRC" ] || { echo "✗ 未找到构建产物: ${SRC}（先跑 scripts/bundle.sh）"; exit 1; }
 [ -f "$ICON" ] || { echo "✗ 未找到图标: $ICON"; exit 1; }
 command -v fileicon >/dev/null || { echo "✗ 缺少 fileicon（brew install fileicon）"; exit 1; }
 
-# 退出正在运行的实例，避免占用
+# 退出正在运行的实例，避免占用（关窗只是隐藏、进程常驻，必须显式退出）
 osascript -e 'quit app "SSHL"' 2>/dev/null || true
 pkill -f "$DST" 2>/dev/null || true
 

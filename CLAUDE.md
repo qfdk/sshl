@@ -4,93 +4,87 @@ Guidance for Claude Code when working in this repo.
 
 ## Project Overview
 
-Tauri-based desktop SSH client with a React + TypeScript frontend, xterm.js terminal
-emulation, and SFTP file transfer. The backend is Rust (russh + russh-sftp).
+原生 macOS SSH 客户端：终端 + SFTP 文件管理。界面是 GPUI（Zed 的 GPU 界面框架），终端模拟是
+libghostty-vt（Ghostty 内核），后端是 Rust（russh + russh-sftp）。不用 WebView / Tauri / JS。
 
 ## Layout
 
 ```
-ui/                   Vite React application; shadcn components and Tailwind styles
-ui/src/features/      connections, terminal, and file-manager features
-ui/src/lib/           IPC bridge, app state, connection ordering, session state
-ui/src/assets/fonts/  bundled JetBrainsMono Nerd Font files
-src-tauri/            Tauri commands and SSH/SFTP backend
+Cargo.toml            workspace（版本号在 [workspace.package]）
+rust-toolchain.toml   Rust 1.98.1（只在本仓库固定）
+crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框架
+crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
+  src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
+  src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）
+assets/               内置字体、Lucide 图标（线宽 2.5）、应用图标、Info.plist 模板
+vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
+scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）
+tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
 ```
 
 ## Build & Run
 
 ```bash
-pnpm install
-pnpm vite              # Vite dev server
-pnpm vite build        # renderer build
-pnpm dev               # Tauri dev
-pnpm build             # Tauri application build
+brew install zig                   # Zig 0.17：libghostty-vt 构建用
+cargo run -p sshl                  # 开发版（debug；libghostty-vt 也是 Zig Debug，刷屏很慢，测性能用 release）
+cargo test -p sshl-core            # 后端单元测试（集成测试 #[ignore]，要 SSHL_SFTP_IT / SSHL_SUDO_IT 指向测试容器）
+cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键位、设置迁移、文件管理逻辑）
+cargo clippy --workspace
+scripts/bundle.sh                  # release 构建 + 组装 target/release/bundle/SSHL.app（ad-hoc 签名）
+scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 + 自定义图标），先跑 bundle.sh
 ```
 
 ## Key invariants
 
-- **IPC contract** lives in `ui/src/lib/ipc.ts`. Tauri raw invokes are wrapped to match
-  `{success, ...payload}`; `getHomeDir` and other explicitly raw list calls retain their
-  raw return values. The bridge imports `invoke`/`listen` directly and does not read
-  the Tauri global bridge.
-- **First-paint protocol (atomic activation)** — `ssh_connect` returns a sessionId;
-  shell output stays buffered server-side until the renderer calls `ssh_activate_session`.
-  The backend then emits the buffered snapshot as the first `ssh:data` event, so the
-  snapshot and all subsequent output remain ordered. The renderer must not pull the
-  snapshot with `getSessionBuffer` before activating. The sole call site is the
-  `terminalResult.isNew` replay path in `ui/src/features/connections/useConnections.ts`.
-- **Terminal flow control** — the shell channel is opened in a manual-window mode added by the vendored
-  russh patch (`src-tauri/vendor/`, see its README): the server can send at most 2MB beyond what the
-  renderer has acked. Every `ssh:data` carries `bytes`; it must reach xterm through `flowAck.deliver`
-  (`ui/src/lib/flow-ack.ts`), which acks via `ssh_ack_data` once xterm has parsed it. Dropping that path
-  freezes the terminal after 2MB of output. Other channels (SFTP, exec, probes) keep russh's auto window
-  (`CONNECTION_WINDOW` in `ssh.rs`, 8MB; SFTP download segments / in-flight bytes are derived from it in `sftp.rs`).
-- **SFTP timeouts** — no per-request deadline that a slow link can trip: `sftp_stall.rs` wraps the channel and
-  fails every waiting request only when nothing at all has arrived for `SFTP_STALL` (60s); `sftp_for` then reopens
-  the session with the same identity. Downloads write `.<name>.<rand>.sshl-part` next to the target and rename
-  on success, so a failure never leaves a truncated file or clobbers the existing one.
-- **Warm pool** is backend-owned. The frontend makes no prewarm call.
-- **Window reveal** — the main window is built in `create_main_window` (`src-tauri/src/lib.rs`,
-  `create: false` in tauri.conf.json) at the screen work area, not via `maximized` (tao's async
-  maximize resizes the WKWebView while WebContent is launching and blocks the main thread ~430ms).
-  It starts at alpha 0; `ui/src/main.tsx` must call `api.app.ready()` after the first painted frame,
-  otherwise the window only appears at the 3s fallback. Do not hide the window instead: a hidden
-  WKWebView does not paint or fire rAF, so it would reveal a blank frame. After first paint,
-  closing the main window (red button / ⌘W) only hides it and the process stays resident;
-  `RunEvent::Reopen` (Dock click) shows it again. ⌘Q quits.
-- **SFTP channel reuse** — one cached SFTP session is shared per SSH session.
-- **File manager follows the terminal user** — after `su` / `sudo -i` in the terminal, the file
-  manager runs as that user (`ui/src/features/files/file-user.ts`, `src-tauri/src/terminal_user.rs`).
-  `file_switch_user` replaces the cached SFTP session with an `sftp-server` started via su/sudo;
-  `sftp_for` reopens it with the same identity. Remote shell-based file ops (delete, chmod, chown)
-  must go through `exec_as_file_user` / `file_shell`, not a plain exec or `ssh_execute`. Only the
-  needed user's own saved password is used automatically; never try other saved passwords.
-  On any failure before SFTP starts, EOF + close the channel (russh does not close on drop, and a
-  waiting `sudo` holds the user's timestamp lock).
-- **Drag and drop** — Tauri's drag-drop handler is on (Finder drops need local paths) and swallows
-  WKWebView drag callbacks, so in-page HTML5 drop events never fire. Drags inside the app use
-  pointer events (`file-drag.ts`, session tabs, connection tree). WKWebView often drops pointerup
-  (e.g. the first click after the app is activated), so every pointer drag must handle a move with the
-  left button released (`releasedMove` / `pointerMoveStep` in `ui/src/lib/pointer-release.ts`: drop in
-  place or cancel, never start a drag) and clear stale press state on the next window pointerdown.
-- **Terminal timing** — `ui/src/features/terminal/useTerminal.ts` loads the GPU renderer
-  (WebglAddon, falling back to CanvasAddon on failure or context loss) after `term.open()`,
-  Unicode11 registration, card snapping + grid centering (`centerScreenInPadding`), ANSI background sampling, and PTY resize
-  synchronization. Do not reorder those paths. xterm and its addons are a lazy chunk
-  (`loadXterm`); do not import them statically. A hidden spare terminal is prebuilt at idle and
-  claimed by `initTerminal`; its fitted size is sent as `cols`/`rows` with `ssh_connect` so the
-  PTY opens at the real grid size. Resize is per animation frame; PTY `window_change` is
-  deduped and throttled to ~30/s. Release WebGL contexts explicitly on dispose (xterm.js #6068).
-- **Bundled Nerd Font** — both JetBrainsMono Nerd Font weights are loaded from
-  `ui/src/index.css` and `ui/src/assets/fonts/`; do not replace them with system fallback.
-- **Prompts** — use `alertDialog` / `confirmDialog` / `passwordDialog` from `ui/src/lib/dialogs.ts` (rendered by
-  `layout/DialogHost`). Never `window.alert` / `window.confirm` / plugin-dialog `ask`: the dialog
-  plugin's init script swaps alert/confirm for native NSAlert (English buttons, narrow, breaks Chinese
-  sentences mid-line), and its `confirm` returns a Promise, so `if (!confirm(..))` never blocks.
-- **Dialog mounting** — Dialogs must not use `forceMount`; `TabsContent` in `App.tsx`
-  intentionally keeps `forceMount` so xterm instances survive tab switches.
-- **xterm** is pinned to 5.3.0. Do not upgrade to v6. `xterm-addon-webgl@0.16.0` carries a backported upstream fix in
-  `patches/` (bun `patchedDependencies`): its background-rectangle buffer was one rectangle short, so a full screen
-  where every cell has its own background (terminal image viewers) drew nothing at all. `tests/xterm-webgl-patch.test.mjs`
-  fails if the patch is not applied.
-- **Rust scope** — do not modify `src-tauri/**/*.rs` for frontend migration work.
+- **版本钉死**：`gpui-pre` / `gpui-pre-platform` = 0.3.12、`gpui-base` = 0.9.1 必须配套（每周发版、常有破坏性改动），
+  `libghostty-vt` 钉在 git rev。升级要一起升并重测启动和终端。
+- **不用 gpui-component / gpui-kit 的样式层**：它的 init 枚举全部系统字体，冷启动多 ~170ms（实测 320ms → 488ms）。
+  只用 `gpui-base`（输入框 / 输入法、焦点、弹层等行为），外观在 `ui.rs` 按纸页设计自己画。
+- **冷启动**：从 `open` 到窗口显示中位 ~300ms（旧 Tauri 版 ~600ms）。启动路径上别加同步 IO、字体枚举、网络；
+  系统字体列表只在设置对话框里后台加载。启动时不主动激活应用（Finder / Dock 打开时系统会激活）。
+- **窗口**：透明标题栏，红绿灯在侧栏顶部单独一行；拖动区用 `workspace::drag_region`（按下移动窗口、双击缩放）。
+  关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock 走 `on_reopen` 显示；⌘Q 退出。
+- **终端线程模型**：libghostty-vt 的类型都是 `!Send`，每个会话一个终端线程独占它（`terminal/engine.rs`）。
+  SSH 输出、键鼠、改尺寸都以 `Input` 消息进来；界面只拿 `Frame` 快照来画，行是 `Arc<Row>`，没变的行沿用。
+  每轮先处理控制消息（按键、^C 不排在积压输出后面），输出按 64KB 切片解析，刷屏时最多 16ms 出一帧。
+  键盘 / 鼠标 / 粘贴 / 焦点的编码都交给 libghostty（应用光标键、Kitty 键盘协议、括号粘贴）；
+  普通字符走 GPUI 的输入法通道（`EntityInputHandler`），中文输入法组字画在光标处。
+- **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，
+  core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
+  （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。
+- **终端外观**：卡片按整行整列贴齐（余下不足一行 / 一列留给外面的浅色背景），四边 4px 内边距；内边距取边缘格子的主色
+  并把整行有底色的边缘行延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。
+  粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。
+- **内置字体**：JetBrainsMono Nerd Font Mono 两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
+- **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的
+  text_color、不继承，别直接用。图标在 `assets.rs` 的 `icons!` 表里登记。
+- **圆角**：gpui 的 `overflow_hidden` 只按矩形裁，不裁圆角。卡片里贴边的有底色子元素（对话框底部按钮条、设置左栏）
+  要自己加对应的 `rounded_*`。
+- **提示框**：一律用 `prompts::alert / confirm / password`（应用内模态框，排队显示，回车确认、Esc 取消，关掉后焦点还给
+  弹出前的地方）。不要用系统 NSAlert / `cx.prompt`：原生弹窗按钮是英文、窄、中文长句被拦腰折行，与应用风格不一。
+- **连接流程**（`workspace.rs`）：一个连接只开一个会话；连上才出标签，慢于 300ms 才显示连接遮罩（Esc / 取消可中止）。
+  切换到已开会话是乐观切换，探活在后台，失效且用户仍停在该会话上时自动重连；用户主动断开不算失效。
+  所有断开入口都先确认。新建连接先连接、连上再保存。
+- **IPC 已不存在**：界面直接调 `sshl_core`。后端跑在独立 tokio 运行时（`backend.rs`），界面用 `backend::spawn` 在 GPUI 执行器里
+  await 结果；后端事件（传输进度、连接列表变化）经 `sshl_core::events::Events` 回调转回界面线程。
+- **预热池**归后端所有（`sshl_core::warm::run`），界面不发预热调用。
+- **SFTP 超时**：没有单请求超时；`sftp_stall.rs` 包住通道，整整 `SFTP_STALL`（60s）一个字节都没收到才让所有等待中的请求失败，
+  `sftp_for` 再以同一身份重开。下载写 `.<name>.<rand>.sshl-part`，成功后改名，失败不留半截、不覆盖原文件。
+- **SFTP 通道复用**：每个 SSH 会话缓存一个 SFTP 会话共用。
+- **文件管理跟随终端用户**：终端里 `su` / `sudo -i` 之后，文件管理以那个用户运行（`files/identity.rs`、
+  `crates/core/src/terminal_user.rs`）。`file_switch_user` 用 su/sudo 起的 `sftp-server` 换掉缓存的 SFTP 会话；
+  远程删除 / chmod / chown 必须走 `exec_as_file_user` / `file_shell`，不能用普通 exec。只自动用所需用户自己保存的密码，
+  不去试别的已保存密码。SFTP 起来之前任何失败都要 EOF + 关通道（russh drop 不关通道，挂着的 sudo 会占住时间戳锁）。
+- **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度）。首次启动从旧版 WebView 的
+  localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
+- **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
+  （填充密码由后端解密直接写通道）。
+- **无障碍**：可点击的元素给 `role` + `aria_label`（也是无头测试按名字点击的依据）。连接项鼠标双击才连，
+  键盘 / 辅助功能「按下」（`on_a11y_action(Click)`）直接连。
+- **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
+  且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
+  `type echo hi`），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
+  `cargo build -p sshl --release --features devhook`；`scripts/bundle.sh` 的正式构建不带这个 feature。macOS 的套接字路径上限 104 字节。
+- **Rust 后端规则**：core 不依赖界面；新增界面需求优先在 app 里做，确实要改 core 的行为（SFTP、sudo、known_hosts）
+  要带测试。core 的集成测试用 `tests/fixtures-sudo.Dockerfile` 起的容器。
