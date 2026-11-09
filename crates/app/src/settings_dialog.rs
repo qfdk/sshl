@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use gpui::{
     AnyElement, AppContext, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Subscription, Window, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, ConnectionLayoutInput, StoredConnection};
@@ -524,7 +524,8 @@ impl SettingsDialog {
                                 })),
                         ),
                     )
-                    .when_some(family_list, |d, list| d.child(list)),
+                    // 延后到最上层画：下拉列表按顺序先画，会被后面的预览卡片、保存按钮压住
+                    .when_some(family_list, |d, list| d.child(deferred(list).with_priority(1))),
             )
             .when(self.custom_mode, |d| {
                 d.child(div().flex().flex_col().gap_2().child(kit::field_label("自定义字体")).child(kit::text_field(&self.custom, false).h(px(40.))))
