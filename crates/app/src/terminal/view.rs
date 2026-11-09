@@ -167,7 +167,7 @@ fn host_key_options(question: &HostKeyQuestion) -> Options {
         options
     } else {
         Options::new(format!("第一次连接 {host}"))
-            .message(format!("请核对服务器的密钥指纹，确认无误再连接。之后再连同一台服务器不会再问。\n\n{fingerprint}"))
+            .message(format!("请核对服务器的密钥指纹，确认无误再连接。\n\n{fingerprint}"))
             .confirm("信任并连接")
     }
 }

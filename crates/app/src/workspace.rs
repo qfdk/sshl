@@ -767,14 +767,6 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminal = self.active_session().map(|s| s.view.clone());
         let entity = cx.entity();
-        let status: SharedString = match self.active_session() {
-            Some(session) => {
-                let host = self.connection(&session.connection_id).map(|c| c.host.clone()).unwrap_or_default();
-                let host = groups::distinct_host(&session.name, &host);
-                if host.is_empty() { format!("已连接: {}", session.name).into() } else { format!("已连接: {} · {host}", session.name).into() }
-            }
-            None => "未连接".into(),
-        };
         let overlay = self.pending.as_ref().filter(|p| p.show_overlay).map(|_| self.connecting_overlay(cx));
         let menu = self.connection_menu_overlay(window, cx);
         div()
@@ -810,7 +802,7 @@ impl Render for Workspace {
                             .gap(px(10.))
                             .pt_3()
                             .pr_3()
-                            .pb_1()
+                            .pb_3()
                             .pl_1()
                             .child(self.top_bar(window, cx))
                             .child(
@@ -845,17 +837,6 @@ impl Render for Workspace {
                                     }),
                             ),
                     ),
-            )
-            .child(
-                div()
-                    .h(px(28.))
-                    .px_4()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .text_xs()
-                    .text_color(theme::color(ui::MUTED_FOREGROUND))
-                    .child(status),
             )
             .when_some(overlay, |root, overlay| root.child(overlay))
             .when_some(menu, |root, menu| root.child(menu))

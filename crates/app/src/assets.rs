@@ -49,7 +49,6 @@ icons! {
     Plus => "plus",
     Power => "power",
     RefreshCw => "refresh-cw",
-    RotateCcw => "rotate-ccw",
     Search => "search",
     Server => "server",
     Settings => "settings",

@@ -474,15 +474,6 @@ impl SettingsDialog {
             .gap_4()
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("调整终端字号和字体，预览会实时更新。"))
-                    .child(kit::labeled_button("settings-reset", Variant::Outline, Some(Icon::RotateCcw), "还原默认").h(px(32.)).on_click(cx.listener(|this, _, _, cx| this.reset_font(cx)))),
-            )
-            .child(
-                div()
                     .relative()
                     .flex()
                     .gap_4()
@@ -547,9 +538,14 @@ impl SettingsDialog {
                     .child(preview_line("Nerd Font 图标: \u{e0b0} \u{f07b} \u{f015} \u{f120} \u{e0a0} \u{f09b} \u{f135}", 0xf6f825)),
             )
             .child(
-                div().pt_3().flex().justify_end().border_t_1().border_color(theme::color(ui::BORDER)).child(
-                    kit::labeled_button("settings-save", Variant::Primary, Some(Icon::Check), "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx))),
-                ),
+                div()
+                    .pt_3()
+                    .flex()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(theme::color(ui::BORDER))
+                    .child(kit::labeled_button("settings-reset", Variant::Outline, None, "还原默认").on_click(cx.listener(|this, _, _, cx| this.reset_font(cx))))
+                    .child(kit::labeled_button("settings-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
     }
@@ -569,7 +565,6 @@ impl SettingsDialog {
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("整理机器分组，拖拽连接列表即可调整顺序。"))
             .child(
                 div()
                     .flex()
@@ -594,9 +589,9 @@ impl SettingsDialog {
                     .justify_between()
                     .border_t_1()
                     .border_color(theme::color(ui::BORDER))
-                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if dirty { "有未保存的改动" } else { "改动已保存" }))
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).when(dirty, |d| d.child("有未保存的改动")))
                     .child(
-                        kit::labeled_button("group-save", Variant::Primary, Some(Icon::Check), "保存")
+                        kit::labeled_button("group-save", Variant::Primary, None, "保存")
                             .when(!dirty, |b| b.opacity(0.5).cursor_default())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if this.dirty() {

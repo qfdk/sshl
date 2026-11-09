@@ -60,15 +60,6 @@ impl Workspace {
                     .when(connected && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
                         r.child(self.fill_button(cx))
                     })
-                    .when(connected, |r| {
-                        r.child(
-                            kit::icon_button("disconnect", Variant::Outline, Icon::Power, "断开连接").on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(id) = this.active.clone() {
-                                    this.disconnect(&id, window, cx);
-                                }
-                            })),
-                        )
-                    })
                     .when_some(self.fill_menu_panel(window, cx), |r, panel| r.child(panel)),
             )
             .into_any_element()
@@ -211,7 +202,7 @@ impl Workspace {
 
     fn session_tabs(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.sessions.is_empty() {
-            return div().px_1().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("未连接").into_any_element();
+            return div().into_any_element();
         }
         let tabs: Vec<AnyElement> = self
             .sessions
