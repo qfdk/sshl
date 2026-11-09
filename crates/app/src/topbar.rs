@@ -230,6 +230,7 @@ impl Workspace {
                     _ => None,
                 };
                 let dragging = self.dragging.as_deref() == Some(id.as_str()) && cx.has_active_drag();
+                let disconnected = session.view.read(cx).is_disconnected();
                 let (click_id, close_id, drag_id, move_id, drop_name) = (id.clone(), id.clone(), id.clone(), id.clone(), name.clone());
                 div()
                     .id(SharedString::from(format!("tab-{id}")))
@@ -271,7 +272,7 @@ impl Workspace {
                             .pl_3()
                             .pr(px(6.))
                             .cursor_pointer()
-                            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::color(ui::SUCCESS)))
+                            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::color(if disconnected { ui::MUTED_FOREGROUND } else { ui::SUCCESS })))
                             .child(
                                 div()
                                     .truncate()
@@ -297,9 +298,15 @@ impl Workspace {
                                 this.disconnect(&close_id, window, cx);
                             })),
                     )
-                    // 走 connect_to_saved 而不是直接切：会话已失效时它会接着重连，和侧栏双击一致
+                    // 走 connect_to_saved 而不是直接切：会话已失效时它会接着重连，和侧栏双击一致；
+                    // 已断开的标签只切过去看（终端里提示按 Enter 重连），不自动重连
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.active.as_deref() != Some(click_id.as_str()) {
+                        if this.active.as_deref() == Some(click_id.as_str()) {
+                            return;
+                        }
+                        if this.session(&click_id).is_some_and(|s| s.view.read(cx).is_disconnected()) {
+                            this.activate(&click_id, window, cx);
+                        } else {
                             this.connect_to_saved(&click_id, window, cx);
                         }
                     }))
@@ -377,7 +384,7 @@ pub(crate) fn latency_text(rtt: Option<std::time::Duration>) -> (String, u32) {
             } else {
                 ui::DESTRUCTIVE
             };
-            (format!("{ms} ms"), color)
+            (if ms == 0 { "<1 ms".into() } else { format!("{ms} ms") }, color)
         }
     }
 }
@@ -396,5 +403,6 @@ mod tests {
         assert_eq!(latency_text(Some(Duration::from_millis(200))).1, ui::WARNING);
         assert_eq!(latency_text(Some(Duration::from_millis(201))).1, ui::DESTRUCTIVE);
         assert_eq!(latency_text(None), ("超时".into(), ui::DESTRUCTIVE));
+        assert_eq!(latency_text(Some(Duration::from_micros(300))).0, "<1 ms");
     }
 }

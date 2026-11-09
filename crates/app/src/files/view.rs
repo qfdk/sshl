@@ -376,6 +376,7 @@ impl FileManager {
         self.reload_bookmarks();
         self.remote.request += 1;
         self.remote.files.clear();
+        self.remote.hidden = 0;
         self.remote.error = None;
         self.remote.loading = false;
         self.remote.suggesting = false;
@@ -410,6 +411,7 @@ impl FileManager {
         self.remote_empty = Some(message.into());
         self.remote.request += 1;
         self.remote.files.clear();
+        self.remote.hidden = 0;
         self.remote.loading = false;
         self.remote.listing = None;
         self.remote.listing_requested = None;

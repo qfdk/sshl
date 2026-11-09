@@ -252,10 +252,42 @@ impl Workspace {
         if self.pending.is_some() {
             return;
         }
-        if self.session(id).is_some() {
-            self.switch_to(id, window, cx);
+        if let Some(session) = self.session(id) {
+            if session.view.read(cx).is_disconnected() {
+                self.reconnect_in_place(id, window, cx);
+            } else {
+                self.switch_to(id, window, cx);
+            }
             return;
         }
+        self.prepare_saved(id, window, cx, |this, conn, details, window, cx| {
+            if this.pending.is_some() || this.session(&conn.id).is_some() {
+                return;
+            }
+            this.start_connect(conn.id.clone(), conn.name.clone().into(), details, None, window, cx);
+        });
+    }
+
+    /// 断开的标签里原地重连：屏幕内容留着，新连接接在下面。
+    fn reconnect_in_place(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.as_deref() != Some(id) {
+            self.activate(id, window, cx);
+        }
+        self.prepare_saved(id, window, cx, |this, conn, details, window, cx| {
+            if let Some(view) = this.session(&conn.id).map(|s| s.view.clone()) {
+                view.update(cx, |view, cx| view.reconnect(details, window, cx));
+            }
+        });
+    }
+
+    /// 已保存连接的连接参数，交给 `go`。密码方式但没存密码时先问（只用这一次，不保存）。
+    fn prepare_saved(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        go: impl FnOnce(&mut Self, StoredConnection, ConnectionDetails, &mut Window, &mut Context<Self>) + 'static,
+    ) {
         let Some(conn) = self.connection(id).cloned() else { return };
         let mut details = ConnectionDetails {
             id: Some(conn.id.clone()),
@@ -269,7 +301,6 @@ impl Workspace {
             cols: 0,
             rows: 0,
         };
-        // 密码方式但没存密码：先问（只用这一次，不保存）
         if conn.auth == AuthKind::Password && !crypto_store::has(&conn.id, "password") {
             let target = format!("{}@{}", conn.username, conn.host);
             let options = Options::new(format!("连接 {}", conn.name)).message(format!("输入 {target} 的密码。")).confirm("连接");
@@ -277,17 +308,14 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(Some(PasswordAnswer::Password(password))) = answer.await else { return };
                 let _ = this.update_in(cx, |this, window, cx| {
-                    if this.pending.is_some() || this.session(&conn.id).is_some() {
-                        return;
-                    }
                     details.password = Some(password);
-                    this.start_connect(conn.id.clone(), conn.name.clone().into(), details, None, window, cx);
+                    go(this, conn, details, window, cx);
                 });
             })
             .detach();
             return;
         }
-        self.start_connect(conn.id.clone(), conn.name.clone().into(), details, None, window, cx);
+        go(self, conn, details, window, cx);
     }
 
     fn start_connect(
@@ -365,14 +393,33 @@ impl Workspace {
                 self.pending = None;
                 cx.notify();
             }
+            // 远端关了（exit、掉线）：标签和屏幕留着，终端里提示按回车重连；文件管理显示已断开
             TerminalEvent::Closed => {
-                if let Some(index) = self.sessions.iter().position(|s| &s.view == view) {
-                    let session = self.sessions.remove(index);
-                    let session_id = session.view.read(cx).session_id().map(str::to_string);
-                    let was_active = self.active.as_deref() == Some(session.connection_id.as_str());
-                    self.session_gone(session_id.as_deref(), &session.connection_id, was_active, "连接已断开，请重新连接到服务器", window, cx);
+                if let Some(connection_id) = self.sessions.iter().find(|s| &s.view == view).map(|s| s.connection_id.clone()) {
+                    if self.active.as_deref() == Some(connection_id.as_str()) {
+                        self.latency = None;
+                        self.fill_menu = None;
+                        self.file_manager.update(cx, |files, cx| {
+                            files.set_session(None, window, cx);
+                            files.show_remote_empty("连接已断开，请重新连接到服务器", Some(connection_id), window, cx);
+                        });
+                    }
                     cx.notify();
                 }
+            }
+            TerminalEvent::ReconnectRequested => {
+                if let Some(connection_id) = self.sessions.iter().find(|s| &s.view == view).map(|s| s.connection_id.clone()) {
+                    self.reconnect_in_place(&connection_id, window, cx);
+                }
+            }
+            // 原地重连成功：当前标签的话，文件管理和延迟换到新会话
+            TerminalEvent::Connected => {
+                if let Some(connection_id) = self.sessions.iter().find(|s| &s.view == view).map(|s| s.connection_id.clone())
+                    && self.active.as_deref() == Some(connection_id.as_str())
+                {
+                    self.activate(&connection_id, window, cx);
+                }
+                cx.notify();
             }
             TerminalEvent::PasswordPrompt => cx.notify(),
             TerminalEvent::FilesDropped(paths) if self.active_session().is_some_and(|s| &s.view == view) => {
@@ -414,7 +461,14 @@ impl Workspace {
             let session_id = s.view.read(cx).session_id()?.to_string();
             Some(FileSession { session_id, connection_id: s.connection_id.clone(), name: s.name.clone() })
         });
-        self.file_manager.update(cx, |files, cx| files.set_session(file_session, window, cx));
+        let disconnected = self.session(connection_id).is_some_and(|s| s.view.read(cx).is_disconnected());
+        let id = connection_id.to_string();
+        self.file_manager.update(cx, |files, cx| {
+            files.set_session(file_session, window, cx);
+            if disconnected {
+                files.show_remote_empty("连接已断开，请重新连接到服务器", Some(id), window, cx);
+            }
+        });
         if self.main_tab == MainTab::Terminal
             && let Some(session) = self.session(connection_id) {
                 let focus = session.view.read(cx).focus_handle(cx);
@@ -426,6 +480,10 @@ impl Workspace {
     /// 切到已开的会话：乐观切换，探活放到后台（不挡在每次切换前面），失效且用户仍停在该会话上时自动重连。
     fn switch_to(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session_id) = self.session(connection_id).and_then(|s| s.view.read(cx).session_id().map(str::to_string)) else {
+            // 断开的标签：切过去看（终端里有「按 Enter 重新连接」），不自动重连
+            if self.session(connection_id).is_some() && self.active.as_deref() != Some(connection_id) {
+                self.activate(connection_id, window, cx);
+            }
             return;
         };
         if self.active.as_deref() != Some(connection_id) {
@@ -444,17 +502,11 @@ impl Workspace {
                 if alive {
                     return;
                 }
-                // 后端探活失败时已关闭该会话；关闭事件可能先到并清掉当前会话，仍算用户停留在此
-                let still_viewing = this.active.is_none() || this.active.as_deref() == Some(connection_id.as_str());
-                if let Some(index) = this.sessions.iter().position(|s| s.connection_id == connection_id) {
-                    this.sessions.remove(index);
+                // 后端探活失败时已关闭该会话；用户还停在这个标签上就原地重连（屏幕内容留着）
+                if this.active.as_deref() == Some(connection_id.as_str()) && this.session(&connection_id).is_some() {
+                    this.reconnect_in_place(&connection_id, window, cx);
                 }
-                let was_active = this.active.as_deref() == Some(connection_id.as_str());
-                this.session_gone(Some(&session_id), &connection_id, was_active, "连接已失效，正在重新连接...", window, cx);
                 cx.notify();
-                if still_viewing {
-                    this.connect_to_saved(&connection_id, window, cx);
-                }
             });
         })
         .detach();
@@ -463,6 +515,11 @@ impl Workspace {
     /// 所有断开入口（标签 ×、侧栏、右键菜单、顶栏按钮、⌘W）都走这里，统一先确认。
     pub(crate) fn disconnect(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session(connection_id) else { return };
+        // 已经断开的标签：关掉就是了，不用确认
+        if session.view.read(cx).is_disconnected() {
+            let connection_id = connection_id.to_string();
+            return self.disconnect_now(&connection_id, window, cx);
+        }
         let name = if session.name.is_empty() { SharedString::from("这个会话") } else { session.name.clone() };
         let on_files = self.main_tab == MainTab::Files && self.active.as_deref() == Some(connection_id);
         let transferring = self.file_manager.read(cx).active_transfers() > 0;
@@ -492,6 +549,9 @@ impl Workspace {
     fn disconnect_now(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.sessions.iter().position(|s| s.connection_id == connection_id) else { return };
         let session = self.sessions.remove(index);
+        // 正在重连时关掉：连接请求一起取消，免得连上一个没人管的会话
+        let attempt = session.view.read(cx).attempt_id.clone();
+        backend::get().runtime.spawn(async move { ssh::cancel_connect(&backend::get().state, &attempt).await });
         if let Some(session_id) = session.view.read(cx).session_id().map(str::to_string) {
             // 用户主动断开：探活结果回来时不能把它当成「连接失效」去自动重连
             self.revalidating.remove(&session_id);

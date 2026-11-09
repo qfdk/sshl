@@ -102,6 +102,8 @@ pub enum TerminalEvent {
     Declined,
     /// 从 Finder 拖到终端上的文件（本地路径），由工作区传到终端当前目录。
     FilesDropped(Vec<String>),
+    /// 断开后在终端里按了回车：请工作区在这个标签里重连。
+    ReconnectRequested,
     Closed,
     /// 光标行出现 / 离开密码提示（当前状态见 `password_prompt()`）。
     PasswordPrompt,
@@ -202,6 +204,9 @@ fn host_key_options(question: &HostKeyQuestion) -> Options {
 pub struct TerminalView {
     handle: TerminalHandle,
     shell: ShellHandle,
+    /// shell 输出的去处（终端线程 + 界面消息），重连时接到新通道上。
+    sink: Arc<Sink>,
+    connect_task: Option<Task<()>>,
     frame: Arc<Frame>,
     focus: FocusHandle,
     pub status: Status,
@@ -237,43 +242,6 @@ impl TerminalView {
             let _ = notify_tx.unbounded_send(UiMsg::Engine(event));
         });
         let sink = Arc::new(Sink { output: handle.sender(), ui: ui_tx });
-        let attempt_id = format!("connect-{}", NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed));
-
-        let mut details = details;
-        details.cols = u32::from(grid.cols);
-        details.rows = u32::from(grid.rows);
-        let attempt = attempt_id.clone();
-        let connect_shell = shell.clone();
-        let host_key = HostKeyCheck::user(Some(host_key_prompt(window, cx)));
-        let connecting = backend::spawn(async move {
-            ssh::connect(&backend::get().state, details, &attempt, connect_shell, shell_rx, sink, host_key).await
-        });
-
-        let connect_task = cx.spawn(async move |this, cx| {
-            let result = connecting.await;
-            let _ = this.update(cx, |view, cx| {
-                match result {
-                    Some(Ok(session_id)) => {
-                        view.status = Status::Connected { session_id };
-                        cx.emit(TerminalEvent::Connected);
-                    }
-                    Some(Err(AppError::HostKeyDeclined)) => {
-                        view.status = Status::Failed("未信任主机".into());
-                        cx.emit(TerminalEvent::Declined);
-                    }
-                    Some(Err(error)) => {
-                        let message = error.to_string();
-                        view.status = Status::Failed(message.clone());
-                        cx.emit(TerminalEvent::Failed(message));
-                    }
-                    None => {
-                        view.status = Status::Failed("后台任务异常退出".into());
-                        cx.emit(TerminalEvent::Failed("后台任务异常退出".into()));
-                    }
-                }
-                cx.notify();
-            });
-        });
 
         let events_task = cx.spawn(async move |this, cx| {
             while let Some(msg) = ui_rx.next().await {
@@ -290,6 +258,7 @@ impl TerminalView {
                     UiMsg::Closed => {
                         if matches!(view.status, Status::Connected { .. }) {
                             view.status = Status::Closed;
+                            view.notice("连接已断开 · 按 Enter 重新连接");
                             cx.emit(TerminalEvent::Closed);
                             cx.notify();
                         }
@@ -332,13 +301,15 @@ impl TerminalView {
         })
         .detach();
 
-        Self {
+        let mut view = Self {
             handle,
             shell,
+            sink,
+            connect_task: None,
             frame: Arc::new(Frame::default()),
             focus,
             status: Status::Connecting,
-            attempt_id,
+            attempt_id: String::new(),
             grid,
             grid_origin: Point::default(),
             metrics: None,
@@ -347,8 +318,78 @@ impl TerminalView {
             password_prompt: false,
             drop_hover: false,
             scroll_remainder: 0.0,
-            _tasks: vec![connect_task, events_task, blink_task],
+            _tasks: vec![events_task, blink_task],
+        };
+        view.start_connection(details, shell_rx, window, cx);
+        view
+    }
+
+    /// 发起连接（首次 / 重连），结果更新状态并通知工作区。
+    fn start_connection(&mut self, details: ConnectionDetails, shell_rx: ssh::ShellReceiver, window: &mut Window, cx: &mut Context<Self>) {
+        let mut details = details;
+        details.cols = u32::from(self.grid.cols);
+        details.rows = u32::from(self.grid.rows);
+        self.attempt_id = format!("connect-{}", NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed));
+        self.status = Status::Connecting;
+        let attempt = self.attempt_id.clone();
+        let shell = self.shell.clone();
+        let sink = self.sink.clone();
+        let host_key = HostKeyCheck::user(Some(host_key_prompt(window, cx)));
+        let connecting = backend::spawn(async move {
+            ssh::connect(&backend::get().state, details, &attempt, shell, shell_rx, sink, host_key).await
+        });
+        self.connect_task = Some(cx.spawn(async move |this, cx| {
+            let result = connecting.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Some(Ok(session_id)) => {
+                        view.status = Status::Connected { session_id };
+                        cx.emit(TerminalEvent::Connected);
+                    }
+                    Some(Err(AppError::HostKeyDeclined)) => {
+                        view.status = Status::Failed("未信任主机".into());
+                        view.notice("没有信任主机密钥 · 按 Enter 重试");
+                        cx.emit(TerminalEvent::Declined);
+                    }
+                    Some(Err(error)) => {
+                        let message = error.to_string();
+                        view.notice(&format!("连接失败：{message} · 按 Enter 重试"));
+                        view.status = Status::Failed(message.clone());
+                        cx.emit(TerminalEvent::Failed(message));
+                    }
+                    None => {
+                        view.status = Status::Failed("后台任务异常退出".into());
+                        cx.emit(TerminalEvent::Failed("后台任务异常退出".into()));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// 断开之后在原来的终端里重连：屏幕和回滚历史都留着，新连接的输出接在下面。
+    pub fn reconnect(&mut self, details: ConnectionDetails, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.status, Status::Connecting) {
+            return;
         }
+        let (shell, shell_rx) = ssh::shell_channel();
+        self.shell.close();
+        self.shell = shell.clone();
+        self.handle.send(Input::Rebind(shell));
+        self.notice("正在重新连接…");
+        self.start_connection(details, shell_rx, window, cx);
+        cx.notify();
+    }
+
+    /// 是否已断开（远端关闭、重连失败、没信任主机）：标签还在，按回车可重连。
+    pub fn is_disconnected(&self) -> bool {
+        matches!(self.status, Status::Closed | Status::Failed(_))
+    }
+
+    /// 在终端里另起一行写一句灰色的提示（不经过远端）。
+    fn notice(&mut self, text: &str) {
+        let line = format!("\r\n\x1b[0m\x1b[2m[{text}]\x1b[0m\r\n");
+        self.handle.send(Input::Output(line.into_bytes()));
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -382,6 +423,16 @@ impl TerminalView {
 
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.marked.is_some() {
+            return;
+        }
+        // 断开了：回车重连，其他键不往已经关掉的通道里送
+        if self.is_disconnected() {
+            if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+                cx.emit(TerminalEvent::ReconnectRequested);
+            }
+            if !event.keystroke.modifiers.platform {
+                cx.stop_propagation();
+            }
             return;
         }
         if let Some(input) = keys::encode(&event.keystroke, event.is_held) {
@@ -626,7 +677,7 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
-        if !text.is_empty() {
+        if !text.is_empty() && !self.is_disconnected() {
             self.input(Input::Text(text.to_string()));
         }
         cx.notify();

@@ -80,6 +80,8 @@ pub enum Input {
     /// 复制选区（纯文本）；没有选区时回 None。
     Copy(futures::channel::oneshot::Sender<Option<String>>),
     SelectAll,
+    /// 断线重连：之后的输入、终端应答、改尺寸、流控确认都写到新的 shell 通道。屏幕和回滚历史不动。
+    Rebind(ShellHandle),
     Shutdown,
 }
 
@@ -166,7 +168,7 @@ struct Engine {
     mouse_encoder: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
     selection: SelectionGesture,
-    shell: ShellHandle,
+    shell: Arc<Mutex<ShellHandle>>,
     shared: Arc<Shared>,
     notify: Box<dyn Fn(Event) + Send>,
     size: GridSize,
@@ -202,8 +204,10 @@ impl Engine {
             palette.set(PaletteIndex(i as _), ghostty(*color));
         }
         term.set_default_color_palette(Some(palette))?;
+        // 终端应答（光标位置报告等）也走可替换的那条通道：断线重连后写到新连接
+        let shell = Arc::new(Mutex::new(shell));
         let reply = shell.clone();
-        term.on_pty_write(move |_, data| reply.write(data.to_vec()))?;
+        term.on_pty_write(move |_, data| reply.lock().unwrap().write(data.to_vec()))?;
 
         Ok(Self {
             term,
@@ -286,7 +290,7 @@ impl Engine {
                 dirty = true;
             }
             if self.unacked > 0 {
-                self.shell.ack(std::mem::take(&mut self.unacked));
+                self.shell.lock().unwrap().ack(std::mem::take(&mut self.unacked));
             }
             self.flush_pty_size();
             // 出帧：积压清空时立刻出；刷屏中最多每 FRAME_INTERVAL 一帧，整理帧不拖慢解析
@@ -314,7 +318,7 @@ impl Engine {
             Input::Text(text) => {
                 self.clear_selection();
                 self.scroll_to_bottom();
-                self.shell.write(text.into_bytes());
+                self.shell.lock().unwrap().write(text.into_bytes());
             }
             Input::Paste(text) => self.paste(text),
             Input::Resize(size) => self.resize(size),
@@ -323,6 +327,11 @@ impl Engine {
             Input::Focus(focused) => self.focus(focused),
             Input::Copy(reply) => {
                 let _ = reply.send(self.selection_text());
+            }
+            Input::Rebind(shell) => {
+                *self.shell.lock().unwrap() = shell;
+                // 旧通道没确认完的字节不能记到新通道头上
+                self.unacked = 0;
             }
             Input::SelectAll => {
                 if let Ok(Some(all)) = self.term.select_all() {
@@ -357,7 +366,7 @@ impl Engine {
         }
         if !self.buf.is_empty() {
             self.scroll_to_bottom();
-            self.shell.write(std::mem::take(&mut self.buf));
+            self.shell.lock().unwrap().write(std::mem::take(&mut self.buf));
         }
     }
 
@@ -369,7 +378,7 @@ impl Engine {
             Ok(len) => {
                 out.truncate(len);
                 self.scroll_to_bottom();
-                self.shell.write(out);
+                self.shell.lock().unwrap().write(out);
             }
             Err(error) => tracing::warn!("paste encode failed: {error}"),
         }
@@ -403,7 +412,7 @@ impl Engine {
         }
         self.pty_pending = false;
         self.pty_sent_at = Some(Instant::now());
-        self.shell.resize(u32::from(self.pty_size.0), u32::from(self.pty_size.1));
+        self.shell.lock().unwrap().resize(u32::from(self.pty_size.0), u32::from(self.pty_size.1));
     }
 
     fn mouse(&mut self, input: MouseInput) {
@@ -451,7 +460,7 @@ impl Engine {
             return;
         }
         if !self.buf.is_empty() {
-            self.shell.write(std::mem::take(&mut self.buf));
+            self.shell.lock().unwrap().write(std::mem::take(&mut self.buf));
         }
     }
 
@@ -532,7 +541,7 @@ impl Engine {
         let event = if focused { libghostty_vt::focus::Event::Gained } else { libghostty_vt::focus::Event::Lost };
         let mut out = [0u8; 8];
         if let Ok(len) = event.encode(&mut out) {
-            self.shell.write(out[..len].to_vec());
+            self.shell.lock().unwrap().write(out[..len].to_vec());
         }
     }
 
