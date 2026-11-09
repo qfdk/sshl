@@ -182,6 +182,8 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
         this.reload_connections();
+        // 启动时就有焦点：否则 ⌘N、⌘, 等工作区快捷键要先随便点一下才生效
+        window.focus(&this.focus, cx);
         this
     }
 
