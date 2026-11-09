@@ -89,6 +89,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   不去试别的已保存密码。SFTP 起来之前任何失败都要 EOF + 关通道（russh drop 不关通道，挂着的 sudo 会占住时间戳锁）。
   目录也跟随：同一进程链上最深的 shell 的 cwd（Linux 读 `/proc/<pid>/cwd`，否则 lsof），以文件管理当前身份读（`file_terminal_cwd`）。
   第一次打开从终端目录开始；之后只在终端目录变了时跟过去，用户在文件管理里自己点到别处不会被拽回。不依赖服务器配 OSC 7。
+- **从 `~/.ssh/config` 导入**（新建连接对话框左下角，`import_dialog.rs` + `crates/core/src/ssh_config.rs`）：列出不带通配的 Host，
+  逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
+  同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
 - **远程目录收藏**：按连接存在 `sshl.db` 的 `bookmarks` 表（删连接时一起删）；远程栏路径框旁的收藏按钮，
   当前目录已收藏时是蓝色，菜单里收藏 / 取消收藏当前目录、点收藏的目录直接过去。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。

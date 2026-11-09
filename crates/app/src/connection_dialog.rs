@@ -37,6 +37,8 @@ pub enum ConnectionDialogEvent {
     Connect(ConnectionForm),
     /// 编辑：直接保存。
     Save { id: String, form: ConnectionForm },
+    /// 新建时点了「从 ~/.ssh/config 导入」。
+    Import,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -368,6 +370,22 @@ impl Render for ConnectionDialog {
             )
             .child(
                 kit::modal_footer()
+                    .when(!editing, |f| {
+                        f.child(
+                            div()
+                                .id("connection-import")
+                                .mr_auto()
+                                .flex()
+                                .items_center()
+                                .role(gpui::Role::Button)
+                                .aria_label("从 ~/.ssh/config 导入")
+                                .text_sm()
+                                .text_color(theme::color(ui::PRIMARY))
+                                .cursor_pointer()
+                                .child("从 ~/.ssh/config 导入")
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectionDialogEvent::Import))),
+                        )
+                    })
                     .child(
                         kit::labeled_button("connection-cancel", Variant::Outline, None, "取消")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectionDialogEvent::Cancel))),

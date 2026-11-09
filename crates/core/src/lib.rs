@@ -12,6 +12,7 @@ pub mod local_fs;
 pub mod sftp;
 pub mod sftp_stall;
 pub mod ssh;
+pub mod ssh_config;
 pub mod state;
 pub mod system_fonts;
 pub mod terminal_user;

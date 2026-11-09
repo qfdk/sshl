@@ -17,6 +17,7 @@ use sshl_core::ssh::{self, ConnectionDetails};
 
 use crate::backend;
 use crate::connection_dialog::{ConnectionDialog, ConnectionDialogEvent, ConnectionForm};
+use crate::import_dialog::{ImportDialog, ImportDialogEvent};
 use crate::files::{FileManager, FileManagerEvent, FileSession};
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options, PasswordAnswer};
@@ -129,6 +130,7 @@ pub struct Workspace {
     /// 后台探活中的会话：会话 id → 连接 id。用户在探活期间主动断开会移除它，借此区分「连接失效该重连」和「用户自己断开」。
     revalidating: HashMap<String, String>,
     connection_dialog: Option<Entity<ConnectionDialog>>,
+    import_dialog: Option<Entity<ImportDialog>>,
     settings_dialog: Option<Entity<SettingsDialog>>,
     prompts: Entity<prompts::PromptHost>,
     pub(crate) file_manager: Entity<FileManager>,
@@ -193,6 +195,7 @@ impl Workspace {
             transfer_shown: None,
             revalidating: HashMap::new(),
             connection_dialog: None,
+            import_dialog: None,
             settings_dialog: None,
             prompts,
             file_manager,
@@ -643,6 +646,22 @@ impl Workspace {
     fn connection_dialog_event(&mut self, _: &Entity<ConnectionDialog>, event: &ConnectionDialogEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             ConnectionDialogEvent::Cancel => self.close_connection_dialog(window, cx),
+            ConnectionDialogEvent::Import => {
+                self.connection_dialog = None;
+                let saved = self.connections.clone();
+                let dialog = cx.new(|cx| ImportDialog::new(saved, window, cx));
+                self._subscriptions.push(cx.subscribe_in(&dialog, window, |this, _, event: &ImportDialogEvent, window, cx| {
+                    if let ImportDialogEvent::Imported(count) = event {
+                        this.reload_connections();
+                        tracing::info!("imported {count} hosts from ~/.ssh/config");
+                    }
+                    this.import_dialog = None;
+                    this.refocus(window, cx);
+                    cx.notify();
+                }));
+                self.import_dialog = Some(dialog);
+                cx.notify();
+            }
             ConnectionDialogEvent::Connect(form) => {
                 if self.pending.is_some() {
                     return;
@@ -1009,6 +1028,7 @@ impl Render for Workspace {
             .when_some(overlay, |root, overlay| root.child(overlay))
             .when_some(menu, |root, menu| root.child(menu))
             .when_some(self.connection_dialog.clone(), |root, dialog| root.child(dialog))
+            .when_some(self.import_dialog.clone(), |root, dialog| root.child(dialog))
             .when_some(self.settings_dialog.clone(), |root, dialog| root.child(dialog))
             .child(self.prompts.clone())
     }

@@ -5,6 +5,7 @@ mod connection_dialog;
 mod devhook;
 mod files;
 mod groups;
+mod import_dialog;
 mod prompts;
 mod screen;
 mod settings;
