@@ -28,6 +28,8 @@ dirs = "5"
 # 只读旧版 WebView 的 localStorage（迁移设置）；版本与 sshl-core 一致，不多编一份 SQLite。
 rusqlite = { version = "0.31", features = ["bundled"] }
 unicode-segmentation = "1"
+# 认出 ~/.ssh 里的 FIDO 硬件私钥（看 OpenSSH 私钥头里的公钥类型）；版本与 sshl-core 一致
+base64 = "0.22"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures = "0.3"
 tracing = "0.1"

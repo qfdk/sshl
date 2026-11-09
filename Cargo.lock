@@ -5559,6 +5559,7 @@ dependencies = [
 name = "sshl"
 version = "0.6.1"
 dependencies = [
+ "base64",
  "dirs",
  "futures",
  "gpui-base",

@@ -1,5 +1,7 @@
 //! 新建 / 编辑连接（旧 ConnectionDialog.tsx）。
 
+use std::path::{Path, PathBuf};
+
 use gpui::{
     AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
     KeyDownEvent, ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
@@ -9,6 +11,7 @@ use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::StoredConnection;
 
 use crate::assets::Icon;
+use crate::ssh_keys;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
 
@@ -50,6 +53,8 @@ pub struct ConnectionDialog {
     editing: Option<StoredConnection>,
     inputs: Vec<(Field, Entity<InputState>)>,
     use_key: bool,
+    /// ~/.ssh 下找到的私钥；第一次用到私钥方式时才扫描。
+    keys: Option<Vec<PathBuf>>,
     save_password: bool,
     focused: Option<Field>,
     error: Option<SharedString>,
@@ -108,6 +113,7 @@ impl ConnectionDialog {
             editing,
             inputs,
             use_key,
+            keys: use_key.then(ssh_keys::discover),
             focused: None,
             error: None,
             focus: cx.focus_handle(),
@@ -176,13 +182,54 @@ impl ConnectionDialog {
 
     fn set_use_key(&mut self, use_key: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.use_key = use_key;
-        // 切到私钥且还没填：默认 ~/.ssh/id_rsa
-        if use_key && self.text(Field::PrivateKey, cx).is_empty()
-            && let Some(home) = dirs::home_dir() {
-                let path = home.join(".ssh").join("id_rsa").to_string_lossy().to_string();
-                self.input(Field::PrivateKey).clone().update(cx, |input, cx| input.set_value(path, window, cx));
+        if use_key {
+            // 切到私钥且还没填：默认用 ~/.ssh 里找到的第一把（id_ed25519 优先），一把都没有就留空
+            let first = self.keys.get_or_insert_with(ssh_keys::discover).first().cloned();
+            if let Some(first) = first
+                && self.text(Field::PrivateKey, cx).is_empty()
+            {
+                self.set_key(&first, window, cx);
             }
+        }
         cx.notify();
+    }
+
+    fn set_key(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let path = path.to_string_lossy().to_string();
+        self.input(Field::PrivateKey).clone().update(cx, |input, cx| input.set_value(path, window, cx));
+        cx.notify();
+    }
+
+    /// 找到的私钥，点一下填进路径框；当前选中的那把高亮。
+    fn key_choices(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let keys = self.keys.as_ref().filter(|keys| !keys.is_empty())?;
+        let current = self.text(Field::PrivateKey, cx);
+        let home = dirs::home_dir();
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.))
+                .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child("~/.ssh 中的私钥"))
+                .children(keys.iter().enumerate().map(|(i, path)| {
+                    let shown: SharedString = ssh_keys::display(path, home.as_deref()).into();
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let selected = current == path.to_string_lossy();
+                    let path = path.clone();
+                    let tip = shown.clone();
+                    kit::button(("ssh-key", i), if selected { Variant::Primary } else { Variant::Outline })
+                        .h(px(28.))
+                        .px(px(10.))
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .aria_label(SharedString::from(format!("使用私钥 {shown}")))
+                        .tooltip(move |window, cx| kit::tooltip(tip.clone(), window, cx))
+                        .child(kit::icon_sized(Icon::KeyRound, 13.))
+                        .child(name)
+                        .on_click(cx.listener(move |this, _, window, cx| this.set_key(&path, window, cx)))
+                })),
+        )
     }
 
     fn browse_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -292,7 +339,8 @@ impl Render for ConnectionDialog {
                                                         kit::labeled_button("browse-key", Variant::Outline, Some(Icon::FolderOpen), "浏览")
                                                             .on_click(cx.listener(|this, _, window, cx| this.browse_key(window, cx))),
                                                     ),
-                                            ),
+                                            )
+                                            .when_some(self.key_choices(cx), |d, choices| d.child(choices)),
                                     )
                                     .child(self.field("私钥密码", Some("（可选）"), Field::Passphrase))
                                 } else {
