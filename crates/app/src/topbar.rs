@@ -56,6 +56,19 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when_some(self.latency.clone().filter(|(id, _)| connected && self.active.as_ref() == Some(id)), |r, (_, rtt)| {
+                        let (text, color) = latency_text(rtt);
+                        r.child(
+                            div()
+                                .min_w(px(52.))
+                                .flex()
+                                .justify_end()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::color(color))
+                                .child(text),
+                        )
+                    })
                     .when(connected, |r| r.child(self.main_tabs(cx)))
                     .when(connected && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
                         r.child(self.fill_button(cx))
@@ -348,5 +361,40 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
             )
             .into_any_element()
+    }
+}
+
+/// 延迟的显示：< 100ms 绿、≤ 200ms 黄、更慢或超时红。
+pub(crate) fn latency_text(rtt: Option<std::time::Duration>) -> (String, u32) {
+    match rtt {
+        None => ("超时".into(), ui::DESTRUCTIVE),
+        Some(rtt) => {
+            let ms = rtt.as_millis();
+            let color = if ms < 100 {
+                ui::SUCCESS
+            } else if ms <= 200 {
+                ui::WARNING
+            } else {
+                ui::DESTRUCTIVE
+            };
+            (format!("{ms} ms"), color)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn latency_is_colored_by_how_slow_it_is() {
+        assert_eq!(latency_text(Some(Duration::from_millis(23))), ("23 ms".into(), ui::SUCCESS));
+        assert_eq!(latency_text(Some(Duration::from_millis(99))).1, ui::SUCCESS);
+        assert_eq!(latency_text(Some(Duration::from_millis(100))).1, ui::WARNING);
+        assert_eq!(latency_text(Some(Duration::from_millis(200))).1, ui::WARNING);
+        assert_eq!(latency_text(Some(Duration::from_millis(201))).1, ui::DESTRUCTIVE);
+        assert_eq!(latency_text(None), ("超时".into(), ui::DESTRUCTIVE));
     }
 }

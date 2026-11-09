@@ -518,6 +518,23 @@ async fn validate_session(session: &SshSession) -> bool {
 }
 
 /// 会话还活着吗（2s 内能在连接上开出通道）。死了就从会话表移除并关掉终端通道。
+/// 往返延迟（标签栏显示）：开一个会话通道再关掉，正好一个来回。5 秒没回来算超时（None）。
+pub async fn latency(state: &AppState, session_id: &str) -> Option<Duration> {
+    let session = state.get(session_id).await?;
+    round_trip(&session.handle).await
+}
+
+async fn round_trip<H: russh::client::Handler>(handle: &russh::client::Handle<H>) -> Option<Duration> {
+    if handle.is_closed() {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let channel = tokio::time::timeout(Duration::from_secs(5), handle.channel_open_session()).await.ok()?.ok()?;
+    let elapsed = started.elapsed();
+    let _ = channel.close().await;
+    Some(elapsed)
+}
+
 pub async fn validate(state: &AppState, session_id: &str) -> bool {
     let Some(session) = state.get(session_id).await else {
         return false;
@@ -849,6 +866,27 @@ mod tests {
         assert!(matches!(handshake(check(false)).await.err().unwrap(), AppError::HostKeyDeclined));
         assert!(asked.lock().unwrap().pop().unwrap().changed);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 真实 sshd 上量往返延迟：本机连接应在几毫秒内；连接断了是 None。
+    /// `SSHL_AUTO_AUTH_IT=127.0.0.1:2222 SSHL_AUTO_AUTH_IT_USER=me SSHL_AUTO_AUTH_IT_KEY=/path/key cargo test --lib round_trip_against_real_sshd -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要 SSHL_AUTO_AUTH_IT / _USER / _KEY 指向认可该私钥的 sshd"]
+    async fn round_trip_against_real_sshd() {
+        let (Ok(target), Ok(user), Ok(key)) =
+            (std::env::var("SSHL_AUTO_AUTH_IT"), std::env::var("SSHL_AUTO_AUTH_IT_USER"), std::env::var("SSHL_AUTO_AUTH_IT_KEY"))
+        else {
+            return;
+        };
+        let (host, port) = target.split_once(':').unwrap();
+        let handle = super::do_handshake(host, port.parse().unwrap(), &user, super::Credentials::Key { key: &key, passphrase: None }, super::HostKeyCheck::trust_any_for_tests())
+            .await
+            .unwrap();
+        let rtt = super::round_trip(&handle).await.expect("连着就量得到");
+        assert!(rtt < Duration::from_secs(1), "{rtt:?}");
+        handle.disconnect(russh::Disconnect::ByApplication, "", "").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(super::round_trip(&handle).await, None, "断了就没有");
     }
 
     /// 真实 sshd：终端通道不确认就停在一个窗口内，同连接的其他通道照常跑；确认后继续流动。

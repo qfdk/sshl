@@ -39,6 +39,8 @@ pub fn bind_keys(cx: &mut App) {
 
 /// 连接遮罩延迟出现：预热池命中时整个连接 <300ms，像本地终端一样直接出终端，不闪一层遮罩。
 const LOADING_DELAY: Duration = Duration::from_millis(300);
+/// 标签栏延迟多久量一次。
+const LATENCY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// 按住 ⌘ 多久后浮出数字角标：太短则 ⌘C / ⌘V 这类快捷键会让角标一闪。
 const HINT_DELAY: Duration = Duration::from_millis(250);
 
@@ -131,6 +133,9 @@ pub struct Workspace {
     prompts: Entity<prompts::PromptHost>,
     pub(crate) file_manager: Entity<FileManager>,
     pub(crate) focus: FocusHandle,
+    /// 当前会话的往返延迟（连接 id，None = 超时）；切会话时清掉，量到再显示。
+    pub(crate) latency: Option<(String, Option<std::time::Duration>)>,
+    _latency_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -192,6 +197,15 @@ impl Workspace {
             prompts,
             file_manager,
             focus: cx.focus_handle(),
+            latency: None,
+            _latency_task: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(LATENCY_INTERVAL).await;
+                    if this.update(cx, |this, cx| this.measure_latency(cx)).is_err() {
+                        break;
+                    }
+                }
+            }),
             _subscriptions: subscriptions,
         };
         this.reload_connections();
@@ -369,8 +383,32 @@ impl Workspace {
         }
     }
 
+    /// 量一次当前会话的往返延迟（标签栏右侧显示）。
+    fn measure_latency(&mut self, cx: &mut Context<Self>) {
+        let Some((connection_id, session_id)) =
+            self.active_session().and_then(|s| Some((s.connection_id.clone(), s.view.read(cx).session_id()?.to_string())))
+        else {
+            return;
+        };
+        let rtt = backend::spawn(async move { ssh::latency(&backend::get().state, &session_id).await });
+        cx.spawn(async move |this, cx| {
+            let rtt = rtt.await.flatten();
+            let _ = this.update(cx, |this, cx| {
+                if this.active.as_deref() == Some(connection_id.as_str()) {
+                    this.latency = Some((connection_id, rtt));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn activate(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.as_deref() != Some(connection_id) {
+            self.latency = None;
+        }
         self.active = Some(connection_id.to_string());
+        self.measure_latency(cx);
         self.fill_menu = None;
         let file_session = self.session(connection_id).and_then(|s| {
             let session_id = s.view.read(cx).session_id()?.to_string();

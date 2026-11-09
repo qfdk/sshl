@@ -27,6 +27,7 @@ pub mod ui {
     pub const ACCENT_FOREGROUND: u32 = 0x1d4975;
     pub const DESTRUCTIVE: u32 = 0xe7000b;
     pub const SUCCESS: u32 = 0x11b981;
+    pub const WARNING: u32 = 0xd97706;
     pub const BORDER: u32 = 0xe2e8f0;
     pub const RING: u32 = 0x5695d7;
 }
