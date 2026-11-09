@@ -30,7 +30,6 @@ macro_rules! icons {
 
 icons! {
     ArrowDownUp => "arrow-down-up",
-    ArrowRight => "arrow-right",
     ArrowUp => "arrow-up",
     Check => "check",
     ChevronDown => "chevron-down",
@@ -51,7 +50,6 @@ icons! {
     Power => "power",
     RefreshCw => "refresh-cw",
     RotateCcw => "rotate-ccw",
-    Save => "save",
     Search => "search",
     Server => "server",
     Settings => "settings",

@@ -1,6 +1,6 @@
 //! 新建 / 编辑连接（旧 ConnectionDialog.tsx）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gpui::{
     AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
@@ -11,9 +11,11 @@ use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{AuthKind, StoredConnection};
 
 use crate::assets::Icon;
-use crate::ssh_keys;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
+
+/// 指定私钥文件时的默认值（同 OpenSSH）。
+const DEFAULT_KEY: &str = "~/.ssh/id_rsa";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConnectionForm {
@@ -53,8 +55,6 @@ pub struct ConnectionDialog {
     editing: Option<StoredConnection>,
     inputs: Vec<(Field, Entity<InputState>)>,
     auth: AuthKind,
-    /// ~/.ssh 下找到的私钥；第一次用到私钥方式时才扫描。
-    keys: Option<Vec<PathBuf>>,
     save_password: bool,
     focused: Option<Field>,
     error: Option<SharedString>,
@@ -79,9 +79,9 @@ impl ConnectionDialog {
             (Field::Host, value(&|c| c.host.clone()), "example.com 或 192.168.1.1", false),
             (Field::Port, editing.as_ref().map_or("22".into(), |c| c.port.to_string()), "", false),
             (Field::Username, value(&|c| c.username.clone()), "root", false),
-            (Field::Password, String::new(), "", true),
-            (Field::PrivateKey, value(&|c| c.private_key.clone().unwrap_or_default()), "", false),
-            (Field::Passphrase, String::new(), "", true),
+            (Field::Password, String::new(), "密码", true),
+            (Field::PrivateKey, value(&|c| c.private_key.clone().unwrap_or_default()), DEFAULT_KEY, false),
+            (Field::Passphrase, String::new(), "私钥密码（可选）", true),
         ];
         let mut inputs = Vec::new();
         let mut subscriptions = Vec::new();
@@ -113,7 +113,6 @@ impl ConnectionDialog {
             editing,
             inputs,
             auth,
-            keys: (auth == AuthKind::Key).then(ssh_keys::discover),
             focused: None,
             error: None,
             focus: cx.focus_handle(),
@@ -180,56 +179,61 @@ impl ConnectionDialog {
         }
     }
 
-    fn set_auth(&mut self, auth: AuthKind, window: &mut Window, cx: &mut Context<Self>) {
+    /// 认证方式只分密码 / 私钥；私钥里再选「自动」（免密）或具体的私钥文件。
+    fn set_use_key(&mut self, use_key: bool, cx: &mut Context<Self>) {
+        self.auth = switch_auth(self.auth, use_key, !self.text(Field::PrivateKey, cx).trim().is_empty());
+        cx.notify();
+    }
+
+    fn set_key_choice(&mut self, auth: AuthKind, window: &mut Window, cx: &mut Context<Self>) {
         self.auth = auth;
+        // 指定文件：没填过就先填 OpenSSH 的默认私钥 ~/.ssh/id_rsa 并全选，光标进路径框，
+        // 直接连或马上改成别的（~/.ssh 是隐藏目录，文件选择框里默认看不到）
         if auth == AuthKind::Key {
-            // 切到私钥且还没填：默认用 ~/.ssh 里找到的第一把（id_ed25519 优先），一把都没有就留空
-            let first = self.keys.get_or_insert_with(ssh_keys::discover).first().cloned();
-            if let Some(first) = first
-                && self.text(Field::PrivateKey, cx).is_empty()
-            {
-                self.set_key(&first, window, cx);
-            }
+            let input = self.input(Field::PrivateKey).clone();
+            let empty = input.read(cx).value().trim().is_empty();
+            input.update(cx, |input, cx| {
+                if empty {
+                    input.set_value(DEFAULT_KEY, window, cx);
+                }
+                input.select_all(window, cx);
+            });
+            let focus = input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
         }
         cx.notify();
     }
 
     fn set_key(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let path = path.to_string_lossy().to_string();
+        self.auth = AuthKind::Key;
+        // 家目录下的存成 ~/...（后端认）：路径框里短，换台机器也能用
+        let path = match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+            Some(rest) => format!("~/{}", rest.display()),
+            None => path.display().to_string(),
+        };
         self.input(Field::PrivateKey).clone().update(cx, |input, cx| input.set_value(path, window, cx));
         cx.notify();
     }
 
-    /// 找到的私钥，点一下填进路径框；当前选中的那把高亮。
-    fn key_choices(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let keys = self.keys.as_ref().filter(|keys| !keys.is_empty())?;
-        let current = self.text(Field::PrivateKey, cx);
-        let home = dirs::home_dir();
-        Some(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
+    /// 私钥的选法：自动（免密）或指定文件。
+    fn key_choices(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let chip = |id: &'static str, choice: AuthKind, icon: Icon, label: &'static str, aria: &'static str| {
+            kit::button(id, if self.auth == choice { Variant::Primary } else { Variant::Outline })
+                .h(px(28.))
+                .px(px(10.))
                 .gap(px(6.))
-                .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child("~/.ssh 中的私钥"))
-                .children(keys.iter().enumerate().map(|(i, path)| {
-                    let shown: SharedString = ssh_keys::display(path, home.as_deref()).into();
-                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let selected = current == path.to_string_lossy();
-                    let path = path.clone();
-                    let tip = shown.clone();
-                    kit::button(("ssh-key", i), if selected { Variant::Primary } else { Variant::Outline })
-                        .h(px(28.))
-                        .px(px(10.))
-                        .gap(px(6.))
-                        .text_size(px(12.))
-                        .aria_label(SharedString::from(format!("使用私钥 {shown}")))
-                        .tooltip(move |window, cx| kit::tooltip(tip.clone(), window, cx))
-                        .child(kit::icon_sized(Icon::KeyRound, 13.))
-                        .child(name)
-                        .on_click(cx.listener(move |this, _, window, cx| this.set_key(&path, window, cx)))
-                })),
-        )
+                .text_size(px(12.))
+                .aria_label(aria)
+                .child(kit::icon_sized(icon, 13.))
+                .child(label)
+                .on_click(cx.listener(move |this, _, window, cx| this.set_key_choice(choice, window, cx)))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(chip("ssh-key-auto", AuthKind::Auto, Icon::Zap, "自动", "自动选择私钥（免密）"))
+            .child(chip("ssh-key-file", AuthKind::Key, Icon::FileText, "指定文件", "指定私钥文件"))
     }
 
     fn browse_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -237,10 +241,7 @@ impl ConnectionDialog {
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
-            let _ = this.update_in(cx, |this, window, cx| {
-                let path = path.to_string_lossy().to_string();
-                this.input(Field::PrivateKey).clone().update(cx, |input, cx| input.set_value(path, window, cx));
-            });
+            let _ = this.update_in(cx, |this, window, cx| this.set_key(&path, window, cx));
         })
         .detach();
     }
@@ -264,6 +265,17 @@ impl ConnectionDialog {
     }
 }
 
+/// 在「密码 / 私钥」之间切换后的认证方式。切到私钥时还没填过私钥路径就用自动（免密：按 ~/.ssh/config、
+/// SSH Agent、默认私钥依次试），填过就用那个文件；已经在私钥里（自动或文件）就不变。
+fn switch_auth(current: AuthKind, use_key: bool, has_key_path: bool) -> AuthKind {
+    match (use_key, current) {
+        (false, _) => AuthKind::Password,
+        (true, AuthKind::Password) if has_key_path => AuthKind::Key,
+        (true, AuthKind::Password) => AuthKind::Auto,
+        (true, current) => current,
+    }
+}
+
 impl Render for ConnectionDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editing = self.editing.is_some();
@@ -282,28 +294,7 @@ impl Render for ConnectionDialog {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(
-                        div()
-                            .relative()
-                            .pr_8()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if editing { "编辑连接" } else { "新建连接" }))
-                            .child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if editing {
-                                "修改服务器信息后点保存。"
-                            } else {
-                                "填写服务器信息，连接成功后自动保存到列表。"
-                            }))
-                            .child(
-                                div().absolute().top(px(-6.)).right(px(-6.)).child(
-                                    kit::icon_button("connection-close", Variant::Ghost, Icon::X, "关闭")
-                                        .w(px(32.))
-                                        .h(px(32.))
-                                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectionDialogEvent::Cancel))),
-                                ),
-                            ),
-                    )
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if editing { "编辑连接" } else { "新建连接" }))
                     .child(
                         div()
                             .flex()
@@ -315,46 +306,42 @@ impl Render for ConnectionDialog {
                             .child(
                                 div().flex().flex_col().gap(px(6.)).child(kit::field_label("认证方式")).child(kit::segmented(
                                     "auth-type",
-                                    &[
-                                        (AuthKind::Password, Some(Icon::Lock), "密码".into()),
-                                        (AuthKind::Key, Some(Icon::KeyRound), "私钥".into()),
-                                        (AuthKind::Auto, Some(Icon::Zap), "免密".into()),
-                                    ],
-                                    self.auth,
-                                    move |auth, window, cx| {
-                                        let _ = this.update(cx, |this, cx| this.set_auth(auth, window, cx));
+                                    &[(false, Some(Icon::Lock), "密码".into()), (true, Some(Icon::KeyRound), "私钥".into())],
+                                    self.auth != AuthKind::Password,
+                                    move |use_key, _, cx| {
+                                        let _ = this.update(cx, |this, cx| this.set_use_key(use_key, cx));
                                     },
                                 )),
                             )
                             .map(|d| match self.auth {
-                                AuthKind::Auto => d.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                        .child("依次尝试服务器免认证、SSH Agent 和私钥文件，私钥按 ~/.ssh/config 为这台主机配的来，没配就用 ~/.ssh 里的默认私钥。"),
-                                ),
-                                AuthKind::Key => {
-                                    d.child(
+                                AuthKind::Password => d.child(kit::text_field(self.input(Field::Password), self.focused == Some(Field::Password))),
+                                auth => d
+                                    .child(
                                         div()
                                             .flex()
                                             .flex_col()
-                                            .gap(px(6.))
-                                            .child(kit::field_label("私钥文件"))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .gap_2()
-                                                    .child(div().flex_1().min_w_0().child(kit::text_field(self.input(Field::PrivateKey), self.focused == Some(Field::PrivateKey))))
-                                                    .child(
-                                                        kit::labeled_button("browse-key", Variant::Outline, Some(Icon::FolderOpen), "浏览")
-                                                            .on_click(cx.listener(|this, _, window, cx| this.browse_key(window, cx))),
-                                                    ),
-                                            )
-                                            .when_some(self.key_choices(cx), |d, choices| d.child(choices)),
+                                            .gap(px(8.))
+                                            .child(self.key_choices(cx))
+                                            .map(|d| {
+                                                if auth == AuthKind::Auto {
+                                                    d.child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(
+                                                        "依次尝试 SSH Agent 和 ~/.ssh 里的私钥，遵循 ~/.ssh/config",
+                                                    ))
+                                                } else {
+                                                    d.child(
+                                                        div()
+                                                            .flex()
+                                                            .gap_2()
+                                                            .child(div().flex_1().min_w_0().child(kit::text_field(self.input(Field::PrivateKey), self.focused == Some(Field::PrivateKey))))
+                                                            .child(
+                                                                kit::labeled_button("browse-key", Variant::Outline, Some(Icon::FolderOpen), "浏览")
+                                                                    .on_click(cx.listener(|this, _, window, cx| this.browse_key(window, cx))),
+                                                            ),
+                                                    )
+                                                }
+                                            }),
                                     )
-                                    .child(self.field("私钥密码", Some("（可选）"), Field::Passphrase))
-                                }
-                                AuthKind::Password => d.child(self.field("密码", None, Field::Password)),
+                                    .when(auth == AuthKind::Key, |d| d.child(kit::text_field(self.input(Field::Passphrase), self.focused == Some(Field::Passphrase)))),
                             })
                             .when(self.auth != AuthKind::Auto, |d| d.child(
                                 div()
@@ -369,13 +356,12 @@ impl Render for ConnectionDialog {
                                         div()
                                             .id("save-password-label")
                                             .cursor_pointer()
-                                            .child("保存密码")
+                                            .child(if self.auth == AuthKind::Key { "保存私钥密码" } else { "保存密码" })
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.save_password = !this.save_password;
                                                 cx.notify();
                                             })),
-                                    )
-                                    .child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("· AES 加密保存在本机")),
+                                    ),
                             ))
                             .when_some(self.error.clone(), |d, error| d.child(div().text_sm().text_color(theme::color(ui::DESTRUCTIVE)).child(error))),
                     ),
@@ -383,14 +369,30 @@ impl Render for ConnectionDialog {
             .child(
                 kit::modal_footer()
                     .child(
-                        kit::labeled_button("connection-cancel", Variant::Outline, Some(Icon::X), "取消")
+                        kit::labeled_button("connection-cancel", Variant::Outline, None, "取消")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectionDialogEvent::Cancel))),
                     )
                     .child(
-                        kit::labeled_button("connection-submit", Variant::Primary, Some(if editing { Icon::Save } else { Icon::ArrowRight }), if editing { "保存" } else { "连接" })
+                        kit::labeled_button("connection-submit", Variant::Primary, None, if editing { "保存" } else { "连接" })
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
             );
         kit::modal("connection-dialog", 520., body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_mode_defaults_to_automatic_unless_a_file_was_chosen() {
+        assert_eq!(switch_auth(AuthKind::Password, true, false), AuthKind::Auto);
+        assert_eq!(switch_auth(AuthKind::Password, true, true), AuthKind::Key);
+        // 已经在私钥里：点「私钥」不改选法
+        assert_eq!(switch_auth(AuthKind::Key, true, true), AuthKind::Key);
+        assert_eq!(switch_auth(AuthKind::Auto, true, true), AuthKind::Auto);
+        assert_eq!(switch_auth(AuthKind::Auto, false, false), AuthKind::Password);
+        assert_eq!(switch_auth(AuthKind::Key, false, true), AuthKind::Password);
     }
 }

@@ -238,6 +238,14 @@ pub(crate) async fn do_handshake(
     Ok(Arc::new(handle))
 }
 
+/// 私钥路径可以写成 `~/.ssh/id_ed25519`（界面里这样存，短，换台机器也能用）。
+pub(crate) fn expand_home(path: &str) -> std::path::PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+        None => std::path::PathBuf::from(path),
+    }
+}
+
 /// TCP + SSH 握手（含主机密钥核对），还没认证。
 pub(crate) async fn connect_unauthenticated(
     host: &str,
@@ -273,7 +281,7 @@ async fn authenticate(
             let pem = if pk.trim_start().starts_with("-----BEGIN") {
                 pk.to_string()
             } else {
-                tokio::fs::read_to_string(pk)
+                tokio::fs::read_to_string(expand_home(pk))
                     .await
                     .map_err(|e| AppError::Ssh(format!("read key file {pk}: {e}")))?
             };
@@ -667,7 +675,15 @@ impl TerminalWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_transient_connect_error, TerminalWindow, GRANT_BATCH, TERMINAL_WINDOW};
+    use super::{expand_home, is_transient_connect_error, TerminalWindow, GRANT_BATCH, TERMINAL_WINDOW};
+
+    #[test]
+    fn key_paths_may_start_from_home() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_home("~/.ssh/id_ed25519"), home.join(".ssh/id_ed25519"));
+        assert_eq!(expand_home("/opt/keys/deploy"), std::path::PathBuf::from("/opt/keys/deploy"));
+        assert_eq!(expand_home("~user/key"), std::path::PathBuf::from("~user/key"), "别人的家目录不展开");
+    }
     use std::time::Duration;
 
     /// 服务端此刻还能在终端通道上发多少：初始窗口 + 已补 − 已收。

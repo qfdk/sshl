@@ -10,7 +10,6 @@ mod screen;
 mod settings;
 mod settings_dialog;
 mod sidebar;
-mod ssh_keys;
 mod terminal;
 mod theme;
 mod topbar;

@@ -28,7 +28,8 @@ pub struct Plan {
     pub identities_only: bool,
 }
 
-const DEFAULT_KEYS: [&str; 3] = ["id_ed25519", "id_ecdsa", "id_rsa"];
+/// 同 OpenSSH 没配 IdentityFile 时的顺序（`ssh -G` 列出的，去掉用不了的 FIDO / XMSS）。
+const DEFAULT_KEYS: [&str; 3] = ["id_rsa", "id_ecdsa", "id_ed25519"];
 
 fn default_plan(home: &Path) -> Plan {
     Plan { files: DEFAULT_KEYS.iter().map(|name| home.join(".ssh").join(name)).collect(), agent: AgentSource::Env, identities_only: false }
@@ -356,7 +357,7 @@ mod tests {
         let home = Path::new("/Users/me");
         let plan = parse_ssh_g("user me\nidentitiesonly no\n", home, "h", "me");
         assert_eq!(plan, default_plan(home));
-        assert_eq!(plan.files[0], PathBuf::from("/Users/me/.ssh/id_ed25519"));
+        assert_eq!(plan.files, ["id_rsa", "id_ecdsa", "id_ed25519"].map(|k| PathBuf::from(format!("/Users/me/.ssh/{k}"))));
         assert_eq!(parse_ssh_g("identityagent none\n", home, "h", "me").agent, AgentSource::Disabled);
         assert_eq!(parse_ssh_g("identityagent SSH_AUTH_SOCK\n", home, "h", "me").agent, AgentSource::Env);
     }
