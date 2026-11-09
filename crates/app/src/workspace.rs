@@ -122,6 +122,8 @@ pub struct Workspace {
     pub(crate) fill_menu: Option<FillMenu>,
     pub(crate) fill_feedback: bool,
     fill_feedback_task: Option<Task<()>>,
+    /// 终端界面右下角显示的传输进度（0–100，说明）。
+    transfer_shown: Option<(u32, String)>,
     /// 后台探活中的会话：会话 id → 连接 id。用户在探活期间主动断开会移除它，借此区分「连接失效该重连」和「用户自己断开」。
     revalidating: HashMap<String, String>,
     connection_dialog: Option<Entity<ConnectionDialog>>,
@@ -153,6 +155,16 @@ impl Workspace {
                 _ => {}
             }),
             cx.observe(&prompts, |_, _, cx| cx.notify()),
+            // 在终端界面时也显示传输进度（从终端拖文件上传）：只在进度真有变化时重画
+            cx.observe(&file_manager, |this: &mut Self, files, cx| {
+                let shown = files.read(cx).transfer_status().map(|s| (s.progress, s.info.clone()));
+                if shown != this.transfer_shown {
+                    this.transfer_shown = shown;
+                    if this.main_tab == MainTab::Terminal {
+                        cx.notify();
+                    }
+                }
+            }),
         ];
         let mut this = Self {
             connections: Vec::new(),
@@ -173,6 +185,7 @@ impl Workspace {
             fill_menu: None,
             fill_feedback: false,
             fill_feedback_task: None,
+            transfer_shown: None,
             revalidating: HashMap::new(),
             connection_dialog: None,
             settings_dialog: None,
@@ -348,6 +361,10 @@ impl Workspace {
                 }
             }
             TerminalEvent::PasswordPrompt => cx.notify(),
+            TerminalEvent::FilesDropped(paths) if self.active_session().is_some_and(|s| &s.view == view) => {
+                let paths = paths.clone();
+                self.file_manager.update(cx, |files, cx| files.upload_to_terminal_cwd(paths, window, cx));
+            }
             _ => {}
         }
     }
@@ -752,6 +769,35 @@ impl ConnectionForm {
     }
 }
 
+/// 终端界面右下角的传输进度（从终端拖文件上传时，不用切到文件管理也看得到）。
+fn transfer_toast(progress: u32, info: String) -> impl IntoElement {
+    div()
+        .absolute()
+        .right(px(12.))
+        .bottom(px(12.))
+        .w(px(360.))
+        .px_3()
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme::color(ui::BORDER))
+        .bg(theme::color(ui::CARD))
+        .shadow_lg()
+        .text_size(px(12.))
+        .child(div().truncate().child(info))
+        .child(
+            div()
+                .h(px(4.))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(theme::alpha(ui::PRIMARY, 0.2))
+                .child(div().h_full().w(gpui::relative(progress.min(100) as f32 / 100.)).bg(theme::color(ui::PRIMARY))),
+        )
+}
+
 /// 透明标题栏下的拖动区：按住拖动窗口，双击缩放（同系统标题栏）。
 pub fn drag_region(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
     div().id(id).on_mouse_down(MouseButton::Left, |event, window, _| {
@@ -835,7 +881,9 @@ impl Render for Workspace {
                                         .size_full(),
                                     )
                                     .map(|area| match (terminal, self.main_tab) {
-                                        (Some(view), MainTab::Terminal) => area.child(div().absolute().size_full().child(view)),
+                                        (Some(view), MainTab::Terminal) => area
+                                            .child(div().absolute().size_full().child(view))
+                                            .when_some(self.transfer_shown.clone(), |area, (progress, info)| area.child(transfer_toast(progress, info))),
                                         (Some(_), MainTab::Files) => area.child(div().absolute().size_full().child(self.file_manager.clone())),
                                         (None, _) => area.child(
                                             div()

@@ -11,7 +11,7 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
     App, BorderStyle, Bounds, BoxShadow, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
+    DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
     Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
     StrikethroughStyle, Style, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
@@ -100,6 +100,8 @@ pub enum TerminalEvent {
     Failed(String),
     /// 用户在主机身份确认框里取消了：不连，也不用再报错。
     Declined,
+    /// 从 Finder 拖到终端上的文件（本地路径），由工作区传到终端当前目录。
+    FilesDropped(Vec<String>),
     Closed,
     /// 光标行出现 / 离开密码提示（当前状态见 `password_prompt()`）。
     PasswordPrompt,
@@ -127,6 +129,31 @@ impl TerminalSink for Sink {
 }
 
 static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+
+/// 拖文件到终端上时盖在上面的提示。
+fn drop_hint() -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(CARD_RADIUS))
+        .border_2()
+        .border_color(theme::color(theme::ui::PRIMARY))
+        .bg(theme::alpha(theme::ui::PRIMARY, 0.12))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .px_4()
+                .py_2()
+                .rounded(px(10.))
+                .bg(theme::color(theme::ui::CARD))
+                .text_color(theme::color(theme::ui::FOREGROUND))
+                .text_size(px(14.))
+                .shadow_md()
+                .child("松开上传到终端当前目录"),
+        )
+}
 
 /// 主机身份确认：后端握手时问到这里，在界面线程弹应用内确认框，答案送回去。
 fn host_key_prompt(window: &mut Window, cx: &mut Context<TerminalView>) -> HostKeyPrompt {
@@ -187,6 +214,8 @@ pub struct TerminalView {
     /// 输入法正在组的字（还没上屏）。
     marked: Option<String>,
     password_prompt: bool,
+    /// 正从 Finder 拖文件到终端上方（画「松开上传」的提示）。
+    drop_hover: bool,
     scroll_remainder: f32,
     _tasks: Vec<Task<()>>,
 }
@@ -316,6 +345,7 @@ impl TerminalView {
             blink_on: true,
             marked: None,
             password_prompt: false,
+            drop_hover: false,
             scroll_remainder: 0.0,
             _tasks: vec![connect_task, events_task, blink_task],
         }
@@ -446,7 +476,12 @@ impl TerminalView {
         }
     }
 
-    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // 拖到窗口外或取消了拖动：收起「松开上传」提示
+        if self.drop_hover && !cx.has_active_drag() {
+            self.drop_hover = false;
+            cx.notify();
+        }
         if !self.reports_mouse(&event.modifiers) && event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -503,6 +538,7 @@ impl Render for TerminalView {
             self.metrics = Some(metrics.clone());
         }
         let focused = self.focus.is_focused(window) && window.is_window_active();
+        let connected = matches!(self.status, Status::Connected { .. });
         div()
             .id("terminal")
             .key_context(CONTEXT)
@@ -525,6 +561,21 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_scroll(cx.listener(Self::scroll))
+            .when(connected, |d| {
+                d.on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    let inside = event.bounds.contains(&event.event.position);
+                    if this.drop_hover != inside {
+                        this.drop_hover = inside;
+                        cx.notify();
+                    }
+                }))
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    this.drop_hover = false;
+                    let paths = paths.paths().iter().map(|p| p.to_string_lossy().to_string()).collect();
+                    cx.emit(TerminalEvent::FilesDropped(paths));
+                    cx.notify();
+                }))
+            })
             .child(TerminalElement {
                 view: cx.entity(),
                 frame: self.frame.clone(),
@@ -533,6 +584,7 @@ impl Render for TerminalView {
                 cursor_on: self.blink_on || !focused,
                 marked: self.marked.clone(),
             })
+            .when(self.drop_hover, |d| d.child(drop_hint()))
     }
 }
 

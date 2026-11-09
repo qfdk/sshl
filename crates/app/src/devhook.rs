@@ -118,6 +118,35 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: to, modifiers: Modifiers::none(), click_count: 1 }), cx);
             Ok(())
         }
+        // drop X Y PATH... ：模拟从 Finder 拖文件进来（进入 → 移动 → 松开），走 GPUI 完整的拖放分发
+        "drop" => {
+            let mut parts = rest.split_whitespace();
+            let (Some(x), Some(y)) = (parts.next().and_then(|v| v.parse::<f32>().ok()), parts.next().and_then(|v| v.parse::<f32>().ok())) else {
+                return Err("drop X Y PATH...".into());
+            };
+            let paths: Vec<std::path::PathBuf> = parts.map(std::path::PathBuf::from).collect();
+            if paths.is_empty() {
+                return Err("drop X Y PATH...".into());
+            }
+            let at = point(px(x), px(y));
+            let paths = gpui::ExternalPaths(paths.into_iter().collect());
+            window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Entered { position: at, paths }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position: at }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position: at }), cx);
+            Ok(())
+        }
+        // hover X Y PATH... ：拖着文件停在某处不松手（看「松开上传」提示）
+        "hover" => {
+            let mut parts = rest.split_whitespace();
+            let (Some(x), Some(y)) = (parts.next().and_then(|v| v.parse::<f32>().ok()), parts.next().and_then(|v| v.parse::<f32>().ok())) else {
+                return Err("hover X Y PATH...".into());
+            };
+            let paths = gpui::ExternalPaths(parts.map(std::path::PathBuf::from).collect());
+            let at = point(px(x), px(y));
+            window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Entered { position: at, paths }), cx);
+            window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position: at }), cx);
+            Ok(())
+        }
         "selection" => {
             window.dispatch_action(Box::new(crate::terminal::view::LogSelection), cx);
             Ok(())

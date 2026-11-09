@@ -1200,6 +1200,40 @@ impl FileManager {
         .detach();
     }
 
+    /// 文件拖到终端上：传到终端此刻所在的目录（读不到就传到文件管理的远程目录，再不行传到主目录）。
+    pub fn upload_to_terminal_cwd(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else { return };
+        let fallback = self.remote.path.clone();
+        let sid = session.session_id.clone();
+        let directory = backend::spawn(async move {
+            let state = &backend::get().state;
+            match sftp::file_terminal_cwd(state, sid.clone()).await.ok().flatten() {
+                Some(cwd) => Some(cwd),
+                None if !fallback.is_empty() => Some(fallback),
+                None => sftp::file_remote_home(state, sid).await.ok().filter(|home| home.starts_with('/')),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let directory = directory.await.flatten();
+            let _ = this.update_in(cx, |this, window, cx| {
+                // 等目录期间切走了会话：不往别的服务器传
+                if this.session_id().as_deref() != Some(session.session_id.as_str()) {
+                    return;
+                }
+                match directory {
+                    Some(directory) => this.upload_paths(paths, directory, window, cx),
+                    None => prompts::alert_later(window, cx, Options::new("上传失败").message("读不到终端当前目录，也拿不到远程主目录。")),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 正在进行或刚结束的传输（终端界面上也要看得到进度）。
+    pub fn transfer_status(&self) -> Option<&TransferStatus> {
+        self.status.active.then_some(&self.status)
+    }
+
     // ---------------------------------------------------------------- 远程目录收藏
 
     fn reload_bookmarks(&mut self) {
@@ -2251,9 +2285,17 @@ impl Op {
     }
 }
 
+/// 传完的提示写明落在哪个目录：从终端拖文件上传时，看这一句就知道传到哪了。
+fn finished_message(op: Op, destination: &str) -> String {
+    let side = if op.is_upload() { PaneKind::Remote } else { PaneKind::Local };
+    let place = if op.is_upload() { "已上传到" } else { "已下载到" };
+    format!("{} {place} {}", basename(destination), parent_path(destination, side))
+}
+
 async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContext, session: &FileSession, op: Op, source: String, destination: String) -> Outcome {
     let verb = op.verb();
     let name = basename(&source);
+    let done = finished_message(op, &destination);
     let started = this.update(cx, |this, cx| {
         this.transfers += 1;
         this.hide_status = None;
@@ -2280,7 +2322,7 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
     let _ = this.update_in(cx, |this, window, cx| {
         match &finished {
             Outcome::Ok => {
-                this.status = TransferStatus::show(100, format!("{verb}完成"));
+                this.status = TransferStatus::show(100, done);
                 this.transfer_finished(op, window, cx);
             }
             // 用户在 sudo 确认或密码框里取消：不算失败，不弹报错
@@ -2414,4 +2456,16 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
         }
     });
     async move { listing.await.unwrap_or_else(|| Err("获取文件列表失败".into())) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Op, finished_message};
+
+    #[test]
+    fn finished_transfers_say_where_the_file_went() {
+        assert_eq!(finished_message(Op::UploadFile, "/var/www/html/a.zip"), "a.zip 已上传到 /var/www/html");
+        assert_eq!(finished_message(Op::UploadDir, "/srv/app"), "app 已上传到 /srv");
+        assert_eq!(finished_message(Op::DownloadFile, "/Users/me/Downloads/log.txt"), "log.txt 已下载到 /Users/me/Downloads");
+    }
 }
