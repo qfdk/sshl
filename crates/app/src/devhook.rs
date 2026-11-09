@@ -104,6 +104,15 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             }
             Ok(())
         }
+        // rclick X Y：右键点击
+        "rclick" => {
+            let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+            let [x, y] = n.as_slice() else { return Err("rclick X Y".into()) };
+            let at = point(px(*x), px(*y));
+            window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Right, position: at, modifiers: Modifiers::none(), click_count: 1, first_mouse: false }), cx);
+            window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Right, position: at, modifiers: Modifiers::none(), click_count: 1 }), cx);
+            Ok(())
+        }
         "drag" => {
             let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
             let [x1, y1, x2, y2] = n.as_slice() else { return Err("drag X1 Y1 X2 Y2".into()) };

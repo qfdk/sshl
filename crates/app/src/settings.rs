@@ -20,6 +20,10 @@ pub struct Settings {
     pub local_pane_flex: Option<f32>,
     /// 文件管理显示点开头的隐藏文件（⌘⇧.）。
     pub show_hidden_files: bool,
+    /// 终端里拖选完自动复制。
+    pub copy_on_select: bool,
+    /// 终端里右键直接粘贴（程序在接收鼠标时除外）。
+    pub right_click_paste: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +35,8 @@ impl Default for Settings {
             sidebar_collapsed: false,
             local_pane_flex: None,
             show_hidden_files: false,
+            copy_on_select: false,
+            right_click_paste: false,
         }
     }
 }

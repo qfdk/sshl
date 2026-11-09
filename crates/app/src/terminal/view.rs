@@ -392,12 +392,21 @@ impl TerminalView {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_clipboard(cx);
+    }
+
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.input(Input::Paste(text));
         }
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selection(cx);
+    }
+
+    /// 选中的文字放进剪贴板；没选中就不动剪贴板。
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
         let (tx, rx) = futures::channel::oneshot::channel();
         self.handle.send(Input::Copy(tx));
         cx.spawn(async move |_, cx| {
@@ -457,6 +466,11 @@ impl TerminalView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // 右键粘贴（Xshell / PuTTY 习惯）；程序在接收鼠标时右键还是交给它
+        if event.button == MouseButton::Right && !self.reports_mouse(&event.modifiers) && crate::settings::get(cx).right_click_paste {
+            self.paste_clipboard(cx);
+            return;
+        }
         if event.button != MouseButton::Left && !self.reports_mouse(&event.modifiers) {
             return;
         }
@@ -466,13 +480,17 @@ impl TerminalView {
         }
     }
 
-    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if event.button != MouseButton::Left && !self.reports_mouse(&event.modifiers) {
             return;
         }
         if let Some(button) = Self::button(event.button) {
             let (x, y) = self.mouse_position(event.position);
             self.input(Input::Mouse(MouseInput { action: MouseAction::Release(button), x, y, mods: Self::mods(&event.modifiers) }));
+        }
+        // 选中即复制：松开时选区已定（终端线程按顺序处理，复制排在松开之后）
+        if event.button == MouseButton::Left && !self.reports_mouse(&event.modifiers) && crate::settings::get(cx).copy_on_select {
+            self.copy_selection(cx);
         }
     }
 

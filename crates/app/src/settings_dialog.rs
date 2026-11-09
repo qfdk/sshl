@@ -200,8 +200,15 @@ impl SettingsDialog {
         // 预览过的字体 / 字号没保存就换回去
         let snapshot = self.snapshot.clone();
         let current = settings::get(cx).clone();
-        if current.font_size != snapshot.font_size || current.font_family != snapshot.font_family {
-            settings::replace(cx, Settings { font_size: snapshot.font_size, font_family: snapshot.font_family, ..current });
+        let restored = Settings {
+            font_size: snapshot.font_size,
+            font_family: snapshot.font_family,
+            copy_on_select: snapshot.copy_on_select,
+            right_click_paste: snapshot.right_click_paste,
+            ..current.clone()
+        };
+        if restored != current {
+            settings::replace(cx, restored);
         }
         cx.emit(SettingsDialogEvent::Close);
     }
@@ -239,8 +246,11 @@ impl SettingsDialog {
         // 只回到默认值并刷新预览，不落盘：和其他改动一样要按保存才生效，误点还能直接关掉
         self.custom_mode = false;
         settings::preview(cx, |s| {
+            let defaults = Settings::default();
             s.font_size = DEFAULT_FONT_SIZE;
             s.font_family = DEFAULT_FONT_FAMILY.into();
+            s.copy_on_select = defaults.copy_on_select;
+            s.right_click_paste = defaults.right_click_paste;
         });
         cx.notify();
     }
@@ -392,7 +402,7 @@ impl Render for SettingsDialog {
                             .rounded_bl(px(15.))
                             .border_r_1()
                             .border_color(theme::color(ui::BORDER))
-                            .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, "字体", self.tab == Tab::Font, cx))
+                            .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, "终端", self.tab == Tab::Font, cx))
                             .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, "分组管理", self.tab == Tab::Groups, cx)),
                     )
                     .child(div().flex_1().min_w_0().p_5().child(panel)),
@@ -539,6 +549,14 @@ impl SettingsDialog {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(self.toggle_row("copy-on-select", "选中即复制", "拖选文字后自动复制到剪贴板", current.copy_on_select, |s| &mut s.copy_on_select, cx))
+                    .child(self.toggle_row("right-click-paste", "右键粘贴", "在终端里点右键直接粘贴（程序接收鼠标时除外）", current.right_click_paste, |s| &mut s.right_click_paste, cx)),
+            )
+            .child(
+                div()
                     .pt_3()
                     .flex()
                     .justify_between()
@@ -548,6 +566,36 @@ impl SettingsDialog {
                     .child(kit::labeled_button("settings-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
+    }
+
+    /// 一行开关：勾选框 + 名称 + 灰色说明。和字体一样先预览，保存才写盘。
+    fn toggle_row(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        hint: &'static str,
+        checked: bool,
+        field: fn(&mut Settings) -> &mut bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .role(Role::CheckBox)
+            .aria_label(label)
+            .child(kit::checkbox((id, 0usize), checked))
+            .child(div().text_sm().child(label))
+            .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                settings::preview(cx, |s| {
+                    let value = field(s);
+                    *value = !*value;
+                });
+                cx.notify();
+            }))
     }
 
     fn groups_panel(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
