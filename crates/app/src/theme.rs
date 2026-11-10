@@ -28,6 +28,12 @@ pub mod ui {
     pub const DESTRUCTIVE: u32 = 0xe7000b;
     pub const SUCCESS: u32 = 0x11b981;
     pub const WARNING: u32 = 0xd97706;
+    /// 成功 / 警告色做文字时用深一号的（原色在白底上对比度不够）。
+    pub const SUCCESS_FOREGROUND: u32 = 0x047857;
+    pub const WARNING_FOREGROUND: u32 = 0xb45309;
+    /// 「系统」页区分指标用：内存紫、磁盘青绿。
+    pub const VIOLET: u32 = 0x7c3aed;
+    pub const TEAL: u32 = 0x0f766e;
     pub const BORDER: u32 = 0xe2e8f0;
     pub const RING: u32 = 0x5695d7;
 }

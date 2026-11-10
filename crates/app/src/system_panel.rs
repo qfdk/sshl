@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role,
-    ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, Task, UniformListScrollHandle, Window, anchored,
-    deferred, div, prelude::FluentBuilder, px, uniform_list,
+    HighlightStyle, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role,
+    ScrollStrategy, SharedString, StatefulInteractiveElement, StyledText, Styled, Task, UniformListScrollHandle, Window,
+    anchored, deferred, div, prelude::FluentBuilder, px, uniform_list,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::server_info::{self, Overview, PortInfo, ProcessInfo};
@@ -25,6 +25,10 @@ use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const ROW_HEIGHT: f32 = 32.;
 const MONO: &str = "Menlo";
+const CPU_WIDTH: f32 = 84.;
+const MEMORY_WIDTH: f32 = 96.;
+const ADDRESS_WIDTH: f32 = 250.;
+const STATUS_WIDTH: f32 = 104.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -186,6 +190,65 @@ pub fn service_status(service: &ServiceInfo) -> (&'static str, u32) {
         ("reloading", _) => ("重载中", ui::WARNING),
         _ => ("已停止", ui::MUTED_FOREGROUND),
     }
+}
+
+/// 用量比例 → 颜色：≥ 90% 红、≥ 75% 橙，其余用这项指标自己的颜色。
+pub fn usage_color(ratio: f32, base: u32) -> u32 {
+    if ratio >= 0.9 {
+        ui::DESTRUCTIVE
+    } else if ratio >= 0.75 {
+        ui::WARNING
+    } else {
+        base
+    }
+}
+
+/// 进程 CPU%（一个核满载是 100）→ 颜色：≥ 50 红、≥ 20 橙，其余绿。
+pub fn cpu_color(cpu: f32) -> u32 {
+    if cpu >= 50. {
+        ui::DESTRUCTIVE
+    } else if cpu >= 20. {
+        ui::WARNING
+    } else {
+        ui::SUCCESS
+    }
+}
+
+/// 状态色做文字时用的颜色（绿、橙换深一号）。
+pub fn readable(color: u32) -> u32 {
+    match color {
+        ui::SUCCESS => ui::SUCCESS_FOREGROUND,
+        ui::WARNING => ui::WARNING_FOREGROUND,
+        other => other,
+    }
+}
+
+/// 监听地址的范围：所有地址（对外开放）、只有本机、某个网卡。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressScope {
+    All,
+    Loopback,
+    Specific,
+}
+
+pub fn address_scope(address: &str) -> AddressScope {
+    let address = address.trim_start_matches('[').trim_end_matches(']');
+    match address {
+        "*" | "0.0.0.0" | "::" => AddressScope::All,
+        "::1" | "localhost" => AddressScope::Loopback,
+        a if a.starts_with("127.") => AddressScope::Loopback,
+        _ => AddressScope::Specific,
+    }
+}
+
+/// 命令行拆成 目录 / 程序名 / 参数（程序名深色、其余淡色）。内核线程（[kworker/…]）整个当名字。
+pub fn command_parts(command: &str) -> (&str, &str, &str) {
+    if command.starts_with('[') {
+        return ("", command, "");
+    }
+    let (first, args) = command.split_at(command.find(char::is_whitespace).unwrap_or(command.len()));
+    let (dir, name) = first.split_at(first.rfind('/').map_or(0, |i| i + 1));
+    if name.is_empty() { ("", first, args) } else { (dir, name, args) }
 }
 
 /// 读列表失败的说明：没权限时说怎么办。
@@ -461,7 +524,8 @@ impl SystemPanel {
 
     fn overview_cards(&self) -> impl IntoElement {
         let o = self.overview.clone().unwrap_or_default();
-        let card = |title: &'static str, value: String, sub: Option<String>, ratio: Option<f32>| {
+        // 每项指标一个颜色（图标底色、进度条）；用量高了进度条和百分比变橙 / 红
+        let card = |glyph: Icon, color: u32, title: &'static str, value: String, sub: Option<String>, ratio: Option<f32>| {
             div()
                 .flex_1()
                 .min_w_0()
@@ -469,12 +533,40 @@ impl SystemPanel {
                 .py_3()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(px(8.))
                 .rounded(px(12.))
                 .border_1()
                 .border_color(theme::color(ui::BORDER))
                 .bg(theme::color(ui::CARD))
-                .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(title))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(26.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(7.))
+                                .bg(theme::alpha(color, 0.12))
+                                .text_color(theme::color(color))
+                                .child(kit::icon_sized(glyph, 15.)),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(title))
+                        .when_some(ratio, |d, ratio| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::color(readable(usage_color(ratio, color))))
+                                    .child(format!("{:.0}%", ratio * 100.)),
+                            )
+                        }),
+                )
                 .child(
                     div()
                         .flex()
@@ -484,7 +576,7 @@ impl SystemPanel {
                         .when_some(sub, |d, sub| d.child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).truncate().child(sub))),
                 )
                 .when_some(ratio, |d, ratio| {
-                    let color = if ratio >= 0.9 { ui::DESTRUCTIVE } else if ratio >= 0.75 { ui::WARNING } else { ui::PRIMARY };
+                    let color = usage_color(ratio, color);
                     d.child(
                         div()
                             .h(px(4.))
@@ -516,10 +608,10 @@ impl SystemPanel {
             .flex()
             .gap_3()
             .flex_shrink_0()
-            .child(card("负载（1 / 5 / 15 分钟）", load, cpus, load_ratio))
-            .child(card("内存已用", memory, memory_sub, memory_ratio))
-            .child(card("磁盘已用", disk, disk_sub, disk_ratio))
-            .child(card("已运行", uptime, None, None))
+            .child(card(Icon::Gauge, ui::PRIMARY, "负载（1 / 5 / 15 分钟）", load, cpus, load_ratio))
+            .child(card(Icon::MemoryStick, ui::VIOLET, "内存已用", memory, memory_sub, memory_ratio))
+            .child(card(Icon::HardDrive, ui::TEAL, "磁盘已用", disk, disk_sub, disk_ratio))
+            .child(card(Icon::Clock, ui::SUCCESS, "已运行", uptime, None, None))
     }
 
     fn header_cell(&self, label: &'static str, key: Option<SortKey>, width: Option<f32>, right: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -594,21 +686,22 @@ impl SystemPanel {
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.open_menu(event.position, MenuTarget::Process { pid, name: menu_name.clone(), command: Some(menu_command.clone()) }, cx);
                     }))
-                    .child(div().w(px(76.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).child(p.pid.to_string()))
+                    .child(div().w(px(76.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).text_color(theme::color(ui::MUTED_FOREGROUND)).child(p.pid.to_string()))
                     .child(div().w(px(110.)).flex_shrink_0().px_3().truncate().child(p.user.clone()))
                     .child(
-                        div()
-                            .w(px(70.))
-                            .flex_shrink_0()
-                            .px_3()
-                            .flex()
-                            .justify_end()
-                            .font_family(MONO)
-                            .when(p.cpu >= 50., |d| d.text_color(theme::color(ui::DESTRUCTIVE)).font_weight(FontWeight::SEMIBOLD))
-                            .child(format!("{:.1}", p.cpu)),
+                        // 真在用 CPU 的才标出来（同服务状态的小标签：低绿、中橙、高红），0.0 的淡色
+                        div().w(px(CPU_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).map(|d| {
+                            let value = format!("{:.1}", p.cpu);
+                            if p.cpu >= 0.5 {
+                                let color = cpu_color(p.cpu);
+                                d.child(pill(readable(color), theme::alpha(color, 0.12)).child(value))
+                            } else {
+                                d.text_color(theme::color(ui::MUTED_FOREGROUND)).child(value)
+                            }
+                        }),
                     )
-                    .child(div().w(px(90.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).child(format_bytes(p.rss_kb * 1024)))
-                    .child(div().flex_1().min_w_0().px_3().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(p.command.clone()))
+                    .child(div().w(px(MEMORY_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).child(format_bytes(p.rss_kb * 1024)))
+                    .child(div().flex_1().min_w_0().px_3().truncate().font_family(MONO).child(command_text(&p.command)))
                     .child(div().w(px(64.)).flex_shrink_0().flex().justify_center().child(self.kill_button(("kill-process", ix), pid, name, cx)))
                     .into_any_element()
             })
@@ -641,9 +734,39 @@ impl SystemPanel {
                             this.open_menu(event.position, MenuTarget::Process { pid, name: menu_name.clone(), command: None }, cx);
                         }))
                     })
-                    .child(div().w(px(64.)).flex_shrink_0().px_3().text_color(theme::color(ui::MUTED_FOREGROUND)).child(p.proto.to_uppercase()))
-                    .child(div().w(px(86.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).font_weight(FontWeight::SEMIBOLD).child(p.port.to_string()))
-                    .child(div().w(px(180.)).flex_shrink_0().px_3().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(p.address.clone()))
+                    .child(div().w(px(64.)).flex_shrink_0().px_3().flex().child(if p.proto.eq_ignore_ascii_case("udp") {
+                        pill(ui::VIOLET, theme::alpha(ui::VIOLET, 0.1)).child(p.proto.to_uppercase())
+                    } else {
+                        pill(ui::PRIMARY, theme::color(ui::ACCENT)).child(p.proto.to_uppercase())
+                    }))
+                    .child(
+                        div()
+                            .w(px(86.))
+                            .flex_shrink_0()
+                            .px_3()
+                            .flex()
+                            .justify_end()
+                            .font_family(MONO)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::color(ui::PRIMARY))
+                            .child(p.port.to_string()),
+                    )
+                    .child(
+                        div()
+                            .w(px(ADDRESS_WIDTH))
+                            .flex_shrink_0()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().min_w_0().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(p.address.clone()))
+                            .map(|d| match address_scope(&p.address) {
+                                // 所有地址 = 对外开放，橙色提醒；只听本机的灰色
+                                AddressScope::All => d.child(pill(ui::WARNING_FOREGROUND, theme::alpha(ui::WARNING, 0.12)).child("所有地址")),
+                                AddressScope::Loopback => d.child(pill(ui::MUTED_FOREGROUND, theme::color(ui::MUTED)).child("本机")),
+                                AddressScope::Specific => d,
+                            }),
+                    )
                     .child(div().w(px(80.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).child(p.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "—".into())))
                     .child(
                         div()
@@ -735,20 +858,21 @@ impl SystemPanel {
                     .text_size(px(12.))
                     .border_b_1()
                     .border_color(theme::alpha(ui::BORDER, 0.6))
+                    // 失败的服务整行淡红，一眼能看到
+                    .when(color == ui::DESTRUCTIVE, |d| d.bg(theme::alpha(ui::DESTRUCTIVE, 0.05)))
                     .hover(|s| s.bg(theme::color(ui::MUTED)))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.open_menu(event.position, MenuTarget::Service(menu_target.clone()), cx);
                     }))
                     .child(
-                        div()
-                            .w(px(96.))
-                            .flex_shrink_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::color(color)))
-                            .child(div().when(color == ui::DESTRUCTIVE, |d| d.text_color(theme::color(ui::DESTRUCTIVE))).child(status)),
+                        div().w(px(STATUS_WIDTH)).flex_shrink_0().px_3().flex().child(
+                            pill(readable(color), if color == ui::MUTED_FOREGROUND { theme::color(ui::MUTED) } else { theme::alpha(color, 0.12) })
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .child(div().size(px(6.)).rounded_full().bg(theme::color(color)))
+                                .child(status),
+                        ),
                     )
                     .child(div().w(px(220.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
                     .child(div().flex_1().min_w_0().px_3().truncate().text_color(theme::color(ui::MUTED_FOREGROUND)).child(service.description.clone()))
@@ -760,7 +884,7 @@ impl SystemPanel {
                             .justify_center()
                             .text_color(theme::color(ui::MUTED_FOREGROUND))
                             .map(|d| match service.enabled.as_str() {
-                                e if e.starts_with("enabled") => d.child(kit::icon_sized(Icon::Check, 14.).text_color(theme::color(ui::PRIMARY))),
+                                e if e.starts_with("enabled") => d.child(kit::icon_sized(Icon::Check, 14.).text_color(theme::color(ui::SUCCESS_FOREGROUND))),
                                 "masked" => d.child("已屏蔽"),
                                 _ => d,
                             }),
@@ -770,6 +894,32 @@ impl SystemPanel {
             })
             .collect()
     }
+}
+
+/// 带底色的小标签（协议、地址范围、服务状态）。
+fn pill(text: u32, background: gpui::Hsla) -> gpui::Div {
+    div()
+        .flex_shrink_0()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(5.))
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme::color(text))
+        .bg(background)
+}
+
+/// 命令行：程序名深色，目录和参数淡色；内核线程整个淡色。
+fn command_text(command: &str) -> StyledText {
+    let muted = HighlightStyle { color: Some(theme::color(ui::MUTED_FOREGROUND)), ..Default::default() };
+    let (dir, name, _) = command_parts(command);
+    let text = StyledText::new(command.to_string());
+    if command.starts_with('[') {
+        return text.with_highlights([(0..command.len(), muted)]);
+    }
+    let name_style = HighlightStyle { color: Some(theme::color(ui::FOREGROUND)), ..Default::default() };
+    let (start, end) = (dir.len(), dir.len() + name.len());
+    text.with_highlights([(0..start, muted), (start..end, name_style), (end..command.len(), muted)].into_iter().filter(|(range, _)| !range.is_empty()))
 }
 
 /// 命令行 → 进程名（第一个词去掉路径，冒号结尾的如「nginx: worker」保留原样的头一个词）。
@@ -834,8 +984,8 @@ impl Render for SystemPanel {
                 .border_color(theme::color(ui::BORDER))
                 .child(self.header_cell("PID", Some(SortKey::Pid), Some(76.), true, cx))
                 .child(self.header_cell("用户", Some(SortKey::User), Some(110.), false, cx))
-                .child(self.header_cell("CPU%", Some(SortKey::Cpu), Some(70.), true, cx))
-                .child(self.header_cell("内存", Some(SortKey::Memory), Some(90.), true, cx))
+                .child(self.header_cell("CPU%", Some(SortKey::Cpu), Some(CPU_WIDTH), true, cx))
+                .child(self.header_cell("内存", Some(SortKey::Memory), Some(MEMORY_WIDTH), true, cx))
                 .child(self.header_cell("命令", Some(SortKey::Command), None, false, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Ports => div()
@@ -850,7 +1000,7 @@ impl Render for SystemPanel {
                 .border_color(theme::color(ui::BORDER))
                 .child(self.header_cell("协议", None, Some(64.), false, cx))
                 .child(self.header_cell("端口", None, Some(86.), true, cx))
-                .child(self.header_cell("地址", None, Some(180.), false, cx))
+                .child(self.header_cell("地址", None, Some(ADDRESS_WIDTH), false, cx))
                 .child(self.header_cell("PID", None, Some(80.), true, cx))
                 .child(self.header_cell("进程", None, None, false, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
@@ -864,7 +1014,7 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("状态", None, Some(96.), false, cx))
+                .child(self.header_cell("状态", None, Some(STATUS_WIDTH), false, cx))
                 .child(self.header_cell("服务", None, Some(220.), false, cx))
                 .child(self.header_cell("说明", None, None, false, cx))
                 .child(div().w(px(80.)).flex_shrink_0().flex().justify_center().child("开机启动"))
@@ -1069,6 +1219,39 @@ mod tests {
     fn list_errors_explain_missing_permissions() {
         assert!(list_error_message("Failed to list units: Access denied").contains("sudo -i"));
         assert_eq!(list_error_message("boom\n"), "读取失败：boom");
+    }
+
+    #[test]
+    fn colors_carry_meaning() {
+        assert_eq!(usage_color(0.3, ui::VIOLET), ui::VIOLET, "正常时用指标自己的颜色");
+        assert_eq!(usage_color(0.8, ui::VIOLET), ui::WARNING);
+        assert_eq!(usage_color(0.95, ui::VIOLET), ui::DESTRUCTIVE);
+        assert_eq!(cpu_color(0.5), ui::SUCCESS);
+        assert_eq!(cpu_color(25.), ui::WARNING);
+        assert_eq!(cpu_color(180.), ui::DESTRUCTIVE, "多核进程会超过 100");
+        assert_eq!(readable(ui::SUCCESS), ui::SUCCESS_FOREGROUND);
+        assert_eq!(readable(ui::WARNING), ui::WARNING_FOREGROUND);
+        assert_eq!(readable(ui::DESTRUCTIVE), ui::DESTRUCTIVE);
+    }
+
+    #[test]
+    fn listening_addresses_are_told_apart() {
+        for address in ["*", "0.0.0.0", "::", "[::]"] {
+            assert_eq!(address_scope(address), AddressScope::All, "{address}");
+        }
+        for address in ["127.0.0.1", "127.0.0.53", "::1", "[::1]", "localhost"] {
+            assert_eq!(address_scope(address), AddressScope::Loopback, "{address}");
+        }
+        assert_eq!(address_scope("192.168.5.15"), AddressScope::Specific);
+    }
+
+    #[test]
+    fn commands_split_into_directory_name_and_arguments() {
+        assert_eq!(command_parts("/usr/bin/dockerd -H fd://"), ("/usr/bin/", "dockerd", " -H fd://"));
+        assert_eq!(command_parts("/sbin/init"), ("/sbin/", "init", ""));
+        assert_eq!(command_parts("nginx: worker process"), ("", "nginx:", " worker process"));
+        assert_eq!(command_parts("python3 app.py"), ("", "python3", " app.py"));
+        assert_eq!(command_parts("[kworker/u4:0-events_unbound]"), ("", "[kworker/u4:0-events_unbound]", ""), "内核线程整个当名字");
     }
 
     #[test]
