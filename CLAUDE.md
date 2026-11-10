@@ -56,7 +56,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
   （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。
 - **终端外观**：卡片按整行整列贴齐（余下不足一行 / 一列留给外面的浅色背景），四边 4px 内边距；内边距取边缘格子的主色
-  并把整行有底色的边缘行延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。
+  并把整行有底色的边缘行延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
+  不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
   粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。
 - **内置字体**：JetBrainsMono Nerd Font（非 Mono 版，图标是正常大小；Mono 版把图标压成一格，用户嫌不好看）两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
 - **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的

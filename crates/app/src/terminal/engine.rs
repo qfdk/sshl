@@ -181,6 +181,61 @@ struct Engine {
     buf: Vec<u8>,
     text: String,
     focused: bool,
+    blink: BlinkPolicy,
+}
+
+/// 光标闪不闪只听 DECSCUSR（`CSI Ps SP q`）：0 回到默认（闪），1 / 3 / 5 闪，2 / 4 / 6 不闪。
+/// DEC 12 不认：vim / htop / less 退出时发的 cnorm（xterm terminfo 是 `\e[?12l\e[?25h`）会用它关掉闪烁，
+/// 之后光标就一直不闪了。libghostty 里两者是同一个模式位，所以自己记下 DECSCUSR，每片输出之后把模式位设回去。
+/// 状态跨输出切片保留，序列被切成两片也认得出。
+#[derive(Default)]
+struct BlinkPolicy {
+    scan: Scan,
+    param: u16,
+    /// 最后一次 DECSCUSR 要的；None = 没设过或 Ps 0，用默认（闪）。
+    requested: Option<bool>,
+}
+
+#[derive(Default, Clone, Copy)]
+enum Scan {
+    #[default]
+    Ground,
+    Esc,
+    Csi,
+    CsiSpace,
+}
+
+impl BlinkPolicy {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.scan = match (self.scan, byte) {
+                (_, 0x1b) => Scan::Esc,
+                (Scan::Esc, b'[') => {
+                    self.param = 0;
+                    Scan::Csi
+                }
+                (Scan::Csi, b'0'..=b'9') => {
+                    self.param = self.param.saturating_mul(10).saturating_add(u16::from(byte - b'0'));
+                    Scan::Csi
+                }
+                (Scan::Csi, b' ') => Scan::CsiSpace,
+                (Scan::CsiSpace, b'q') => {
+                    match self.param {
+                        0 => self.requested = None,
+                        1 | 3 | 5 => self.requested = Some(true),
+                        2 | 4 | 6 => self.requested = Some(false),
+                        _ => {}
+                    }
+                    Scan::Ground
+                }
+                _ => Scan::Ground,
+            };
+        }
+    }
+
+    fn blinking(&self) -> bool {
+        self.requested.unwrap_or(true)
+    }
 }
 
 impl Engine {
@@ -231,7 +286,15 @@ impl Engine {
             buf: Vec::with_capacity(64),
             text: String::with_capacity(8),
             focused: true,
+            blink: BlinkPolicy::default(),
         })
+    }
+
+    /// 远端输出交给 libghostty 解析；光标闪烁按 `BlinkPolicy` 改回来（不认 DEC 12）。
+    fn write_output(&mut self, bytes: &[u8]) {
+        self.term.vt_write(bytes);
+        self.blink.feed(bytes);
+        let _ = self.term.set_mode(Mode::CURSOR_BLINKING, self.blink.blinking());
     }
 
     fn run(&mut self, rx: Receiver<Input>) {
@@ -279,7 +342,7 @@ impl Engine {
                 if piece.contains(&0x07) {
                     bell = true;
                 }
-                self.term.vt_write(piece);
+                self.write_output(piece);
                 self.unacked = self.unacked.saturating_add(take as u32);
                 budget -= take;
                 offset += take;
@@ -740,5 +803,27 @@ mod tests {
         assert_eq!(cursor_x(&mut engine, &shared, b"\x08\x08"), 3);
         assert_eq!(cursor_x(&mut engine, &shared, b"\x1b[C"), 4);
         assert_eq!(cursor_x(&mut engine, &shared, b"\r"), 0);
+    }
+
+    fn blinking(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> bool {
+        engine.write_output(bytes);
+        engine.publish().unwrap();
+        shared.frame.lock().unwrap().cursor.unwrap().blinking
+    }
+
+    /// 光标默认闪。vim / htop / less 退出时发的 cnorm（xterm 的 terminfo 里是 `\e[?12l\e[?25h`）
+    /// 会用 DEC 12 关掉闪烁，之后光标就一直不闪了——这条不认；程序用 DECSCUSR 明说要什么样的光标才照办。
+    #[test]
+    fn the_cursor_keeps_blinking_after_cnorm_but_follows_decscusr() {
+        let (mut engine, shared) = engine();
+        assert!(blinking(&mut engine, &shared, b"$ "), "刚连上默认闪");
+        assert!(blinking(&mut engine, &shared, b"\x1b[?12l\x1b[?25h"), "cnorm 之后照样闪");
+        assert!(!blinking(&mut engine, &shared, b"\x1b[2 q"), "DECSCUSR 2：不闪的方块");
+        assert!(blinking(&mut engine, &shared, b"\x1b[0 q"), "DECSCUSR 0：回到默认（闪）");
+        assert!(blinking(&mut engine, &shared, b"\x1b[5 q"), "DECSCUSR 5：闪的竖线");
+        // 序列被切在两片输出之间
+        assert!(blinking(&mut engine, &shared, b"\x1b[4"), "还没收完，不变");
+        assert!(!blinking(&mut engine, &shared, b" q"), "DECSCUSR 4（分两片到）：不闪的下划线");
+        assert!(!blinking(&mut engine, &shared, b"\x1b[?12h\x1b[?12l"), "DEC 12 不认，仍按 DECSCUSR 不闪");
     }
 }
