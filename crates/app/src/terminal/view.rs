@@ -217,6 +217,8 @@ pub struct TerminalView {
     metrics: Option<Metrics>,
     blink_on: bool,
     blink_reset: Instant,
+    /// 上次渲染时终端有没有焦点（窗口在前台）。没焦点时光标画成不闪的细线，闪烁定时器不用再触发重绘。
+    focused: bool,
     /// 输入法正在组的字（还没上屏）。
     marked: Option<String>,
     password_prompt: bool,
@@ -279,7 +281,10 @@ impl TerminalView {
             loop {
                 cx.background_executor().timer(BLINK_INTERVAL).await;
                 let alive = this.update(cx, |view, cx| {
-                    if view.blink_reset.elapsed() < BLINK_INTERVAL {
+                    if !view.focused {
+                        // 没焦点：光标不闪，不白白重绘整个窗口（焦点回来时本来就会重绘，闪烁接着来）
+                        view.blink_on = true;
+                    } else if view.blink_reset.elapsed() < BLINK_INTERVAL {
                         // 刚按过键 / 光标刚动过：这一拍不熄，移动中的光标一直看得见
                     } else if view.frame.cursor.is_some_and(|c| c.blinking) {
                         view.blink_on = !view.blink_on;
@@ -322,6 +327,7 @@ impl TerminalView {
             metrics: None,
             blink_on: true,
             blink_reset: Instant::now(),
+            focused: false,
             marked: None,
             password_prompt: false,
             drop_hover: false,
@@ -632,6 +638,7 @@ impl Render for TerminalView {
             self.metrics = Some(metrics.clone());
         }
         let focused = self.focus.is_focused(window) && window.is_window_active();
+        self.focused = focused;
         let connected = matches!(self.status, Status::Connected { .. });
         div()
             .id("terminal")
