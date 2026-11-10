@@ -596,7 +596,13 @@ impl Workspace {
         session.view.read(cx).close();
         let session_id = session.view.read(cx).session_id().map(str::to_string);
         let was_active = self.active.as_deref() == Some(connection_id);
-        self.session_gone(session_id.as_deref(), connection_id, was_active, "连接已断开，请重新连接到服务器", window, cx);
+        // 关掉的是当前标签、还剩别的标签：切到相邻的那个，不要停在「点击左侧连接」的空页面上（标签明明还在）
+        let remaining: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
+        let next = if was_active { groups::tab_after_close(&remaining, index) } else { None };
+        self.session_gone(session_id.as_deref(), connection_id, was_active && next.is_none(), "连接已断开，请重新连接到服务器", window, cx);
+        if let Some(next) = next {
+            self.switch_to(&next, window, cx);
+        }
         cx.notify();
     }
 

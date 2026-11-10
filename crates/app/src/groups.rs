@@ -114,6 +114,12 @@ pub enum Side {
     After,
 }
 
+/// 关掉当前标签后该切到哪个：`remaining` 是去掉它之后的标签，`closed_at` 是它原来的位置。
+/// 同浏览器：右边的补上来，关的是最后一个就退到左边。
+pub fn tab_after_close<T: Clone>(remaining: &[T], closed_at: usize) -> Option<T> {
+    remaining.get(closed_at).or_else(|| remaining.last()).cloned()
+}
+
 /// 把拖动的标签放到目标标签的前或后；拖到自己身上或 id 不存在时原样返回。
 pub fn move_tab<T: PartialEq + Clone>(ids: &[T], dragged: &T, target: &T, side: Side) -> Vec<T> {
     if dragged == target || !ids.contains(dragged) || !ids.contains(target) {
@@ -211,5 +217,17 @@ mod tests {
         assert_eq!(move_tab(&ids, &"a", &"d", Side::After), ["b", "c", "d", "a"]);
         assert_eq!(move_tab(&ids, &"b", &"b", Side::Before), ids);
         assert_eq!(move_tab(&ids, &"x", &"b", Side::Before), ids);
+    }
+
+    #[test]
+    fn closing_the_active_tab_moves_to_its_right_then_left_neighbour() {
+        // 关掉 [a b c] 里的 b：右边的 c 补上来
+        assert_eq!(tab_after_close(&["a", "c"], 1), Some("c"));
+        // 关掉最后一个 c：退到左边的 b
+        assert_eq!(tab_after_close(&["a", "b"], 2), Some("b"));
+        // 关掉第一个 a
+        assert_eq!(tab_after_close(&["b", "c"], 0), Some("b"));
+        // 最后一个标签也关了：没有可切的
+        assert_eq!(tab_after_close::<&str>(&[], 0), None);
     }
 }
