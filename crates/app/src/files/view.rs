@@ -58,6 +58,47 @@ pub enum FileManagerEvent {
 const ROW_HEIGHT: f32 = 34.;
 const PANE_MIN_WIDTH: f32 = 220.;
 const DIVIDER_WIDTH: f32 = 10.;
+/// 名称列至少留这么宽（图标 + 十来个字）。
+const NAME_MIN_WIDTH: f32 = 140.;
+const SIZE_WIDTH: f32 = 80.;
+const DATE_WIDTH: f32 = 144.;
+const OWNER_WIDTH: f32 = 96.;
+const PERMISSIONS_WIDTH: f32 = 64.;
+
+/// 名称以外显示哪些列。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Columns {
+    size: bool,
+    date: bool,
+    owner: bool,
+    permissions: bool,
+}
+
+impl Columns {
+    fn width(&self) -> f32 {
+        [(self.size, SIZE_WIDTH), (self.date, DATE_WIDTH), (self.owner, OWNER_WIDTH), (self.permissions, PERMISSIONS_WIDTH)]
+            .iter()
+            .filter(|(shown, _)| *shown)
+            .map(|(_, width)| width)
+            .sum()
+    }
+}
+
+/// 栏宽 `width`（还没量到为 None）放得下哪些列：名称至少留 NAME_MIN_WIDTH，不够时先藏远程才有的所有者、权限，
+/// 再藏修改日期、大小。
+fn columns_for(kind: PaneKind, width: Option<f32>) -> Columns {
+    let remote = kind == PaneKind::Remote;
+    let mut columns = Columns { size: true, date: true, owner: remote, permissions: remote };
+    let Some(width) = width else { return columns };
+    let hide: [fn(&mut Columns); 4] = [|c| c.owner = false, |c| c.permissions = false, |c| c.date = false, |c| c.size = false];
+    for step in hide {
+        if columns.width() + NAME_MIN_WIDTH <= width {
+            break;
+        }
+        step(&mut columns);
+    }
+    columns
+}
 const MONO_FONT: &str = "Menlo";
 
 fn bind_keys(cx: &mut App) {
@@ -1562,6 +1603,14 @@ impl FileManager {
         cx.notify();
     }
 
+    /// 一栏里列表的宽度（两栏按 flex 分，减去 1px 边框 ×2）；还没量到时 None。
+    fn pane_width(&self, kind: PaneKind) -> Option<f32> {
+        let bounds = self.split_bounds?;
+        let available = f32::from(bounds.size.width) - DIVIDER_WIDTH;
+        let flex = if kind == PaneKind::Local { self.local_flex } else { self.remote_flex };
+        Some(available * flex / (self.local_flex + self.remote_flex) - 2.)
+    }
+
     fn end_resize(&mut self, cx: &mut Context<Self>) {
         if self.resize.take().is_some() {
             let flex = self.local_flex;
@@ -1642,6 +1691,7 @@ impl FileManager {
 
     fn render_rows(&mut self, kind: PaneKind, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let connected = self.session.is_some();
+        let shown = columns_for(kind, self.pane_width(kind));
         let pane = self.pane(kind);
         let parent_offset = pane.parent_offset();
         let current = pane.path.clone();
@@ -1758,18 +1808,22 @@ impl FileManager {
             let date = if parent { String::new() } else { format_date(entry.modified) };
             row = row
                 .child(name)
-                .child(div().w(px(80.)).px_3().flex().justify_end().text_color(muted).child(size))
-                .child(div().w(px(144.)).px_3().text_color(muted).child(date));
-            if kind == PaneKind::Remote {
+                .when(shown.size, |row| row.child(div().w(px(SIZE_WIDTH)).flex_shrink_0().px_3().flex().justify_end().text_color(muted).child(size)))
+                .when(shown.date, |row| row.child(div().w(px(DATE_WIDTH)).flex_shrink_0().px_3().text_color(muted).child(date)));
+            if shown.owner {
                 let owner = if parent { String::new() } else { entry.owner.clone().unwrap_or_else(|| "-".into()) };
+                row = row.child(div().w(px(OWNER_WIDTH)).flex_shrink_0().px_3().min_w_0().truncate().text_color(muted).child(owner));
+            }
+            if shown.permissions {
                 let permissions = if parent { String::new() } else { format_permissions(entry.permissions) };
                 let perm_entry = entry.clone();
-                row = row.child(div().w(px(96.)).px_3().min_w_0().truncate().text_color(muted).child(owner)).child(
+                row = row.child(
                     div()
                         .id(("perm", ix))
                         .role(Role::Button)
                         .aria_label("修改权限")
-                        .w(px(64.))
+                        .w(px(PERMISSIONS_WIDTH))
+                        .flex_shrink_0()
                         .px_3()
                         .when(!parent, |cell| {
                             cell.tooltip(|window, cx| kit::tooltip("点击修改权限".into(), window, cx)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1854,6 +1908,7 @@ impl FileManager {
     fn render_pane(&mut self, kind: PaneKind, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let remote = kind == PaneKind::Remote;
         let disabled = remote && self.session.is_none();
+        let shown = columns_for(kind, self.pane_width(kind));
         let badge = if remote { self.render_badge(cx) } else { None };
         let pane = self.pane(kind);
         let suggestions = pane.suggestions();
@@ -2000,9 +2055,10 @@ impl FileManager {
             .border_b_1()
             .border_color(theme::color(ui::BORDER))
             .child(div().flex_1().min_w_0().px(px(14.)).child("名称"))
-            .child(div().w(px(80.)).px_3().flex().justify_end().child("大小"))
-            .child(div().w(px(144.)).px_3().child("修改日期"))
-            .when(remote, |c| c.child(div().w(px(96.)).px_3().child("所有者")).child(div().w(px(64.)).px_3().child("权限")));
+            .when(shown.size, |c| c.child(div().w(px(SIZE_WIDTH)).flex_shrink_0().px_3().flex().justify_end().child("大小")))
+            .when(shown.date, |c| c.child(div().w(px(DATE_WIDTH)).flex_shrink_0().px_3().child("修改日期")))
+            .when(shown.owner, |c| c.child(div().w(px(OWNER_WIDTH)).flex_shrink_0().px_3().child("所有者")))
+            .when(shown.permissions, |c| c.child(div().w(px(PERMISSIONS_WIDTH)).flex_shrink_0().px_3().child("权限")));
 
         let list = div()
             .id(("file-list", kind as usize))
@@ -2349,7 +2405,14 @@ impl Render for FileManager {
                             {
                                 let weak = weak.clone();
                                 move |bounds, _, cx| {
-                                    let _ = weak.update(cx, |this, _| this.split_bounds = Some(bounds));
+                                    let _ = weak.update(cx, |this, cx| {
+                                        // 宽度变了要重绘：栏窄时藏哪些列按这个宽度算（columns_for）
+                                        let resized = this.split_bounds.is_none_or(|old| old.size.width != bounds.size.width);
+                                        this.split_bounds = Some(bounds);
+                                        if resized {
+                                            cx.notify();
+                                        }
+                                    });
                                 }
                             },
                             move |_, _, window, _| {
@@ -2712,9 +2775,29 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Action, KeyContext, Keymap, Keystroke, Modifiers};
+    use gpui::{KeyContext, Keymap, Keystroke, Modifiers};
 
-    use super::{Op, ToggleHiddenFiles, conflict_text, finished_message, key_bindings};
+    use super::{Columns, NAME_MIN_WIDTH, Op, PaneKind, ToggleHiddenFiles, columns_for, conflict_text, finished_message, key_bindings};
+
+    #[test]
+    fn narrow_panes_drop_columns_before_the_name_disappears() {
+        let all_remote = Columns { size: true, date: true, owner: true, permissions: true };
+        assert_eq!(columns_for(PaneKind::Remote, None), all_remote, "还没量到宽度时全显示");
+        assert_eq!(columns_for(PaneKind::Remote, Some(900.)), all_remote);
+        assert_eq!(columns_for(PaneKind::Local, Some(900.)), Columns { size: true, date: true, owner: false, permissions: false });
+        // 窗口 1000pt 宽时远程栏约 378：先藏远程才有的所有者、权限
+        assert_eq!(columns_for(PaneKind::Remote, Some(378.)), Columns { size: true, date: true, owner: false, permissions: false });
+        assert_eq!(columns_for(PaneKind::Remote, Some(440.)), Columns { size: true, date: true, owner: false, permissions: true });
+        // 本地栏最窄 220（减边框 218）：只剩名称
+        assert_eq!(columns_for(PaneKind::Local, Some(218.)), Columns::default());
+        for kind in [PaneKind::Local, PaneKind::Remote] {
+            for width in (100..1200).step_by(7) {
+                let width = width as f32;
+                let columns = columns_for(kind, Some(width));
+                assert!(columns == Columns::default() || columns.width() + NAME_MIN_WIDTH <= width, "{kind:?} {width}: {columns:?}");
+            }
+        }
+    }
 
     /// macOS 上按 ⌘⇧. 送来的按键：Shift 并进字符，key 是「>」、只剩 ⌘（gpui-pre-macos 的 parse_keystroke）。
     /// 绑定写成 cmd-shift-. 永远对不上。
