@@ -34,8 +34,9 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("cmd-1", ShowTerminal, Some("Workspace")),
-        KeyBinding::new("cmd-2", ShowFiles, Some("Workspace")),
-        KeyBinding::new("cmd-3", ShowSystem, Some("Workspace")),
+        // 顺序同顶栏：终端、系统、文件管理
+        KeyBinding::new("cmd-2", ShowSystem, Some("Workspace")),
+        KeyBinding::new("cmd-3", ShowFiles, Some("Workspace")),
         KeyBinding::new("cmd-p", ShowSnippets, Some("Workspace")),
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
@@ -1051,7 +1052,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus)
             // GPUI 在最后一次输入是键盘时把所有元素都当作没被悬停，而 Finder 的拖放事件不会切回鼠标：
-            // 刚在终端敲完 cd、或按 ⌘2 切到文件管理，再从 Finder 拖文件进来，松手什么都不会发生。
+            // 刚在终端敲完 cd、或按 ⌘3 切到文件管理，再从 Finder 拖文件进来，松手什么都不会发生。
             // 拖进窗口时补一个鼠标移动，把输入方式切回鼠标，终端和文件管理的 on_drop 才收得到。
             .on_drag_move::<ExternalPaths>(|event: &DragMoveEvent<ExternalPaths>, window, cx| {
                 if window.last_input_was_keyboard() {
