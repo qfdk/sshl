@@ -62,19 +62,22 @@ const MONO_FONT: &str = "Menlo";
 
 fn bind_keys(cx: &mut App) {
     static BOUND: Once = Once::new();
-    BOUND.call_once(|| {
-        // 晚于 gpui-base 绑定：同一节点上后绑的优先，地址栏里的方向键 / Tab / Esc 先给补全
-        cx.bind_keys([
-            KeyBinding::new("cmd-a", SelectAllFiles, Some("FileManager")),
-            KeyBinding::new("cmd-shift-.", ToggleHiddenFiles, Some("FileManager")),
-            KeyBinding::new("cmd-d", ToggleBookmark, Some("FileManager")),
-            KeyBinding::new("escape", ClearFileSelection, Some("FileManager")),
-            KeyBinding::new("down", PathNext, Some("FilePathBar > Input")),
-            KeyBinding::new("up", PathPrev, Some("FilePathBar > Input")),
-            KeyBinding::new("tab", PathComplete, Some("FilePathBar > Input")),
-            KeyBinding::new("escape", PathDismiss, Some("FilePathBar > Input")),
-        ]);
-    });
+    // 晚于 gpui-base 绑定：同一节点上后绑的优先，地址栏里的方向键 / Tab / Esc 先给补全
+    BOUND.call_once(|| cx.bind_keys(key_bindings()));
+}
+
+fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("cmd-a", SelectAllFiles, Some("FileManager")),
+        // ⌘⇧.：macOS 把 Shift 并进字符送来「⌘>」，写 cmd-shift-. 匹配不上
+        KeyBinding::new("cmd->", ToggleHiddenFiles, Some("FileManager")),
+        KeyBinding::new("cmd-d", ToggleBookmark, Some("FileManager")),
+        KeyBinding::new("escape", ClearFileSelection, Some("FileManager")),
+        KeyBinding::new("down", PathNext, Some("FilePathBar > Input")),
+        KeyBinding::new("up", PathPrev, Some("FilePathBar > Input")),
+        KeyBinding::new("tab", PathComplete, Some("FilePathBar > Input")),
+        KeyBinding::new("escape", PathDismiss, Some("FilePathBar > Input")),
+    ]
 }
 
 /// 拖动的那一行（实际拖哪些在开始拖时按选择算）。
@@ -2709,7 +2712,21 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
 
 #[cfg(test)]
 mod tests {
-    use super::{Op, conflict_text, finished_message};
+    use gpui::{Action, KeyContext, Keymap, Keystroke, Modifiers};
+
+    use super::{Op, ToggleHiddenFiles, conflict_text, finished_message, key_bindings};
+
+    /// macOS 上按 ⌘⇧. 送来的按键：Shift 并进字符，key 是「>」、只剩 ⌘（gpui-pre-macos 的 parse_keystroke）。
+    /// 绑定写成 cmd-shift-. 永远对不上。
+    #[test]
+    fn cmd_shift_period_toggles_hidden_files() {
+        let keymap = Keymap::new(key_bindings());
+        let stack: Vec<KeyContext> = ["Root", "Workspace", "FileManager"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let typed = Keystroke { modifiers: Modifiers::command(), key: ">".into(), key_char: None };
+        let (bindings, _) = keymap.bindings_for_input(&[typed], &stack);
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0].action().partial_eq(&ToggleHiddenFiles));
+    }
 
     #[test]
     fn finished_transfers_say_where_the_file_went() {
