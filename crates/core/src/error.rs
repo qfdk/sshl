@@ -17,6 +17,9 @@ pub enum AppError {
     /// 用户在主机身份确认框里拒绝了。
     #[error("host key not accepted")]
     HostKeyDeclined,
+    /// 用户点了停止（`sftp::cancellable`）。
+    #[error("已停止")]
+    Cancelled,
     #[error("{0}")]
     Other(String),
 }

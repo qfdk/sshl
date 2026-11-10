@@ -82,6 +82,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **预热池**归后端所有（`sshl_core::warm::run`），界面不发预热调用。
 - **SFTP 超时**：没有单请求超时；`sftp_stall.rs` 包住通道，整整 `SFTP_STALL`（60s）一个字节都没收到才让所有等待中的请求失败，
   `sftp_for` 再以同一身份重开。下载写 `.<name>.<rand>.sshl-part`，成功后改名，失败不留半截、不覆盖原文件。
+  上传同理：先写远端同目录的 `.<name>.<rand>.sshl-part`，传完删旧文件再改名（SFTP rename 不覆盖），沿用原文件权限位；
+  目标是符号链接、不归自己所有、或建不了临时文件时照旧直接写目标（换名会改属主 / 把链接换成文件）。
+  传输可停止：`sftp::cancellable(flag, fut)` 用任务局部变量传停止开关，读写循环每块检查，停止走出错路径（`AppError::Cancelled`），临时文件照样清掉。
 - **SFTP 通道复用**：每个 SSH 会话缓存一个 SFTP 会话共用。
 - **文件管理跟随终端用户**：终端里 `su` / `sudo -i` 之后，文件管理以那个用户运行（`files/identity.rs`、
   `crates/core/src/terminal_user.rs`）。`file_switch_user` 用 su/sudo 起的 `sftp-server` 换掉缓存的 SFTP 会话；

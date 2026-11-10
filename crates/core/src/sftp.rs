@@ -677,7 +677,68 @@ pub async fn file_upload_sudo(
 
 /// 上传一个本地文件到 `remote_path`（新建或截断）。`on_progress` 接收累计已传字节数，调用方负责节流。
 /// 读本地文件、写远端或收尾任一步出错，远端句柄照样关掉（见 close_in_background）。
+/// 上传一个文件。先写同目录的隐藏临时文件 `.<名字>.<随机>.sshl-part`，传完再换成目标名：中途断线、出错、
+/// 点停止，服务器上原有的同名文件都还是完整的旧内容，临时文件删掉。覆盖时沿用原文件的权限位。
+/// 换名得到的是一个新文件、属主是自己：目标是符号链接（要写进它指向的文件）、不归自己所有（属主不能变）、
+/// 或者目录里建不了临时文件（目录不可写但文件本身可写、名字太长）时，照旧直接写进目标。
 async fn upload_file(
+    sftp: &SftpSession,
+    local_path: &str,
+    remote_path: &str,
+    on_progress: impl FnMut(u64),
+) -> AppResult<()> {
+    let existing = sftp.symlink_metadata(remote_path).await.ok();
+    // 按类型位判断（russh-sftp 的 is_regular 用 contains，符号链接 0o120000 也算成普通文件）
+    if existing.as_ref().is_some_and(|meta| meta.permissions.map(|mode| mode & 0o170000) != Some(0o100000)) {
+        return upload_in_place(sftp, local_path, remote_path, on_progress).await;
+    }
+    let Some((part, mut file)) = create_remote_part(sftp, remote_path).await else {
+        return upload_in_place(sftp, local_path, remote_path, on_progress).await;
+    };
+    if let Some(meta) = &existing {
+        let mine = file.metadata().await.ok().and_then(|m| m.uid);
+        if meta.uid.is_none() || meta.uid != mine {
+            close_in_background(file);
+            let _ = sftp.remove_file(&part).await;
+            return upload_in_place(sftp, local_path, remote_path, on_progress).await;
+        }
+    }
+    let written = async {
+        stream_to_remote(local_path, &mut file, remote_path, on_progress).await?;
+        file.shutdown().await
+            .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))
+    }.await;
+    if let Err(e) = written {
+        close_in_background(file);
+        let _ = sftp.remove_file(&part).await;
+        return Err(e);
+    }
+    // SFTP 的 rename 不覆盖已有文件（OpenSSH 用 link + unlink）：先删旧的再换名，空档只在这两个请求之间
+    if let Some(meta) = &existing {
+        if let Some(mode) = meta.permissions {
+            let attrs = russh_sftp::protocol::FileAttributes { permissions: Some(mode & 0o7777), ..Default::default() };
+            let _ = sftp.set_metadata(&part, attrs).await;
+        }
+        if let Err(e) = sftp.remove_file(remote_path).await {
+            let _ = sftp.remove_file(&part).await;
+            return Err(AppError::Sftp(format!("replace {remote_path}: {e}")));
+        }
+    }
+    // 旧文件已经删了：换名失败时留着临时文件（里面是完整的新内容），报错里给出它的位置
+    sftp.rename(&part, remote_path).await
+        .map_err(|e| AppError::Sftp(format!("rename {part} -> {remote_path}: {e}")))
+}
+
+/// 在目标旁边新建临时文件（不覆盖已有的）；建不了返回 None，调用方改为直接写目标。
+async fn create_remote_part(sftp: &SftpSession, remote_path: &str) -> Option<(String, russh_sftp::client::fs::File)> {
+    let (dir, name) = split_remote(remote_path)?;
+    let part = format!("{}/.{name}.{:08x}.sshl-part", dir.trim_end_matches('/'), rand::random::<u32>());
+    let file = sftp.open_with_flags(&part, OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE).await.ok()?;
+    Some((part, file))
+}
+
+/// 直接写进目标（截断后写）。
+async fn upload_in_place(
     sftp: &SftpSession,
     local_path: &str,
     remote_path: &str,
@@ -715,6 +776,7 @@ where
     let mut buf = vec![0u8; TRANSFER_CHUNK];
     let mut transferred: u64 = 0;
     loop {
+        check_cancelled()?;
         let n = local.read(&mut buf).await?;
         if n == 0 { break; }
         file.write_all(&buf[..n]).await
@@ -741,6 +803,7 @@ where
     let mut buf = vec![0u8; TRANSFER_CHUNK];
     let mut transferred: u64 = 0;
     loop {
+        check_cancelled()?;
         let n = remote.read(&mut buf).await
             .map_err(|e| AppError::Sftp(format!("read {remote_path}: {e}")))?;
         if n == 0 { break; }
@@ -750,6 +813,25 @@ where
     }
     local.flush().await?;
     Ok(transferred)
+}
+
+tokio::task_local! {
+    /// 当前传输的停止开关：界面点「停止」时置位，读写循环每传一块检查一次。
+    static CANCEL: Arc<AtomicBool>;
+}
+
+/// 在能停止的传输里跑 `fut`：`flag` 置位后，读写在下一块时以 `AppError::Cancelled` 结束，
+/// 和出错一样清掉临时文件、关好句柄（上传不动服务器上原有的同名文件，下载不动本地的）。
+/// 传输里的并发都在同一个任务里（join_all / FuturesUnordered），都看得到这个开关。
+pub async fn cancellable<F: Future>(flag: Arc<AtomicBool>, fut: F) -> F::Output {
+    CANCEL.scope(flag, fut).await
+}
+
+fn check_cancelled() -> AppResult<()> {
+    if CANCEL.try_with(|flag| flag.load(Ordering::Relaxed)).unwrap_or(false) {
+        return Err(AppError::Cancelled);
+    }
+    Ok(())
 }
 
 /// 关掉用完的远端句柄，不等回复。只 drop 也会发 CLOSE，但 russh-sftp 只有等到 CLOSE 的回复才给已开句柄
@@ -907,6 +989,7 @@ where
                 let mut pos = start;
                 // 别的段出错了就不再读：整个下载反正要报错
                 while !failed_ref.load(Ordering::Relaxed) {
+                    check_cancelled()?;
                     let want = if i == last {
                         TRANSFER_CHUNK
                     } else {
@@ -3466,6 +3549,85 @@ mod tests {
         }
 
         /// 单文件上传写失败（/dev/full 的写入报 ENOSPC）：出错文件自己的句柄也要关。写错误攒在 russh-sftp 的写确认里，
+        /// 上传先写临时文件、传完才换上去：中途停止时服务器上还是原来的内容、不留临时文件；传完权限照旧。
+        /// 符号链接写进它指向的文件；别人的文件（可写）照旧直接写，属主不变。下载停止同样不动本地原有文件。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn stopped_transfers_leave_the_original_files_alone() {
+            use super::super::{cancellable, AppError};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let dir = temp_dir("stop");
+            let target = format!("{base}/run.sh");
+            exec(&h, &format!("printf old > {target} && chmod 754 {target}")).await;
+            let list_cmd = format!("ls -A {base}");
+            let listing = || exec(&h, &list_cmd);
+
+            // 传了一部分就停
+            let big = dir.join("big.bin");
+            write(&big, &bytes(64 * TRANSFER_CHUNK, 3));
+            let flag = std::sync::Arc::new(AtomicBool::new(false));
+            let stop = flag.clone();
+            let err = cancellable(flag, upload_file(&sftp, &big.to_string_lossy(), &target, move |t| {
+                if t >= 8 * TRANSFER_CHUNK as u64 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }))
+            .await
+            .unwrap_err();
+            assert!(matches!(err, AppError::Cancelled), "{err}");
+            assert_eq!(exec(&h, &format!("cat {target}")).await, "old", "停止后原来的内容还在");
+            assert_eq!(listing().await.trim(), "run.sh", "没留下临时文件");
+
+            // 传完：换上新内容，权限不变，没有临时文件
+            let script = b"#!/bin/sh\necho new\n";
+            let new = dir.join("new.sh");
+            write(&new, script);
+            upload_file(&sftp, &new.to_string_lossy(), &target, |_| {}).await.unwrap();
+            assert_eq!(exec(&h, &format!("cat {target}")).await.as_bytes(), script);
+            assert_eq!(exec(&h, &format!("stat -c %a {target}")).await.trim(), "754");
+            assert_eq!(listing().await.trim(), "run.sh");
+
+            // 符号链接：写进指向的文件，链接还是链接
+            exec(&h, &format!("printf old > {base}/real.txt && ln -s real.txt {base}/link.txt")).await;
+            upload_file(&sftp, &new.to_string_lossy(), &format!("{base}/link.txt"), |_| {}).await.unwrap();
+            assert_eq!(exec(&h, &format!("readlink {base}/link.txt")).await.trim(), "real.txt");
+            assert_eq!(exec(&h, &format!("cat {base}/real.txt")).await.as_bytes(), script);
+
+            // 别人的文件、自己可写：直接写进去，属主不变
+            let bobs = format!("{base}/bobs.txt");
+            exec(&h, &format!("echo alicepw | sudo -S sh -c 'printf old > {bobs} && chown bob:bob {bobs} && chmod 666 {bobs}'")).await;
+            upload_file(&sftp, &new.to_string_lossy(), &bobs, |_| {}).await.unwrap();
+            assert_eq!(exec(&h, &format!("stat -c %U {bobs}")).await.trim(), "bob");
+            assert_eq!(exec(&h, &format!("cat {bobs}")).await.as_bytes(), script);
+
+            // 下载停止：本地原有的同名文件不动，没有临时文件
+            write(&dir.join("big.bin.local"), b"keep me");
+            exec(&h, &format!("head -c {} /dev/urandom > {base}/big.bin", 3 * SEGMENTED_DOWNLOAD_MIN)).await;
+            for large in [true, false] {
+                let flag = std::sync::Arc::new(AtomicBool::new(false));
+                let stop = flag.clone();
+                let local = dir.join("big.bin.local");
+                let remote = format!("{base}/big.bin");
+                let on_progress = move |t: u64| {
+                    if t >= 4 * TRANSFER_CHUNK as u64 {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                };
+                let result = if large {
+                    cancellable(flag, download_large(&sftp, &remote, &local, 3 * SEGMENTED_DOWNLOAD_MIN, on_progress)).await
+                } else {
+                    cancellable(flag, download_small(&sftp, &remote, &local, on_progress)).await
+                };
+                assert!(matches!(result, Err(AppError::Cancelled)), "large={large}: {result:?}");
+                assert_eq!(std::fs::read(&local).unwrap(), b"keep me");
+                assert!(!dir_names(&dir).iter().any(|n| n.ends_with(".sshl-part")), "{:?}", dir_names(&dir));
+            }
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
         /// 有时在写的时候报、有时在 shutdown 时报（那时 shutdown 不发 CLOSE）。
         #[tokio::test(flavor = "multi_thread")]
         #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
