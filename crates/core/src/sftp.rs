@@ -395,6 +395,22 @@ pub async fn file_remote_home(
         .map_err(|e| AppError::Sftp(format!("realpath .: {e}")))
 }
 
+/// 远程路径是否已存在（以文件管理当前身份看）：None = 不存在或看不到，Some(是不是目录)。
+/// 跟随符号链接（指向目录的算目录），坏链接算已存在的文件。上传前问「覆盖还是跳过」用。
+pub async fn file_remote_exists(state: &AppState, session_id: String, path: String) -> AppResult<Option<bool>> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let sftp = sftp_for(&session).await?;
+    Ok(remote_exists(&sftp, &path).await)
+}
+
+async fn remote_exists(sftp: &SftpSession, path: &str) -> Option<bool> {
+    match sftp.metadata(path).await {
+        Ok(meta) => Some(meta.permissions.map(|mode| mode & 0o170000) == Some(0o040000)),
+        Err(_) => sftp.symlink_metadata(path).await.ok().map(|_| false),
+    }
+}
+
 pub async fn file_upload(
     events: &Events,
     state: &AppState,
@@ -3165,7 +3181,7 @@ mod tests {
     /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
     mod real_sftp {
         use super::super::{
-            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, scan_remote,
+            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, remote_exists, scan_remote,
             stream_to_remote, upload_file, upload_tree, DirCounts, DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY,
             DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
         };
@@ -3626,6 +3642,21 @@ mod tests {
             }
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 上传前看目标在不在：跟随链接，坏链接算已存在的文件。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn remote_existence_follows_links() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!("cd {base} && mkdir dir && touch f.txt && ln -s dir to-dir && ln -s gone broken")).await;
+            let mut found = Vec::new();
+            for name in ["dir", "f.txt", "to-dir", "broken", "missing"] {
+                found.push(remote_exists(&sftp, &format!("{base}/{name}")).await);
+            }
+            assert_eq!(found, [Some(true), Some(false), Some(true), Some(false), None]);
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
         }
 
         /// 有时在写的时候报、有时在 shutdown 时报（那时 shutdown 不发 CLOSE）。

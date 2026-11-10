@@ -69,9 +69,29 @@ pub async fn file_local_kinds(paths: Vec<String>) -> Vec<bool> {
     kinds
 }
 
+/// 本地路径是否已存在：None = 不存在，Some(是不是目录)。跟随符号链接（指向目录的算目录），坏链接算已存在的文件。
+pub fn local_exists(path: &str) -> Option<bool> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Some(meta.is_dir()),
+        Err(_) => std::fs::symlink_metadata(path).ok().map(|_| false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::file_list_local;
+    use super::{file_list_local, local_exists};
+
+    #[test]
+    fn existence_follows_links_and_counts_broken_ones() {
+        let root = std::env::temp_dir().join(format!("sshl-exists-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        std::fs::write(root.join("f.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("dir"), root.join("to-dir")).unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), root.join("broken")).unwrap();
+        let at = |name: &str| local_exists(&root.join(name).to_string_lossy());
+        assert_eq!((at("dir"), at("f.txt"), at("to-dir"), at("broken"), at("missing")), (Some(true), Some(false), Some(true), Some(false), None));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[tokio::test]
     async fn lists_entries_without_following_symlinks() {

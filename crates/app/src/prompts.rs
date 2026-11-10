@@ -29,6 +29,8 @@ pub struct Options {
     pub confirm_label: SharedString,
     pub cancel_label: SharedString,
     pub destructive: bool,
+    /// 按钮上方的复选框（`confirm_with_check` 用），如「剩下的也这样处理」。
+    pub checkbox: Option<SharedString>,
 }
 
 impl Options {
@@ -40,6 +42,7 @@ impl Options {
             confirm_label: "确定".into(),
             cancel_label: "取消".into(),
             destructive: false,
+            checkbox: None,
         }
     }
 
@@ -58,6 +61,16 @@ impl Options {
         self
     }
 
+    pub fn cancel(mut self, label: impl Into<SharedString>) -> Self {
+        self.cancel_label = label.into();
+        self
+    }
+
+    pub fn checkbox(mut self, label: impl Into<SharedString>) -> Self {
+        self.checkbox = Some(label.into());
+        self
+    }
+
 }
 
 pub enum PasswordAnswer {
@@ -69,6 +82,8 @@ pub enum PasswordAnswer {
 enum Kind {
     Alert(oneshot::Sender<()>),
     Confirm(oneshot::Sender<bool>),
+    /// 带复选框的确认：回（按了确认，勾了复选框）。
+    Check { checked: bool, reply: oneshot::Sender<(bool, bool)> },
     Password { choices: Vec<Choice>, input: Entity<InputState>, reply: oneshot::Sender<Option<PasswordAnswer>> },
 }
 
@@ -120,6 +135,13 @@ pub fn alert_later(window: &mut Window, cx: &mut App, options: Options) {
 pub fn confirm(window: &mut Window, cx: &mut App, options: Options) -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
     push(window, cx, Request { options, kind: Kind::Confirm(tx) });
+    rx
+}
+
+/// 带复选框（`Options::checkbox`）的确认框，回（按了确认，勾了复选框）；Esc 等于点取消按钮。
+pub fn confirm_with_check(window: &mut Window, cx: &mut App, options: Options) -> oneshot::Receiver<(bool, bool)> {
+    let (reply, rx) = oneshot::channel();
+    push(window, cx, Request { options, kind: Kind::Check { checked: false, reply } });
     rx
 }
 
@@ -186,6 +208,9 @@ impl PromptHost {
             Kind::Confirm(tx) => {
                 let _ = tx.send(ok);
             }
+            Kind::Check { checked, reply } => {
+                let _ = reply.send((ok, checked));
+            }
             Kind::Password { input, reply, .. } => {
                 let answer = match (ok, choice) {
                     (false, _) => None,
@@ -204,6 +229,13 @@ impl PromptHost {
             self.focus_head(window, cx);
         }
         cx.notify();
+    }
+
+    fn toggle_check(&mut self, cx: &mut Context<Self>) {
+        if let Some(Request { kind: Kind::Check { checked, .. }, .. }) = self.queue.front_mut() {
+            *checked = !*checked;
+            cx.notify();
+        }
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -230,6 +262,10 @@ impl Render for PromptHost {
         let is_alert = matches!(head.kind, Kind::Alert(_));
         let password = match &head.kind {
             Kind::Password { choices, input, .. } => Some((choices.clone(), input.clone())),
+            _ => None,
+        };
+        let check = match &head.kind {
+            Kind::Check { checked, .. } => options.checkbox.clone().map(|label| (label, *checked)),
             _ => None,
         };
         let body = div()
@@ -277,6 +313,24 @@ impl Render for PromptHost {
                             )
                         })
                         .child(kit::text_field(&input, self.input_focused))
+                    })
+                    .when_some(check, |d, (label, checked)| {
+                        d.child(
+                            div()
+                                .id("prompt-check")
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(13.))
+                                .cursor_pointer()
+                                // 方框自己也能点（辅助功能「按下」落在它上面），点了不再冒泡到整行，免得切换两次
+                                .child(kit::checkbox("prompt-check-box", checked).aria_label(label.clone()).on_click(cx.listener(|host, _, _, cx| {
+                                    cx.stop_propagation();
+                                    host.toggle_check(cx);
+                                })))
+                                .child(label)
+                                .on_click(cx.listener(|host, _, _, cx| host.toggle_check(cx))),
+                        )
                     }),
             )
             .child(

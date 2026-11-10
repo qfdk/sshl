@@ -259,6 +259,8 @@ pub struct FileManager {
     worker: bool,
     /// 这一轮（队列从空到空）传完了几个：传完的提示说「3 个已上传到 …」。
     finished: usize,
+    /// 这一轮里同名冲突勾了「后面也这样」：Some(true) 都覆盖，Some(false) 都跳过。
+    on_conflict: Option<bool>,
     /// 正在传的那一个的停止开关；None = 没在传。
     current: Option<Arc<AtomicBool>>,
     speed: SpeedMeter,
@@ -333,6 +335,7 @@ impl FileManager {
             queue: VecDeque::new(),
             worker: false,
             finished: 0,
+            on_conflict: None,
             current: None,
             speed: SpeedMeter::default(),
             status: TransferStatus::default(),
@@ -361,6 +364,17 @@ impl FileManager {
     /// 正在传的和排队的一共几个（断开前提醒用）。
     pub fn active_transfers(&self) -> usize {
         self.queue.len() + usize::from(self.current.is_some())
+    }
+
+    /// 传完 / 停下 / 跳过的那句提示 3 秒后收起。
+    fn hide_status_later(&mut self, cx: &mut Context<Self>) {
+        self.hide_status = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.status.hide();
+                cx.notify();
+            });
+        }));
     }
 
     /// 有传输正在进行（显示「停止」）。
@@ -1009,6 +1023,7 @@ impl FileManager {
         }
         self.worker = true;
         self.finished = 0;
+        self.on_conflict = None;
         cx.spawn_in(window, async move |this, cx| {
             // 取下一个和「队列空了就停」在同一次 update 里：中间不会有新加的任务被漏掉
             while let Some(job) = this
@@ -2435,15 +2450,40 @@ impl Op {
     fn is_upload(self) -> bool {
         matches!(self, Op::UploadFile | Op::UploadDir)
     }
+
+    fn is_dir(self) -> bool {
+        matches!(self, Op::UploadDir | Op::DownloadDir)
+    }
+
+    /// 目标落在哪一边。
+    fn target_side(self) -> PaneKind {
+        if self.is_upload() { PaneKind::Remote } else { PaneKind::Local }
+    }
+}
+
+/// 目标已有同名的时问的话：（标题，说明，复选框）。`merge` = 文件夹传到已有的同名文件夹；还有排队的才给复选框。
+fn conflict_text(name: &str, merge: bool, queued: usize) -> (String, &'static str, Option<&'static str>) {
+    let message = if merge { "覆盖会合并进原来的文件夹，同名的文件被替换。" } else { "覆盖会替换原来的文件。" };
+    (format!("{name} 已存在"), message, (queued > 0).then_some("后面再遇到同名的也这样处理"))
+}
+
+/// 目标在不在：None = 不在（或看不到，照常传），Some(是不是目录)。上传看服务器（以文件管理当前身份），下载看本地。
+async fn destination_exists(session: &FileSession, op: Op, destination: &str) -> Option<bool> {
+    let path = destination.to_string();
+    if op.is_upload() {
+        let sid = session.session_id.clone();
+        backend::spawn(async move { sftp::file_remote_exists(&backend::get().state, sid, path).await }).await.and_then(Result::ok).flatten()
+    } else {
+        backend::spawn(async move { local_fs::local_exists(&path) }).await.flatten()
+    }
 }
 
 /// 传完的提示写明落在哪个目录：从终端拖文件上传时，看这一句就知道传到哪了。
 /// 一次排了好几个时说一共几个（`count` = 这一轮传完的个数，含这一个）。
 fn finished_message(op: Op, destination: &str, count: usize) -> String {
-    let side = if op.is_upload() { PaneKind::Remote } else { PaneKind::Local };
     let place = if op.is_upload() { "已上传到" } else { "已下载到" };
     let what = if count > 1 { format!("{count} 个") } else { format!("{} ", basename(destination)) };
-    format!("{what}{place} {}", parent_path(destination, side))
+    format!("{what}{place} {}", parent_path(destination, op.target_side()))
 }
 
 async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContext, job: Job) -> Outcome {
@@ -2462,6 +2502,36 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
     });
     if started.is_err() {
         return Outcome::Cancelled;
+    }
+    // 目标已有同名的：问覆盖还是跳过（勾过「后面也这样」就照办，不再问）
+    if let Some(existing_dir) = destination_exists(&session, op, &destination).await {
+        let (remembered, queued) = this.read_with(cx, |this, _| (this.on_conflict, this.queue.len())).unwrap_or((None, 0));
+        let overwrite = match remembered {
+            Some(choice) => choice,
+            None => {
+                let (title, message, checkbox) = conflict_text(&name, op.is_dir() && existing_dir, queued);
+                let mut options = Options::new(title).detail(parent_path(&destination, op.target_side())).message(message).confirm("覆盖").cancel("跳过");
+                options.destructive = true;
+                if let Some(label) = checkbox {
+                    options = options.checkbox(label);
+                }
+                let Ok(answer) = cx.update(|window, cx| prompts::confirm_with_check(window, cx, options)) else { return Outcome::Cancelled };
+                let (overwrite, remember) = answer.await.unwrap_or((false, false));
+                if remember {
+                    let _ = this.update(cx, |this, _| this.on_conflict = Some(overwrite));
+                }
+                overwrite
+            }
+        };
+        if !overwrite {
+            let _ = this.update(cx, |this, cx| {
+                this.current = None;
+                this.status = TransferStatus::show(0, format!("已跳过 {name}"));
+                this.hide_status_later(cx);
+                cx.notify();
+            });
+            return Outcome::Cancelled;
+        }
     }
     let outcome = match op {
         Op::UploadFile | Op::UploadDir => upload_with_sudo(this, cx, &session, source, destination, matches!(op, Op::UploadDir), stop).await,
@@ -2506,13 +2576,7 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
                 prompts::alert_later(window, cx, Options::new(format!("{verb}失败")).message(error.clone()));
             }
         }
-        this.hide_status = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
-            let _ = this.update(cx, |this, cx| {
-                this.status.hide();
-                cx.notify();
-            });
-        }));
+        this.hide_status_later(cx);
         cx.notify();
     });
     outcome
@@ -2645,7 +2709,7 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
 
 #[cfg(test)]
 mod tests {
-    use super::{Op, finished_message};
+    use super::{Op, conflict_text, finished_message};
 
     #[test]
     fn finished_transfers_say_where_the_file_went() {
@@ -2653,5 +2717,13 @@ mod tests {
         assert_eq!(finished_message(Op::UploadDir, "/srv/app", 1), "app 已上传到 /srv");
         assert_eq!(finished_message(Op::DownloadFile, "/Users/me/Downloads/log.txt", 1), "log.txt 已下载到 /Users/me/Downloads");
         assert_eq!(finished_message(Op::UploadFile, "/home/q/b.txt", 3), "3 个已上传到 /home/q", "排了好几个时说一共几个");
+    }
+
+    #[test]
+    fn same_name_prompt_says_what_overwriting_does() {
+        assert_eq!(conflict_text("a.zip", false, 0), ("a.zip 已存在".into(), "覆盖会替换原来的文件。", None));
+        let (_, message, checkbox) = conflict_text("app", true, 2);
+        assert_eq!(message, "覆盖会合并进原来的文件夹，同名的文件被替换。");
+        assert_eq!(checkbox, Some("后面再遇到同名的也这样处理"), "还有排队的才问要不要都这样");
     }
 }
