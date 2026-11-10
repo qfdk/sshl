@@ -46,6 +46,22 @@ pub enum SortKey {
     Command,
 }
 
+/// 可点表头排序的列。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortColumn {
+    Process(SortKey),
+    Port(PortSortKey),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PortSortKey {
+    Proto,
+    Port,
+    Address,
+    Pid,
+    Process,
+}
+
 enum MenuTarget {
     Process { pid: u32, name: String, command: Option<String> },
     Service(ServiceInfo),
@@ -82,6 +98,7 @@ pub struct SystemPanel {
     busy: Option<String>,
     error: Option<SharedString>,
     sort: (SortKey, bool),
+    port_sort: (PortSortKey, bool),
     search: Entity<InputState>,
     search_focused: bool,
     menu: Option<MenuState>,
@@ -143,9 +160,10 @@ pub fn filter_processes<'a>(processes: &'a [ProcessInfo], query: &str, sort: (So
 }
 
 /// 搜索：端口号、进程名、PID、地址里含关键字。
-pub fn filter_ports<'a>(ports: &'a [PortInfo], query: &str) -> Vec<&'a PortInfo> {
+/// 排序：看不到进程（没权限）的行按 PID / 进程排时总在最后；同值的按端口从小到大。
+pub fn filter_ports<'a>(ports: &'a [PortInfo], query: &str, sort: (PortSortKey, bool)) -> Vec<&'a PortInfo> {
     let query = query.trim().to_lowercase();
-    ports
+    let mut out: Vec<&PortInfo> = ports
         .iter()
         .filter(|p| {
             query.is_empty()
@@ -154,7 +172,23 @@ pub fn filter_ports<'a>(ports: &'a [PortInfo], query: &str) -> Vec<&'a PortInfo>
                 || p.pid.is_some_and(|pid| pid.to_string().contains(&query))
                 || p.process.as_deref().is_some_and(|name| name.to_lowercase().contains(&query))
         })
-        .collect()
+        .collect();
+    out.sort_by(|a, b| {
+        let missing = match sort.0 {
+            PortSortKey::Pid => a.pid.is_none().cmp(&b.pid.is_none()),
+            PortSortKey::Process => a.process.is_none().cmp(&b.process.is_none()),
+            _ => std::cmp::Ordering::Equal,
+        };
+        let order = match sort.0 {
+            PortSortKey::Proto => a.proto.cmp(&b.proto),
+            PortSortKey::Port => a.port.cmp(&b.port),
+            PortSortKey::Address => a.address.cmp(&b.address),
+            PortSortKey::Pid => a.pid.cmp(&b.pid),
+            PortSortKey::Process => a.process.as_deref().map(str::to_lowercase).cmp(&b.process.as_deref().map(str::to_lowercase)),
+        };
+        missing.then(if sort.1 { order.reverse() } else { order }).then(a.port.cmp(&b.port)).then_with(|| a.proto.cmp(&b.proto))
+    });
+    out
 }
 
 /// 结束进程失败的说明：没权限时教用户怎么拿到权限。
@@ -301,6 +335,7 @@ impl SystemPanel {
             busy: None,
             error: None,
             sort: (SortKey::Cpu, true),
+            port_sort: (PortSortKey::Port, false),
             search,
             search_focused: false,
             menu: None,
@@ -414,9 +449,16 @@ impl SystemPanel {
         cx.notify();
     }
 
-    fn set_sort(&mut self, key: SortKey, cx: &mut Context<Self>) {
-        // 再点同一列反过来；数值列默认从大到小
-        self.sort = if self.sort.0 == key { (key, !self.sort.1) } else { (key, matches!(key, SortKey::Cpu | SortKey::Memory)) };
+    fn set_sort(&mut self, column: SortColumn, cx: &mut Context<Self>) {
+        // 再点同一列反过来；进程的 CPU、内存默认从大到小，其余从小到大
+        match column {
+            SortColumn::Process(key) => {
+                self.sort = if self.sort.0 == key { (key, !self.sort.1) } else { (key, matches!(key, SortKey::Cpu | SortKey::Memory)) };
+            }
+            SortColumn::Port(key) => {
+                self.port_sort = if self.port_sort.0 == key { (key, !self.port_sort.1) } else { (key, false) };
+            }
+        }
         cx.notify();
     }
 
@@ -614,8 +656,16 @@ impl SystemPanel {
             .child(card(Icon::Clock, ui::SUCCESS, "已运行", uptime, None, None))
     }
 
-    fn header_cell(&self, label: &'static str, key: Option<SortKey>, width: Option<f32>, right: bool, cx: &mut Context<Self>) -> AnyElement {
-        let arrow = key.filter(|k| *k == self.sort.0).map(|_| if self.sort.1 { " ↓" } else { " ↑" }).unwrap_or("");
+    fn header_cell(&self, label: &'static str, key: Option<SortColumn>, width: Option<f32>, right: bool, cx: &mut Context<Self>) -> AnyElement {
+        let descending = key.and_then(|key| match key {
+            SortColumn::Process(key) => (key == self.sort.0).then_some(self.sort.1),
+            SortColumn::Port(key) => (key == self.port_sort.0).then_some(self.port_sort.1),
+        });
+        let arrow = match descending {
+            Some(true) => " ↓",
+            Some(false) => " ↑",
+            None => "",
+        };
         div()
             .id(label)
             .px_3()
@@ -628,7 +678,9 @@ impl SystemPanel {
             .when(right, |d| d.justify_end())
             .child(format!("{label}{arrow}"))
             .when_some(key, |d, key| {
-                d.cursor_pointer()
+                d.role(Role::Button)
+                    .aria_label(SharedString::from(format!("按{label}排序")))
+                    .cursor_pointer()
                     .hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_sort(key, cx)))
             })
@@ -711,7 +763,7 @@ impl SystemPanel {
     fn render_port_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.search.read(cx).value().to_string();
         let rows: Vec<PortInfo> =
-            filter_ports(self.ports.as_deref().unwrap_or(&[]), &query).into_iter().skip(range.start).take(range.len()).cloned().collect();
+            filter_ports(self.ports.as_deref().unwrap_or(&[]), &query, self.port_sort).into_iter().skip(range.start).take(range.len()).cloned().collect();
         rows.into_iter()
             .enumerate()
             .map(|(i, p)| {
@@ -933,7 +985,7 @@ impl Render for SystemPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search.read(cx).value().to_string();
         let process_count = self.processes.as_deref().map(|p| filter_processes(p, &query, self.sort).len());
-        let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query).len());
+        let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query, self.port_sort).len());
         let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query).len());
         let (count, loaded) = match self.view {
             View::Processes => (process_count.unwrap_or(0), self.processes.is_some()),
@@ -982,11 +1034,11 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("PID", Some(SortKey::Pid), Some(76.), true, cx))
-                .child(self.header_cell("用户", Some(SortKey::User), Some(110.), false, cx))
-                .child(self.header_cell("CPU%", Some(SortKey::Cpu), Some(CPU_WIDTH), true, cx))
-                .child(self.header_cell("内存", Some(SortKey::Memory), Some(MEMORY_WIDTH), true, cx))
-                .child(self.header_cell("命令", Some(SortKey::Command), None, false, cx))
+                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(76.), true, cx))
+                .child(self.header_cell("用户", Some(SortColumn::Process(SortKey::User)), Some(110.), false, cx))
+                .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), true, cx))
+                .child(self.header_cell("内存", Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), true, cx))
+                .child(self.header_cell("命令", Some(SortColumn::Process(SortKey::Command)), None, false, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Ports => div()
                 .h(px(32.))
@@ -998,11 +1050,11 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("协议", None, Some(64.), false, cx))
-                .child(self.header_cell("端口", None, Some(86.), true, cx))
-                .child(self.header_cell("地址", None, Some(ADDRESS_WIDTH), false, cx))
-                .child(self.header_cell("PID", None, Some(80.), true, cx))
-                .child(self.header_cell("进程", None, None, false, cx))
+                .child(self.header_cell("协议", Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), false, cx))
+                .child(self.header_cell("端口", Some(SortColumn::Port(PortSortKey::Port)), Some(86.), true, cx))
+                .child(self.header_cell("地址", Some(SortColumn::Port(PortSortKey::Address)), Some(ADDRESS_WIDTH), false, cx))
+                .child(self.header_cell("PID", Some(SortColumn::Port(PortSortKey::Pid)), Some(80.), true, cx))
+                .child(self.header_cell("进程", Some(SortColumn::Port(PortSortKey::Process)), None, false, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Services => div()
                 .h(px(32.))
@@ -1192,10 +1244,35 @@ mod tests {
             PortInfo { proto: "tcp".into(), address: "0.0.0.0".into(), port: 80, pid: Some(1234), process: Some("nginx".into()) },
             PortInfo { proto: "tcp".into(), address: "127.0.0.1".into(), port: 3306, pid: None, process: None },
         ];
-        assert_eq!(filter_ports(&ports, "3306").len(), 1);
-        assert_eq!(filter_ports(&ports, "Nginx")[0].port, 80);
-        assert_eq!(filter_ports(&ports, "1234")[0].port, 80);
-        assert_eq!(filter_ports(&ports, "").len(), 2);
+        let by_port = (PortSortKey::Port, false);
+        assert_eq!(filter_ports(&ports, "3306", by_port).len(), 1);
+        assert_eq!(filter_ports(&ports, "Nginx", by_port)[0].port, 80);
+        assert_eq!(filter_ports(&ports, "1234", by_port)[0].port, 80);
+        assert_eq!(filter_ports(&ports, "", by_port).len(), 2);
+    }
+
+    #[test]
+    fn ports_sort_by_any_column() {
+        let port = |proto: &str, address: &str, port: u16, pid: Option<u32>, process: Option<&str>| PortInfo {
+            proto: proto.into(),
+            address: address.into(),
+            port,
+            pid,
+            process: process.map(Into::into),
+        };
+        let ports = vec![
+            port("tcp", "0.0.0.0", 443, Some(900), Some("nginx")),
+            port("udp", "127.0.0.53", 53, None, None),
+            port("tcp", "127.0.0.1", 3306, Some(120), Some("mysqld")),
+            port("tcp", "0.0.0.0", 22, Some(700), Some("sshd")),
+        ];
+        let order = |key: PortSortKey, descending: bool| filter_ports(&ports, "", (key, descending)).iter().map(|p| p.port).collect::<Vec<_>>();
+        assert_eq!(order(PortSortKey::Port, false), [22, 53, 443, 3306]);
+        assert_eq!(order(PortSortKey::Port, true), [3306, 443, 53, 22]);
+        assert_eq!(order(PortSortKey::Pid, false), [3306, 22, 443, 53], "看不到进程的排在最后");
+        assert_eq!(order(PortSortKey::Process, false), [3306, 443, 22, 53], "看不到进程的排在最后");
+        assert_eq!(order(PortSortKey::Proto, true), [53, 22, 443, 3306], "同协议按端口");
+        assert_eq!(order(PortSortKey::Address, false), [22, 443, 3306, 53]);
     }
 
     fn service(unit: &str, description: &str, active: &str, sub: &str) -> ServiceInfo {
