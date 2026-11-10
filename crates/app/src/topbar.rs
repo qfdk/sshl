@@ -85,7 +85,7 @@ impl Workspace {
             .relative()
             .child(kit::segmented(
                 "main-tabs",
-                &[(MainTab::Terminal, None, "终端".into()), (MainTab::System, None, "系统".into()), (MainTab::Files, None, "文件管理".into())],
+                &[(MainTab::Terminal, None, "终端".into()), (MainTab::Files, None, "文件管理".into()), (MainTab::System, None, "系统".into())],
                 self.main_tab,
                 move |tab, window, cx| {
                     let _ = this.update(cx, |this, cx| this.set_main_tab(tab, window, cx));
