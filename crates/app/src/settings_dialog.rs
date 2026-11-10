@@ -22,11 +22,10 @@ use crate::ui::{self as kit, Variant};
 const UNGROUPED: &str = "未分组";
 const GROUP_NERD: &str = "图标字体（Nerd Font）";
 const GROUP_MONO: &str = "等宽字体";
+/// 只列非 Mono 版：Mono 版把图标压成一格宽，和正常字符大小不一样（用户不要）。
 const NERD_CANDIDATES: &[&str] = &[
-    "JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", "FiraCode Nerd Font Mono", "FiraCode Nerd Font",
-    "Hack Nerd Font Mono", "Hack Nerd Font", "MesloLGM Nerd Font Mono", "MesloLGM Nerd Font", "Iosevka Nerd Font Mono",
-    "Iosevka Nerd Font", "CaskaydiaCove Nerd Font Mono", "CaskaydiaCove Nerd Font", "Symbols Nerd Font Mono",
-    "Symbols Nerd Font",
+    "JetBrainsMono Nerd Font", "FiraCode Nerd Font", "Hack Nerd Font", "MesloLGM Nerd Font", "Iosevka Nerd Font",
+    "CaskaydiaCove Nerd Font", "Symbols Nerd Font",
 ];
 const MONO_CANDIDATES: &[&str] = &[
     "Menlo", "Monaco", "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", "Cascadia Mono", "Hack", "Iosevka",
@@ -806,5 +805,22 @@ impl SettingsDialog {
             Vec::new()
         };
         div().flex().flex_col().gap_1().child(header).children(member_rows).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nerd_font_mono_variants_are_never_offered() {
+        // Mono 版把图标压成一格宽，和正常字符大小不一样：装了也不列出来
+        let installed: Vec<String> =
+            ["JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", "Hack Nerd Font Mono", "Hack Nerd Font", "Menlo"].map(String::from).to_vec();
+        let families: Vec<String> = presets(&installed).into_iter().map(|p| p.family).collect();
+        assert!(families.iter().all(|f| !f.ends_with("Nerd Font Mono")), "{families:?}");
+        assert!(families.contains(&"Hack Nerd Font".to_string()));
+        assert!(families.contains(&"Menlo".to_string()));
+        assert_eq!(families.iter().filter(|f| *f == DEFAULT_FONT_FAMILY).count(), 1);
     }
 }
