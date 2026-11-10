@@ -22,6 +22,7 @@ use crate::files::{FileManager, FileManagerEvent, FileSession};
 use crate::system_panel::{SystemPanel, SystemPanelEvent};
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options, PasswordAnswer};
+use crate::quick_connect::{self, QuickConnect, QuickConnectEvent};
 use crate::settings;
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use crate::snippets::{SnippetDialog, SnippetDialogEvent, SnippetPanel, SnippetPanelEvent};
@@ -29,7 +30,7 @@ use crate::terminal::{Metrics, TerminalEvent, TerminalView};
 use crate::theme::{self, ui};
 use crate::ui as kit;
 
-actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, OpenSettings, ToggleSidebar]);
+actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, OpenSettings, ToggleSidebar, OpenQuickConnect]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -42,6 +43,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
+        KeyBinding::new("cmd-k", OpenQuickConnect, Some("Workspace")),
     ]);
 }
 
@@ -150,6 +152,9 @@ pub struct Workspace {
     /// 鼠标在片段按钮上：点按钮关面板时，「点到面板外面」先关了它，按钮的点击别再把它打开。
     pub(crate) snippet_button_hovered: bool,
     snippet_dialog: Option<Entity<SnippetDialog>>,
+    quick_connect: Entity<QuickConnect>,
+    /// 快速连接（⌘K）开着。
+    quick_open: bool,
     pub(crate) focus: FocusHandle,
     /// 当前会话的往返延迟（连接 id，None = 超时）；切会话时清掉，量到再显示。
     pub(crate) latency: Option<(String, Option<std::time::Duration>)>,
@@ -163,8 +168,10 @@ impl Workspace {
         let file_manager = cx.new(|cx| FileManager::new(window, cx));
         let system_panel = cx.new(|cx| SystemPanel::new(window, cx));
         let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
+        let quick_connect = cx.new(|cx| QuickConnect::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&snippet_panel, window, Self::snippet_panel_event),
+            cx.subscribe_in(&quick_connect, window, Self::quick_connect_event),
             // 系统页：没权限时的 sudo 命令、看服务日志，都发到终端
             cx.subscribe_in(&system_panel, window, |this, _, event: &SystemPanelEvent, window, cx| match event {
                 SystemPanelEvent::RunInTerminal(command) => this.run_in_terminal(command, true, window, cx),
@@ -228,6 +235,8 @@ impl Workspace {
             snippets_open: false,
             snippet_button_hovered: false,
             snippet_dialog: None,
+            quick_connect,
+            quick_open: false,
             focus: cx.focus_handle(),
             latency: None,
             _latency_task: cx.spawn(async move |this, cx| {
@@ -837,6 +846,46 @@ impl Workspace {
         self.open_fill_menu(window, cx);
     }
 
+    // ---------- 快速连接（⌘K） ----------
+
+    fn toggle_quick_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_open {
+            return self.close_quick_connect(window, cx);
+        }
+        // 正在连 / 有对话框或提示框时不弹，免得叠在上面抢焦点
+        let dialog_open = self.connection_dialog.is_some() || self.import_dialog.is_some() || self.settings_dialog.is_some() || self.snippet_dialog.is_some();
+        if self.pending.is_some() || dialog_open || prompts::is_open(cx) {
+            return;
+        }
+        self.snippets_open = false;
+        self.fill_menu = None;
+        self.menu = None;
+        let list = quick_connect::sidebar_order(&self.connections, &self.group_order);
+        let connected = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
+        self.quick_open = true;
+        self.quick_connect.update(cx, |panel, cx| panel.open(list, connected, window, cx));
+        cx.notify();
+    }
+
+    fn close_quick_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.quick_open {
+            return;
+        }
+        self.quick_open = false;
+        self.refocus(window, cx);
+        cx.notify();
+    }
+
+    fn quick_connect_event(&mut self, _: &Entity<QuickConnect>, event: &QuickConnectEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            QuickConnectEvent::Connect(id) => {
+                self.close_quick_connect(window, cx);
+                self.connect_to_saved(id, window, cx);
+            }
+            QuickConnectEvent::Close => self.close_quick_connect(window, cx),
+        }
+    }
+
     // ---------- 命令片段 ----------
 
     pub(crate) fn toggle_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1104,6 +1153,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenQuickConnect, window, cx| this.toggle_quick_connect(window, cx)))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .capture_key_down(cx.listener(Self::capture_key))
             .child(
@@ -1160,7 +1210,7 @@ impl Render for Workspace {
                                                 .justify_center()
                                                 .flex_col()
                                                 .gap_4()
-                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child(if sidebar_collapsed { "按 ⌘B 展开侧边栏选择连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
+                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child(if sidebar_collapsed { "按 ⌘K 快速连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
                                                 .child(
                                                     kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), "新建连接")
                                                         .h(px(32.))
@@ -1174,6 +1224,21 @@ impl Render for Workspace {
             )
             .when_some(overlay, |root, overlay| root.child(overlay))
             .when_some(menu, |root, menu| root.child(menu))
+            // 快速连接：浮在顶部居中，点面板外面关掉
+            .when(self.quick_open, |root| {
+                root.child(
+                    div()
+                        .id("quick-connect-layer")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .flex()
+                        .justify_center()
+                        .pt(px(72.))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_quick_connect(window, cx)))
+                        .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.quick_connect.clone())),
+                )
+            })
             .when_some(self.connection_dialog.clone(), |root, dialog| root.child(dialog))
             .when_some(self.import_dialog.clone(), |root, dialog| root.child(dialog))
             .when_some(self.settings_dialog.clone(), |root, dialog| root.child(dialog))

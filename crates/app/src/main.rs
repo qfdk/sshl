@@ -7,6 +7,7 @@ mod files;
 mod groups;
 mod import_dialog;
 mod prompts;
+mod quick_connect;
 mod screen;
 mod settings;
 mod settings_dialog;
@@ -153,4 +154,5 @@ fn bind_keys(cx: &mut App) {
     workspace::bind_keys(cx);
     // 晚于 gpui-base：同一节点上后绑的优先，面板里的上下 / 回车 / Esc 归片段列表
     snippets::bind_keys(cx);
+    quick_connect::bind_keys(cx);
 }

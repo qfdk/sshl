@@ -110,6 +110,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
+- **快速连接**（⌘K，`quick_connect.rs`）：顶部居中的浮层，只搜保存的连接（空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里，
+  名称以第一个词开头的排前面），↑↓ 选、↵ 连、Esc / 点外面关；已开着的带绿点、选了就切过去（`connect_to_saved`）。
+  顺序同侧栏。侧栏收起时空页面提示 ⌘K。有对话框 / 提示框 / 正在连接时不弹。
 - **命令片段**（`snippets.rs`，库里 `snippets` 表，`config_store::snippets`）：顶栏按钮 / ⌘P 打开面板，搜索、↑↓ 选、↵ 执行、⇧↵ 只填入。
   按粘贴发到终端（多行命令走括号粘贴，不会边粘边执行），执行时再补回车；不在终端页会先切过去。片段可以所有服务器通用，
   也可以只属于某个连接（删连接时一起删）。面板里的上下 / 回车 / Esc 绑在 `SnippetPanel > Input`，压过 gpui-base 输入框自己的绑定。
