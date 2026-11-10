@@ -156,6 +156,16 @@ pub fn remote_home_from(result: Option<&str>) -> String {
     }
 }
 
+/// 收藏列表里的一行：目录名（醒目）+ 上一级路径（灰色），整条长路径不好找。根目录只有名字。
+pub fn bookmark_label(path: &str) -> (String, String) {
+    if is_root_path(path, PaneKind::Remote) {
+        return ("/".into(), String::new());
+    }
+    let normalized = normalize_remote_path(path);
+    let clean = normalized.trim_end_matches('/');
+    (basename(clean), parent_path(clean, PaneKind::Remote))
+}
+
 pub fn basename(path: &str) -> String {
     path.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(path).to_string()
 }
@@ -345,6 +355,15 @@ mod tests {
         assert_eq!(remote_home_from(None), "");
         assert_eq!(remote_home_from(Some("")), "");
         assert_eq!(remote_home_from(Some("relative/dir")), "");
+    }
+
+    #[test]
+    fn bookmark_rows_split_name_and_parent() {
+        assert_eq!(bookmark_label("/home/qfdk/deploy"), ("deploy".into(), "/home/qfdk".into()));
+        assert_eq!(bookmark_label("/etc"), ("etc".into(), "/".into()));
+        assert_eq!(bookmark_label("/var/log/"), ("log".into(), "/var".into()));
+        assert_eq!(bookmark_label("//srv//www"), ("www".into(), "/srv".into()));
+        assert_eq!(bookmark_label("/"), ("/".into(), String::new()));
     }
 
     #[test]

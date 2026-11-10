@@ -32,6 +32,7 @@ icons! {
     ArrowDownUp => "arrow-down-up",
     ArrowUp => "arrow-up",
     Bookmark => "bookmark",
+    BookmarkFilled => "bookmark-filled",
     Check => "check",
     ChevronDown => "chevron-down",
     ChevronRight => "chevron-right",

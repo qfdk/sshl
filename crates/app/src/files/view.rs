@@ -28,7 +28,7 @@ use super::identity::{
     FileIdentity, SessionRecord, SyncStatus, TerminalIdentity, Via, record_sync_result, sync_file_user,
 };
 use super::model::{
-    FileEntry, ListCache, PaneKind, basename, checks_to_permissions, format_date, format_file_size,
+    FileEntry, ListCache, PaneKind, basename, bookmark_label, checks_to_permissions, format_date, format_file_size,
     format_permissions, is_root_path, join_path, normalize_remote_path, parent_path, permissions_to_checks,
     readable_permissions, remote_home_from, valid_octal, visible_files,
 };
@@ -313,9 +313,8 @@ pub struct FileManager {
     menu: Option<MenuState>,
     /// 当前连接收藏的远程目录（按收藏先后）。
     bookmarks: Vec<String>,
-    bookmark_menu: bool,
-    /// 鼠标在收藏按钮上：点按钮关菜单时，「点到菜单外面」先关了它，按钮的点击别再把它打开。
-    bookmark_button_hovered: bool,
+    /// 远程地址栏下拉列着收藏（点进地址栏时出现，一敲字换成子目录补全）。
+    bookmark_list: bool,
     permission: Option<PermissionDialog>,
     new_folder: Option<NewFolderDialog>,
     dragging: Option<DragState>,
@@ -386,8 +385,7 @@ impl FileManager {
             hide_status: None,
             menu: None,
             bookmarks: Vec::new(),
-            bookmark_menu: false,
-            bookmark_button_hovered: false,
+            bookmark_list: false,
             permission: None,
             new_folder: None,
             dragging: None,
@@ -461,7 +459,7 @@ impl FileManager {
             return;
         }
         self.session = session.clone();
-        self.bookmark_menu = false;
+        self.bookmark_list = false;
         self.reload_bookmarks();
         self.remote.request += 1;
         self.remote.files.clear();
@@ -810,10 +808,18 @@ impl FileManager {
                 pane.path = value;
                 pane.suggesting = true;
                 pane.highlight = None;
+                // 一敲字就是在输路径：收藏列表让位给子目录补全
+                if kind == PaneKind::Remote {
+                    self.bookmark_list = false;
+                }
                 self.request_listing(kind, window, cx);
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => {
+                if let Some(path) = self.highlighted_bookmark(kind) {
+                    self.open_bookmark(path, window, cx);
+                    return;
+                }
                 let suggestions = self.pane(kind).suggestions();
                 if let Some(entry) = self.pane(kind).highlight.and_then(|i| suggestions.get(i)).cloned() {
                     self.open_suggestion(kind, &entry, window, cx);
@@ -830,6 +836,9 @@ impl FileManager {
                 let pane = self.pane_mut(kind);
                 pane.input_focused = false;
                 pane.suggesting = false;
+                if kind == PaneKind::Remote {
+                    self.bookmark_list = false;
+                }
                 cx.notify();
             }
         }
@@ -870,13 +879,14 @@ impl FileManager {
     }
 
     fn path_next(&mut self, kind: PaneKind, down: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if down && !self.pane(kind).suggesting {
+        let showing_bookmarks = self.showing_bookmarks(kind);
+        if down && !showing_bookmarks && !self.pane(kind).suggesting {
             self.pane_mut(kind).suggesting = true;
             self.request_listing(kind, window, cx);
             cx.notify();
             return;
         }
-        let count = self.pane(kind).suggestions().len();
+        let count = if showing_bookmarks { self.bookmarks.len() } else { self.pane(kind).suggestions().len() };
         if count == 0 {
             cx.propagate();
             return;
@@ -910,6 +920,11 @@ impl FileManager {
     }
 
     fn path_dismiss(&mut self, kind: PaneKind, cx: &mut Context<Self>) {
+        if self.showing_bookmarks(kind) {
+            self.bookmark_list = false;
+            cx.notify();
+            return;
+        }
         if self.pane(kind).suggestions().is_empty() {
             cx.propagate();
             return;
@@ -962,7 +977,7 @@ impl FileManager {
 
     fn clear_selection(&mut self, _: &ClearFileSelection, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.take().is_some()
-            || std::mem::take(&mut self.bookmark_menu)
+            || std::mem::take(&mut self.bookmark_list)
             || self.new_folder.take().is_some()
             || self.permission.take().is_some()
         {
@@ -1390,6 +1405,9 @@ impl FileManager {
     }
 
     // ---------------------------------------------------------------- 远程目录收藏
+    //
+    // 同浏览器地址栏：地址栏右端的书签一点就收藏 / 取消当前目录（⌘D 同）；
+    // 点进地址栏，下拉列出收藏的目录，点了过去，悬停的 × 直接删，不用先进那个目录。
 
     fn reload_bookmarks(&mut self) {
         self.bookmarks = match &self.session {
@@ -1399,95 +1417,158 @@ impl FileManager {
             }),
             None => Vec::new(),
         };
+        if self.bookmarks.is_empty() {
+            self.bookmark_list = false;
+        }
     }
 
-    fn toggle_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.bookmark_menu = false;
-        let path = self.remote.path.clone();
+    fn set_bookmarked(&mut self, path: &str, bookmarked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone().filter(|_| !path.is_empty()) else { return };
-        let bookmarked = !self.bookmarks.contains(&path);
-        match config_store::set_bookmarked(&session.connection_id, &path, bookmarked) {
+        match config_store::set_bookmarked(&session.connection_id, path, bookmarked) {
             Ok(()) => self.reload_bookmarks(),
             Err(error) => prompts::alert_later(window, cx, Options::new("收藏失败").message(error.to_string())),
+        }
+        // 删掉一条后高亮可能越界
+        if self.remote.highlight.is_some_and(|i| i >= self.bookmarks.len()) {
+            self.remote.highlight = None;
         }
         cx.notify();
     }
 
+    fn toggle_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.remote.path.clone();
+        let bookmarked = !self.bookmarks.contains(&path);
+        self.set_bookmarked(&path, bookmarked, window, cx);
+    }
+
     fn open_bookmark(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.bookmark_menu = false;
+        self.bookmark_list = false;
+        self.remote.highlight = None;
         self.load(PaneKind::Remote, Some(path), false, window, cx);
     }
 
-    /// 路径框旁的收藏按钮：当前目录已收藏时是蓝色；点开是「收藏 / 取消收藏当前目录」和收藏的目录。
-    fn bookmark_button(&self, disabled: bool, cx: &mut Context<Self>) -> AnyElement {
-        let marked = !self.remote.path.is_empty() && self.bookmarks.contains(&self.remote.path);
-        let button = kit::button("pane-bookmark", Variant::Ghost)
-            .w(px(32.))
-            .h(px(32.))
-            .px_0()
+    fn showing_bookmarks(&self, kind: PaneKind) -> bool {
+        kind == PaneKind::Remote && self.bookmark_list && !self.bookmarks.is_empty() && !self.remote.suggesting
+    }
+
+    fn highlighted_bookmark(&self, kind: PaneKind) -> Option<String> {
+        if !self.showing_bookmarks(kind) {
+            return None;
+        }
+        self.remote.highlight.and_then(|i| self.bookmarks.get(i)).cloned()
+    }
+
+    /// 地址栏右端的收藏开关：当前目录已收藏是实心蓝色。
+    fn bookmark_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let marked = self.bookmarks.contains(&self.remote.path);
+        let (label, tip) = if marked { ("取消收藏当前目录", "取消收藏  ⌘D") } else { ("收藏当前目录", "收藏当前目录  ⌘D") };
+        div()
+            .id("path-bookmark")
+            .role(Role::Button)
+            .aria_label(label)
+            .flex_shrink_0()
+            .size(px(24.))
+            .mr(px(-6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .text_color(theme::color(if marked { ui::PRIMARY } else { ui::MUTED_FOREGROUND }))
+            .hover(move |s| {
+                let s = s.bg(theme::alpha(ui::FOREGROUND, 0.06));
+                if marked { s } else { s.text_color(theme::color(ui::FOREGROUND)) }
+            })
+            .tooltip(move |window, cx| kit::tooltip(tip.into(), window, cx))
+            // 点开关不弹收藏列表（地址栏按下会弹）
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_bookmark(window, cx)))
+            .child(kit::icon_sized(if marked { Icon::BookmarkFilled } else { Icon::Bookmark }, 15.))
+            .into_any_element()
+    }
+
+    /// 地址栏下拉里的收藏列表：目录名 + 灰色上级路径，当前目录标蓝，悬停出 ×。
+    fn bookmark_dropdown(&self, cx: &mut Context<Self>) -> AnyElement {
+        let highlight = self.remote.highlight;
+        let current = self.remote.path.clone();
+        div()
+            .id("bookmark-list")
+            .role(Role::ListBox)
             .aria_label("收藏的目录")
-            // 菜单开着时不弹提示，免得压在菜单上
-            .when(!self.bookmark_menu, |b| b.tooltip(|window, cx| kit::tooltip("收藏的目录".into(), window, cx)))
-            .on_hover(cx.listener(|this, hovered: &bool, _, _| this.bookmark_button_hovered = *hovered))
-            .child(kit::icon(Icon::Bookmark).when(marked, |g| g.text_color(theme::color(ui::PRIMARY))))
-            .when(disabled, |b| b.opacity(0.5).cursor_default())
-            .when(!disabled, |b| {
-                b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.bookmark_menu = !this.bookmark_menu;
-                    cx.notify();
-                }))
-            });
-        let menu = (self.bookmark_menu && !disabled).then(|| {
-            let weak = cx.entity().downgrade();
-            let mut entries = Vec::new();
-            if !self.remote.path.is_empty() {
-                let toggle = weak.clone();
-                let label = if marked { "取消收藏当前目录" } else { "收藏当前目录" };
-                entries.push(MenuEntry::Item(
-                    MenuItem::new(label, move |window, cx| {
-                        let _ = toggle.update(cx, |this, cx| this.toggle_bookmark(window, cx));
-                    })
-                    .icon(Icon::Bookmark),
-                ));
-            }
-            if !self.bookmarks.is_empty() {
-                entries.push(MenuEntry::Separator);
-            }
-            for path in &self.bookmarks {
-                let open = weak.clone();
-                let target = path.clone();
-                entries.push(MenuEntry::Item(
-                    MenuItem::new(path.clone(), move |window, cx| {
-                        let _ = open.update(cx, |this, cx| this.open_bookmark(target.clone(), window, cx));
-                    })
-                    .icon(Icon::Folder),
-                ));
-            }
-            let outside_weak = weak.clone();
-            let dismiss = move |_: &mut Window, cx: &mut App| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.bookmark_menu = false;
-                    cx.notify();
-                });
-            };
-            let close = dismiss.clone();
-            let outside = move |window: &mut Window, cx: &mut App| {
-                // 点的是收藏按钮：交给按钮的点击去关，不然这里先关、按钮又打开
-                if outside_weak.read_with(cx, |this, _| this.bookmark_button_hovered).unwrap_or(false) {
-                    return;
-                }
-                close(window, cx);
-            };
-            div().absolute().right_0().top(px(36.)).child(
-                deferred(
-                    anchored().anchor(gpui::Anchor::TopRight).child(
-                        div().occlude().on_mouse_down_out(move |_, window, cx| outside(window, cx)).child(kit::menu_panel(entries, dismiss)),
-                    ),
-                )
-                .with_priority(2),
-            )
-        });
-        div().relative().child(button).when_some(menu, |d, menu| d.child(menu)).into_any_element()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top_full()
+            .mt_1()
+            .max_h(px(256.))
+            .overflow_y_scroll()
+            .p_1()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme::color(ui::BORDER))
+            .bg(theme::color(ui::CARD))
+            .shadow_md()
+            .occlude()
+            .children(self.bookmarks.iter().enumerate().map(|(index, path)| {
+                let (name, parent) = bookmark_label(path);
+                let highlighted = highlight == Some(index);
+                let here = *path == current;
+                let group = SharedString::from(format!("bookmark-{index}"));
+                let (open, remove) = (path.clone(), path.clone());
+                div()
+                    .id(("bookmark", index))
+                    .group(group.clone())
+                    .role(Role::ListBoxOption)
+                    .aria_label(SharedString::from(path.clone()))
+                    .h(px(30.))
+                    .pl_2()
+                    .pr(px(2.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .when(highlighted, |d| d.bg(theme::color(ui::ACCENT)))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.remote.highlight = Some(index);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_bookmark(open.clone(), window, cx)))
+                    .child(kit::icon_sized(Icon::Folder, 14.).text_color(theme::color(ui::PRIMARY)))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(px(220.))
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme::color(if here { ui::PRIMARY } else { ui::FOREGROUND }))
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(theme::color(ui::MUTED_FOREGROUND))
+                            .child(parent),
+                    )
+                    .child(
+                        kit::mini_button(("bookmark-remove", index), Icon::X, "删除这个收藏", ui::MUTED_FOREGROUND)
+                            .flex_shrink_0()
+                            .opacity(if highlighted { 1. } else { 0. })
+                            .group_hover(group, |s| s.opacity(1.))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.set_bookmarked(&remove, false, window, cx);
+                            })),
+                    )
+            }))
+            .into_any_element()
     }
 
     // ---------------------------------------------------------------- 跟随终端用户
@@ -1910,6 +1991,8 @@ impl FileManager {
         let disabled = remote && self.session.is_none();
         let shown = columns_for(kind, self.pane_width(kind));
         let badge = if remote { self.render_badge(cx) } else { None };
+        let bookmark_toggle = (remote && !disabled && !self.remote.path.is_empty()).then(|| self.bookmark_toggle(cx));
+        let bookmark_dropdown = self.showing_bookmarks(kind).then(|| self.bookmark_dropdown(cx));
         let pane = self.pane(kind);
         let suggestions = pane.suggestions();
         let highlight = pane.highlight;
@@ -1985,10 +2068,26 @@ impl FileManager {
                             .font_family(MONO_FONT)
                             .text_size(px(12.))
                             .when(disabled, |d| d.opacity(0.5))
-                            .child(div().flex_1().min_w_0().child(Input::new(&input))),
+                            // 点进远程地址栏：下拉先列收藏的目录（已在敲字补全时不打断）
+                            .when(remote && !disabled, |d| {
+                                d.on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                        if !this.bookmarks.is_empty() && !this.remote.suggesting && !this.bookmark_list {
+                                            this.bookmark_list = true;
+                                            this.remote.highlight = None;
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
+                            })
+                            .child(div().flex_1().min_w_0().child(Input::new(&input)))
+                            .children(bookmark_toggle),
                     )
+                    .children(bookmark_dropdown.map(deferred))
+                    // 下拉放到最后画（deferred），不然后面的表头和文件行会画在它上面
                     .when(!suggestions.is_empty(), |bar| {
-                        bar.child(
+                        bar.child(deferred(
                             div()
                                 .id(("suggestions", kind as usize))
                                 .role(Role::ListBox)
@@ -2032,7 +2131,7 @@ impl FileManager {
                                         .child(kit::icon_sized(Icon::Folder, 14.).text_color(theme::color(ui::PRIMARY)))
                                         .child(div().min_w_0().truncate().child(entry.name))
                                 })),
-                        )
+                        ))
                     }),
             )
             .child(if remote {
@@ -2040,7 +2139,6 @@ impl FileManager {
             } else {
                 self.pane_button(("pane-browse", 0), Icon::FolderOpen, "选择目录", false, |this, w, cx| this.browse_local(w, cx), cx).into_any_element()
             })
-            .when(remote, |d| d.child(self.bookmark_button(disabled, cx)))
             .child(self.pane_button(("pane-home", kind as usize), Icon::House, "主目录", disabled, move |this, w, cx| this.go_home(kind, w, cx), cx))
             .child(self.pane_button(("pane-refresh", kind as usize), Icon::RefreshCw, "刷新", disabled, move |this, w, cx| this.refresh(kind, w, cx), cx));
 
