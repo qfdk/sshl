@@ -92,14 +92,14 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **从 `~/.ssh/config` 导入**（新建连接对话框左下角，`import_dialog.rs` + `crates/core/src/ssh_config.rs`）：列出不带通配的 Host，
   逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
   同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
-- **「系统」页**（⌘3，`system_panel.rs` + core 的 `server_info.rs` / `services.rs` / `containers.rs`）：负载 / 内存 / 磁盘 / 运行时间，
-  下面四个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、再否则 lsof）、systemd 服务（list-units + list-unit-files，
-  没被载入的已停服务也列出）、Docker 容器（没有就 Podman）。可结束进程、启停 / 重启服务和容器、开关开机启动、删除已停的容器（停止、重启、删除先确认）。
+- **「系统」页**（⌘3，`system_panel.rs` + core 的 `server_info.rs` / `services.rs`）：负载 / 内存 / 磁盘 / 运行时间，
+  下面三个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、再否则 lsof）、systemd 服务（list-units + list-unit-files，
+  没被载入的已停服务也列出）。可结束进程、启停 / 重启服务、开关开机启动（停止、重启先确认）。容器管理做过又删了：用户用不到。
   命令走 `run_as_file_user`，切过来时先同步文件管理身份，终端 sudo -i 之后就以 root 跑。没权限（`services::needs_root`）时不只报错，
   而是提议「在终端里用 sudo 执行」，把 sudo 命令发到终端（`SystemPanelEvent::RunInTerminal`），密码在终端里输或点填充密码。
-  看服务 / 容器日志（journalctl -f、docker logs -f）和进容器（docker exec -it）也都发到终端。只在这页显示时每 3 秒刷新。
+  看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
-  `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`（容器测试要先起一个叫 web 的容器）。
+  `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
 - **命令片段**（`snippets.rs`，库里 `snippets` 表，`config_store::snippets`）：顶栏按钮 / ⌘P 打开面板，搜索、↑↓ 选、↵ 执行、⇧↵ 只填入。
   按粘贴发到终端（多行命令走括号粘贴，不会边粘边执行），执行时再补回车；不在终端页会先切过去。片段可以所有服务器通用，
   也可以只属于某个连接（删连接时一起删）。面板里的上下 / 回车 / Esc 绑在 `SnippetPanel > Input`，压过 gpui-base 输入框自己的绑定。

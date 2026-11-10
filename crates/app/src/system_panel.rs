@@ -1,5 +1,5 @@
-//! 「系统」页：负载 / 内存 / 磁盘 / 运行时间，进程、监听端口、systemd 服务和 Docker 容器；结束进程、启停服务和容器。
-//! 看日志、进容器发到终端里做。
+//! 「系统」页：负载 / 内存 / 磁盘 / 运行时间，进程、监听端口和 systemd 服务；结束进程、启停服务。
+//! 看服务日志发到终端里做。
 //! 命令以文件管理当前身份执行（终端 sudo -i 之后就是 root）；没权限时提议改在终端里用 sudo 执行。
 //! 停在这页时每 3 秒刷新一次。
 
@@ -14,7 +14,6 @@ use gpui::{
 };
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::server_info::{self, Overview, PortInfo, ProcessInfo};
-use sshl_core::containers::{self, ContainerAction, ContainerInfo, Containers};
 use sshl_core::services::{self, ServiceAction, ServiceInfo};
 
 use crate::assets::Icon;
@@ -32,7 +31,6 @@ pub enum View {
     Processes,
     Ports,
     Services,
-    Containers,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,7 +45,6 @@ pub enum SortKey {
 enum MenuTarget {
     Process { pid: u32, name: String, command: Option<String> },
     Service(ServiceInfo),
-    Container(ContainerInfo),
 }
 
 struct MenuState {
@@ -66,8 +63,6 @@ enum Loaded {
     Ports(Vec<PortInfo>),
     /// None = 没有 systemd。
     Services(Option<Vec<ServiceInfo>>),
-    /// None = 没装 Docker / Podman。
-    Containers(Option<Containers>),
 }
 
 pub struct SystemPanel {
@@ -79,10 +74,7 @@ pub struct SystemPanel {
     ports: Option<Vec<PortInfo>>,
     services: Option<Vec<ServiceInfo>>,
     no_systemd: bool,
-    containers: Option<Vec<ContainerInfo>>,
-    /// docker / podman；空 = 没装。
-    engine: String,
-    /// 正在启停的服务 / 容器（状态列显示「处理中…」）。
+    /// 正在启停的服务（状态列显示「处理中…」）。
     busy: Option<String>,
     error: Option<SharedString>,
     sort: (SortKey, bool),
@@ -196,54 +188,10 @@ pub fn service_status(service: &ServiceInfo) -> (&'static str, u32) {
     }
 }
 
-/// 搜索：容器名、镜像、端口、ID 开头。
-pub fn filter_containers<'a>(containers: &'a [ContainerInfo], query: &str) -> Vec<&'a ContainerInfo> {
-    let query = query.trim().to_lowercase();
-    containers
-        .iter()
-        .filter(|c| {
-            query.is_empty()
-                || c.name.to_lowercase().contains(&query)
-                || c.image.to_lowercase().contains(&query)
-                || c.ports.contains(&query)
-                || c.id.starts_with(&query)
-        })
-        .collect()
-}
-
-/// 容器的状态文字和颜色：非零退出码标红（崩了、被 OOM 杀了）。
-pub fn container_status(container: &ContainerInfo) -> (SharedString, u32) {
-    let (label, color): (SharedString, u32) = match container.state.as_str() {
-        "running" => ("运行中".into(), ui::SUCCESS),
-        "paused" => ("已暂停".into(), ui::WARNING),
-        "restarting" => ("重启中".into(), ui::WARNING),
-        "created" => ("未启动".into(), ui::MUTED_FOREGROUND),
-        "dead" => ("已失效".into(), ui::DESTRUCTIVE),
-        "exited" => match container.exit_code() {
-            Some(code) if code != 0 => (format!("退出 {code}").into(), ui::DESTRUCTIVE),
-            _ => ("已停止".into(), ui::MUTED_FOREGROUND),
-        },
-        other => (other.to_string().into(), ui::MUTED_FOREGROUND),
-    };
-    (label, color)
-}
-
-fn container_action_label(action: ContainerAction) -> &'static str {
-    match action {
-        ContainerAction::Start => "启动",
-        ContainerAction::Stop => "停止",
-        ContainerAction::Restart => "重启",
-        ContainerAction::Remove => "删除",
-    }
-}
-
 /// 读列表失败的说明：没权限时说怎么办。
-pub fn list_error_message(view: View, error: &str) -> String {
+pub fn list_error_message(error: &str) -> String {
     if services::needs_root(error) {
-        return match view {
-            View::Containers => "没有权限访问 Docker：把当前用户加进 docker 组，或在终端里 sudo -i 后再看。".into(),
-            _ => "没有权限：在终端里 sudo -i 后再看。".into(),
-        };
+        return "没有权限：在终端里 sudo -i 后再看。".into();
     }
     format!("读取失败：{}", error.trim())
 }
@@ -287,8 +235,6 @@ impl SystemPanel {
             ports: None,
             services: None,
             no_systemd: false,
-            containers: None,
-            engine: String::new(),
             busy: None,
             error: None,
             sort: (SortKey::Cpu, true),
@@ -314,8 +260,6 @@ impl SystemPanel {
         self.ports = None;
         self.services = None;
         self.no_systemd = false;
-        self.containers = None;
-        self.engine.clear();
         self.busy = None;
         self.error = None;
         self.menu = None;
@@ -364,7 +308,6 @@ impl SystemPanel {
                 View::Processes => server_info::processes(state, session_id).await.map(Loaded::Processes),
                 View::Ports => server_info::ports(state, session_id).await.map(Loaded::Ports),
                 View::Services => services::services(state, session_id).await.map(Loaded::Services),
-                View::Containers => containers::containers(state, session_id).await.map(Loaded::Containers),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -385,11 +328,6 @@ impl SystemPanel {
                             Loaded::Services(services) => {
                                 this.no_systemd = services.is_none();
                                 this.services = Some(services.unwrap_or_default());
-                            }
-                            Loaded::Containers(found) => {
-                                let (engine, list) = found.map(|c| (c.engine, c.list)).unwrap_or_default();
-                                this.engine = engine;
-                                this.containers = Some(list);
                             }
                         }
                     }
@@ -507,55 +445,6 @@ impl SystemPanel {
             });
         })
         .detach();
-    }
-
-    /// 启动 / 停止 / 重启 / 删除容器。停止、重启、删除先确认。
-    fn container_action(&mut self, container: ContainerInfo, action: ContainerAction, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu = None;
-        let Some(session_id) = self.session_id.clone() else { return };
-        let engine = self.engine.clone();
-        let name = container.name.clone();
-        let label = container_action_label(action);
-        let confirm = (action != ContainerAction::Start).then(|| {
-            let mut options = Options::new(format!("{label}容器 {name}？")).message(container.image.clone()).confirm(label);
-            if action == ContainerAction::Remove {
-                options = options.detail("容器里没放在卷上的数据会一起删掉。");
-            }
-            options.destructive = matches!(action, ContainerAction::Stop | ContainerAction::Remove);
-            prompts::confirm(window, cx, options)
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Some(answer) = confirm
-                && !answer.await.unwrap_or(false)
-            {
-                return;
-            }
-            let id = container.id.clone();
-            let _ = this.update(cx, |this, cx| {
-                this.busy = Some(id.clone());
-                cx.notify();
-            });
-            let run_engine = engine.clone();
-            let result = backend::spawn(async move { containers::act(&backend::get().state, session_id, run_engine, action, id).await }).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.busy = None;
-                match result {
-                    Some(Ok(())) | None => {}
-                    Some(Err(error)) if services::needs_root(&error.to_string()) => {
-                        let command = containers::terminal_command(&engine, action, &name);
-                        this.offer_sudo(format!("{label}容器 {name} 需要 root 权限"), Some("也可以把当前用户加进 docker 组。"), command, window, cx);
-                    }
-                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new(format!("没能{label}容器 {name}")).message(error.to_string().trim().to_string())),
-                }
-                this.refresh(cx);
-            });
-        })
-        .detach();
-    }
-
-    fn container_terminal(&mut self, command: String, cx: &mut Context<Self>) {
-        self.menu = None;
-        cx.emit(SystemPanelEvent::RunInTerminal(command));
     }
 
     fn service_logs(&mut self, service: &ServiceInfo, cx: &mut Context<Self>) {
@@ -883,81 +772,6 @@ impl SystemPanel {
     }
 }
 
-impl SystemPanel {
-    fn render_container_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let query = self.search.read(cx).value().to_string();
-        let rows: Vec<ContainerInfo> =
-            filter_containers(self.containers.as_deref().unwrap_or(&[]), &query).into_iter().skip(range.start).take(range.len()).cloned().collect();
-        let engine = self.engine.clone();
-        rows.into_iter()
-            .enumerate()
-            .map(|(i, container)| {
-                let ix = range.start + i;
-                let name = container.name.clone();
-                let busy = self.busy.as_deref() == Some(container.id.as_str());
-                let (status, color) = if busy { ("处理中…".into(), ui::WARNING) } else { container_status(&container) };
-                let running = container.is_running();
-                let action_button = |id: &'static str, action: ContainerAction, color: u32, cx: &mut Context<Self>| {
-                    let target = container.clone();
-                    let label = container_action_label(action);
-                    Self::hover_button((id, ix), label, format!("{label} {name}"), color).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.container_action(target.clone(), action, window, cx);
-                    }))
-                };
-                let terminal_button = |id: &'static str, label: &'static str, command: String, cx: &mut Context<Self>| {
-                    Self::hover_button((id, ix), label, format!("{name} {label}"), ui::MUTED_FOREGROUND).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.container_terminal(command.clone(), cx);
-                    }))
-                };
-                let menu_target = container.clone();
-                let actions = div().w(px(200.)).flex_shrink_0().flex().justify_end().pr_2().when(!busy, |d| {
-                    d.child(terminal_button("container-logs", "日志", containers::logs_command(&engine, &name), cx)).map(|d| {
-                        if running {
-                            d.child(terminal_button("container-shell", "终端", containers::shell_command(&engine, &name), cx))
-                                .child(action_button("container-restart", ContainerAction::Restart, ui::PRIMARY, cx))
-                                .child(action_button("container-stop", ContainerAction::Stop, ui::DESTRUCTIVE, cx))
-                        } else {
-                            d.child(action_button("container-start", ContainerAction::Start, ui::PRIMARY, cx))
-                        }
-                    })
-                });
-                div()
-                    .id(("container", ix))
-                    .group("system-row")
-                    .h(px(ROW_HEIGHT))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.))
-                    .border_b_1()
-                    .border_color(theme::alpha(ui::BORDER, 0.6))
-                    .hover(|s| s.bg(theme::color(ui::MUTED)))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        this.open_menu(event.position, MenuTarget::Container(menu_target.clone()), cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(96.))
-                            .flex_shrink_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::color(color)))
-                            .child(div().when(color == ui::DESTRUCTIVE, |d| d.text_color(theme::color(ui::DESTRUCTIVE))).child(status)),
-                    )
-                    .child(div().w(px(200.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
-                    .child(div().w(px(240.)).flex_shrink_0().px_3().truncate().font_family(MONO).text_color(theme::color(ui::MUTED_FOREGROUND)).child(container.image.clone()))
-                    .child(div().flex_1().min_w_0().px_3().truncate().font_family(MONO).child(containers::short_ports(&container.ports)))
-                    .child(actions)
-                    .into_any_element()
-            })
-            .collect()
-    }
-}
-
 /// 命令行 → 进程名（第一个词去掉路径，冒号结尾的如「nginx: worker」保留原样的头一个词）。
 pub fn process_name(command: &str) -> String {
     let first = command.split_whitespace().next().unwrap_or(command);
@@ -971,12 +785,10 @@ impl Render for SystemPanel {
         let process_count = self.processes.as_deref().map(|p| filter_processes(p, &query, self.sort).len());
         let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query).len());
         let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query).len());
-        let container_count = self.containers.as_deref().filter(|_| !self.engine.is_empty()).map(|c| filter_containers(c, &query).len());
         let (count, loaded) = match self.view {
             View::Processes => (process_count.unwrap_or(0), self.processes.is_some()),
             View::Ports => (port_count.unwrap_or(0), self.ports.is_some()),
             View::Services => (service_count.unwrap_or(0), self.services.is_some()),
-            View::Containers => (container_count.unwrap_or(0), self.containers.is_some()),
         };
         let this = cx.entity().downgrade();
         let tab_label = |label: &str, count: Option<usize>| -> SharedString {
@@ -995,7 +807,6 @@ impl Render for SystemPanel {
                     (View::Processes, None, tab_label("进程", process_count)),
                     (View::Ports, None, tab_label("端口", port_count)),
                     (View::Services, None, tab_label("服务", service_count)),
-                    (View::Containers, None, tab_label("容器", container_count)),
                 ],
                 self.view,
                 move |view, _, cx| {
@@ -1058,34 +869,17 @@ impl Render for SystemPanel {
                 .child(self.header_cell("说明", None, None, false, cx))
                 .child(div().w(px(80.)).flex_shrink_0().flex().justify_center().child("开机启动"))
                 .child(div().w(px(150.)).flex_shrink_0()),
-            View::Containers => div()
-                .h(px(32.))
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::color(ui::MUTED_FOREGROUND))
-                .border_b_1()
-                .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("状态", None, Some(96.), false, cx))
-                .child(self.header_cell("容器", None, Some(200.), false, cx))
-                .child(self.header_cell("镜像", None, Some(240.), false, cx))
-                .child(self.header_cell("端口", None, None, false, cx))
-                .child(div().w(px(200.)).flex_shrink_0()),
         };
 
         let view_is_services = self.view == View::Services;
         let empty: Option<SharedString> = if self.session_id.is_none() {
-            Some("连接服务器后显示它的进程、端口、服务和容器".into())
+            Some("连接服务器后显示它的进程、端口和服务".into())
         } else if let Some(error) = &self.error {
-            Some(list_error_message(self.view, error).into())
+            Some(list_error_message(error).into())
         } else if !loaded {
             Some("正在读取…".into())
         } else if view_is_services && self.no_systemd {
             Some("这台服务器没有 systemd".into())
-        } else if self.view == View::Containers && self.engine.is_empty() {
-            Some("这台服务器没有装 Docker".into())
         } else if count == 0 {
             Some(if query.trim().is_empty() { "没有内容".into() } else { "没有匹配的结果".into() })
         } else {
@@ -1109,7 +903,6 @@ impl Render for SystemPanel {
                     View::Processes => this.render_process_rows(range, window, cx),
                     View::Ports => this.render_port_rows(range, window, cx),
                     View::Services => this.render_service_rows(range, window, cx),
-                    View::Containers => this.render_container_rows(range, window, cx),
                 }),
             )
             .track_scroll(&self.scroll)
@@ -1163,37 +956,6 @@ impl Render for SystemPanel {
                         })),
                         MenuEntry::Item(MenuItem::new("复制名称", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(unit.clone())))),
                     ]
-                }
-                MenuTarget::Container(container) => {
-                    let running = container.is_running();
-                    let item = |action: ContainerAction| {
-                        let (weak, container) = (weak.clone(), container.clone());
-                        MenuItem::new(container_action_label(action), move |window, cx| {
-                            let _ = weak.update(cx, |this, cx| this.container_action(container.clone(), action, window, cx));
-                        })
-                    };
-                    let terminal = |label: &'static str, command: String| {
-                        let weak = weak.clone();
-                        MenuItem::new(label, move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| this.container_terminal(command.clone(), cx));
-                        })
-                    };
-                    let (name, id) = (container.name.clone(), container.id.clone());
-                    let mut entries = vec![
-                        MenuEntry::Item(item(ContainerAction::Start).disabled(running)),
-                        MenuEntry::Item(item(ContainerAction::Restart).disabled(!running)),
-                        MenuEntry::Item(item(ContainerAction::Stop).disabled(!running).destructive()),
-                        MenuEntry::Separator,
-                        MenuEntry::Item(terminal("在终端里看日志", containers::logs_command(&self.engine, &container.name))),
-                        MenuEntry::Item(terminal("在终端里进入容器", containers::shell_command(&self.engine, &container.name)).disabled(!running)),
-                        MenuEntry::Item(MenuItem::new("复制名称", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(name.clone())))),
-                        MenuEntry::Item(MenuItem::new("复制 ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone())))),
-                    ];
-                    if !running {
-                        entries.push(MenuEntry::Separator);
-                        entries.push(MenuEntry::Item(item(ContainerAction::Remove).destructive()));
-                    }
-                    entries
                 }
             };
             let dismiss = {
@@ -1303,26 +1065,10 @@ mod tests {
         assert_eq!(service_status(&service("docker.service", "", "activating", "start-pre")).0, "启动中");
     }
 
-    fn container(name: &str, state: &str, status: &str) -> ContainerInfo {
-        ContainerInfo { id: format!("{name}0123"), name: name.into(), image: "nginx:alpine".into(), state: state.into(), status: status.into(), ports: "0.0.0.0:8080->80/tcp".into() }
-    }
-
-    #[test]
-    fn containers_are_searched_and_crashes_stand_out() {
-        let all = vec![container("web", "running", "Up 2 hours"), container("db", "exited", "Exited (137) 1 day ago"), container("job", "exited", "Exited (0) 1 day ago")];
-        assert_eq!(filter_containers(&all, "8080").len(), 3, "按端口搜");
-        assert_eq!(filter_containers(&all, "WEB")[0].name, "web");
-        assert_eq!(filter_containers(&all, "db0")[0].name, "db", "按 ID 开头搜");
-        assert_eq!(container_status(&all[0]), ("运行中".into(), ui::SUCCESS));
-        assert_eq!(container_status(&all[1]), ("退出 137".into(), ui::DESTRUCTIVE));
-        assert_eq!(container_status(&all[2]), ("已停止".into(), ui::MUTED_FOREGROUND));
-    }
-
     #[test]
     fn list_errors_explain_missing_permissions() {
-        let denied = "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock";
-        assert!(list_error_message(View::Containers, denied).contains("docker 组"));
-        assert_eq!(list_error_message(View::Processes, "boom\n"), "读取失败：boom");
+        assert!(list_error_message("Failed to list units: Access denied").contains("sudo -i"));
+        assert_eq!(list_error_message("boom\n"), "读取失败：boom");
     }
 
     #[test]

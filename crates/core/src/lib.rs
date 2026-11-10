@@ -3,7 +3,6 @@
 
 pub mod auto_auth;
 pub mod config_store;
-pub mod containers;
 pub mod crypto_store;
 pub mod db;
 pub mod error;
