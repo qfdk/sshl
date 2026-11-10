@@ -7,7 +7,7 @@ use gpui::{
 };
 use sshl_core::config_store::StoredConnection;
 
-use crate::assets::{APP_ICON, Icon};
+use crate::assets::{APP_ICON, APP_ICON_SIZE, Icon};
 use crate::groups::{self, Side};
 use crate::settings;
 use crate::theme::{self, ui};
@@ -80,7 +80,7 @@ impl Workspace {
                             .flex_shrink_0()
                             .items_center()
                             .gap_2()
-                            .child(img(APP_ICON).size(px(30.)).m(px(-3.)))
+                            .child(img(APP_ICON).size(px(APP_ICON_SIZE)).m(px(-3.)))
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("SSHL"))
                             .child(div().ml_auto().flex().items_center().gap_1().child(new_connection).child(toggle)),
                     )
