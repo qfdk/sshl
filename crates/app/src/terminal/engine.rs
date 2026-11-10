@@ -554,9 +554,8 @@ impl Engine {
         let full = dirty == Dirty::Full
             || self.rows.len() != usize::from(rows)
             || self.rows.first().is_some_and(|row| row.cells.len() != usize::from(cols));
-        if dirty == Dirty::Clean && !full {
-            return Ok(());
-        }
+        // 格子没变也不能直接返回：只移动光标（← →、Home / End）不会把行标脏
+        let clean = dirty == Dirty::Clean && !full;
         let palette = snapshot.colors()?;
         let background = rgb(palette.background);
         let foreground = rgb(palette.foreground);
@@ -653,6 +652,14 @@ impl Engine {
             _ => None,
         };
         snapshot.clean()?;
+        let mouse_tracking = self.term.is_mouse_tracking().unwrap_or(false);
+        let alternate_screen = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
+        if clean {
+            let last = self.shared.frame.lock().unwrap();
+            if last.cursor == cursor && last.mouse_tracking == mouse_tracking && last.alternate_screen == alternate_screen {
+                return Ok(());
+            }
+        }
 
         let grid = &self.rows;
         let width = usize::from(cols);
@@ -674,8 +681,8 @@ impl Engine {
             padding,
             extension,
             password_prompt,
-            mouse_tracking: self.term.is_mouse_tracking().unwrap_or(false),
-            alternate_screen: self.term.active_screen().is_ok_and(|s| s == Screen::Alternate),
+            mouse_tracking,
+            alternate_screen,
         };
         *self.shared.frame.lock().unwrap() = Arc::new(frame);
         if !self.shared.notified.swap(true, Ordering::AcqRel) {
@@ -705,4 +712,33 @@ impl SelectionGesture {
 
 fn flag(on: bool, bit: u16) -> u16 {
     if on { bit } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine() -> (Engine, Arc<Shared>) {
+        let (shell, _rx) = sshl_core::ssh::shell_channel();
+        let shared = Arc::new(Shared { frame: Mutex::new(Arc::new(Frame::default())), notified: AtomicBool::new(false) });
+        let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        (Engine::new(size, shell, shared.clone(), Box::new(|_| {})).unwrap(), shared)
+    }
+
+    fn cursor_x(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> u16 {
+        engine.term.vt_write(bytes);
+        engine.publish().unwrap();
+        shared.frame.lock().unwrap().cursor.unwrap().x
+    }
+
+    /// 只移动光标（← →、Home / End）不改任何格子，帧里的光标位置也要跟上。
+    #[test]
+    fn moving_the_cursor_without_changing_cells_updates_the_frame() {
+        let (mut engine, shared) = engine();
+        assert_eq!(cursor_x(&mut engine, &shared, b"ls -la"), 6);
+        assert_eq!(cursor_x(&mut engine, &shared, b"\x08"), 5);
+        assert_eq!(cursor_x(&mut engine, &shared, b"\x08\x08"), 3);
+        assert_eq!(cursor_x(&mut engine, &shared, b"\x1b[C"), 4);
+        assert_eq!(cursor_x(&mut engine, &shared, b"\r"), 0);
+    }
 }

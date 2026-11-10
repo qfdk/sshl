@@ -4,7 +4,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
@@ -216,6 +216,7 @@ pub struct TerminalView {
     grid_origin: Point<Pixels>,
     metrics: Option<Metrics>,
     blink_on: bool,
+    blink_reset: Instant,
     /// 输入法正在组的字（还没上屏）。
     marked: Option<String>,
     password_prompt: bool,
@@ -247,7 +248,11 @@ impl TerminalView {
             while let Some(msg) = ui_rx.next().await {
                 let alive = this.update(cx, |view, cx| match msg {
                     UiMsg::Engine(engine::Event::Frame) => {
-                        view.frame = view.handle.take_frame();
+                        let frame = view.handle.take_frame();
+                        if frame.cursor != view.frame.cursor {
+                            view.show_cursor();
+                        }
+                        view.frame = frame;
                         if view.frame.password_prompt != view.password_prompt {
                             view.password_prompt = view.frame.password_prompt;
                             cx.emit(TerminalEvent::PasswordPrompt);
@@ -274,7 +279,9 @@ impl TerminalView {
             loop {
                 cx.background_executor().timer(BLINK_INTERVAL).await;
                 let alive = this.update(cx, |view, cx| {
-                    if view.frame.cursor.is_some_and(|c| c.blinking) {
+                    if view.blink_reset.elapsed() < BLINK_INTERVAL {
+                        // 刚按过键 / 光标刚动过：这一拍不熄，移动中的光标一直看得见
+                    } else if view.frame.cursor.is_some_and(|c| c.blinking) {
                         view.blink_on = !view.blink_on;
                         cx.notify();
                     } else if !view.blink_on {
@@ -291,7 +298,7 @@ impl TerminalView {
         let focus = cx.focus_handle();
         cx.on_focus(&focus, window, |view, _, cx| {
             view.handle.send(Input::Focus(true));
-            view.blink_on = true;
+            view.show_cursor();
             cx.notify();
         })
         .detach();
@@ -314,6 +321,7 @@ impl TerminalView {
             grid_origin: Point::default(),
             metrics: None,
             blink_on: true,
+            blink_reset: Instant::now(),
             marked: None,
             password_prompt: false,
             drop_hover: false,
@@ -419,8 +427,14 @@ impl TerminalView {
         self.shell.close();
     }
 
-    fn input(&mut self, input: Input) {
+    /// 光标亮起来，并且闪烁从头计时。
+    fn show_cursor(&mut self) {
         self.blink_on = true;
+        self.blink_reset = Instant::now();
+    }
+
+    fn input(&mut self, input: Input) {
+        self.show_cursor();
         self.handle.send(input);
     }
 
