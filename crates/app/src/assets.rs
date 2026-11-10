@@ -54,7 +54,6 @@ icons! {
     PanelLeft => "panel-left",
     Pencil => "pencil",
     Plus => "plus",
-    Power => "power",
     RefreshCw => "refresh-cw",
     Search => "search",
     Server => "server",

@@ -1,7 +1,7 @@
 //! 侧栏：应用标识、搜索、按分组的连接列表（拖动换组 / 排序）、新建连接与设置（旧 Sidebar.tsx + ConnectionList.tsx）。
 
 use gpui::{
-    AccessibleAction, AnyElement, AppContext, ClickEvent, Context, DragMoveEvent, Focusable, FontWeight, InteractiveElement,
+    AccessibleAction, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, DragMoveEvent, Focusable, FontWeight, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
     Styled, Window, anchored, deferred, div, img, prelude::FluentBuilder, px,
 };
@@ -255,7 +255,6 @@ impl Workspace {
             Some(DropTarget::Item { item, side, .. }) if *item == conn.id => Some(*side),
             _ => None,
         };
-        let group_name = SharedString::from(format!("conn-{}", conn.id));
         let name: SharedString = conn.name.clone().into();
         let address: SharedString = if conn.username.is_empty() { conn.host.clone().into() } else { format!("{}@{}", conn.username, conn.host).into() };
         let (connect_id, menu_id, drag_id, item_group, item_id) = (id.clone(), id.clone(), id.clone(), group.to_string(), id.clone());
@@ -308,54 +307,9 @@ impl Workspace {
                     ),
             );
 
-        let actions = {
-            let (disconnect_id, edit_id, delete_id) = (id.clone(), id.clone(), id.clone());
-            let editing = conn.clone();
-            div()
-                .absolute()
-                .right(px(6.))
-                .top(px(9.))
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .rounded(px(8.))
-                .bg(theme::color(ui::CARD))
-                .shadow_sm()
-                .opacity(0.)
-                .group_hover(group_name.clone(), |s| s.opacity(1.))
-                .when(connected, |a| {
-                    a.child(kit::mini_button(SharedString::from(format!("disconnect-{id}")), Icon::Power, "断开连接", ui::FOREGROUND).on_click(cx.listener(
-                        move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.disconnect(&disconnect_id, window, cx);
-                        },
-                    )))
-                })
-                .child(
-                    kit::mini_button(SharedString::from(format!("edit-{id}")), Icon::Pencil, if connected { "断开后才能编辑" } else { "编辑连接" }, ui::FOREGROUND)
-                        .when(connected, |b| b.opacity(0.4).cursor_default())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            if this.session(&edit_id).is_none() {
-                                this.open_connection_dialog(Some(editing.clone()), window, cx);
-                            }
-                        })),
-                )
-                .child(
-                    kit::mini_button(SharedString::from(format!("delete-{id}")), Icon::Trash, if connected { "断开后才能删除" } else { "删除连接" }, ui::DESTRUCTIVE)
-                        .when(connected, |b| b.opacity(0.4).cursor_default())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            if this.session(&delete_id).is_none() {
-                                this.delete_connection(&delete_id, window, cx);
-                            }
-                        })),
-                )
-        };
 
         div()
             .id(SharedString::from(format!("item-{}", conn.id)))
-            .group(group_name)
             .role(Role::Button)
             .aria_label(name.clone())
             .relative()
@@ -387,7 +341,6 @@ impl Workspace {
                 )
             })
             .child(body)
-            .child(actions)
             // 鼠标单击不连接，双击才连；键盘和辅助功能的「按下」直接连接（VoiceOver 才连得上）
             .on_click(cx.listener({
                 let id = connect_id.clone();
@@ -405,7 +358,7 @@ impl Workspace {
                 }
             })
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                this.menu = Some(ConnectionMenu { connection_id: menu_id.clone(), position: event.position });
+                this.menu = Some(ConnectionMenu { connection_id: menu_id.clone(), position: event.position, on_tab: false });
                 cx.notify();
             }))
             .on_drag(DraggedConnection { id: drag_id, name: item_name }, {
@@ -456,7 +409,8 @@ impl Workspace {
         let menu = self.menu.as_ref()?;
         let id = menu.connection_id.clone();
         let position = menu.position;
-        let conn = self.connection(&id)?.clone();
+        let on_tab = menu.on_tab;
+        let conn = self.connection(&id).cloned();
         let connected = self.session(&id).is_some();
         let this = cx.entity().downgrade();
         let dismiss = {
@@ -475,21 +429,39 @@ impl Workspace {
                 let _ = this.update(cx, |this, cx| f(this, &id, window, cx));
             }
         };
-        let mut entries = vec![MenuEntry::Item(MenuItem::new("连接", action(|this, id, window, cx| this.connect_to_saved(id, window, cx))))];
-        let editing = conn.clone();
-        let edit_this = this.clone();
-        entries.push(MenuEntry::Item(
-            MenuItem::new("编辑", move |window, cx| {
-                let editing = editing.clone();
-                let _ = edit_this.update(cx, |this, cx| this.open_connection_dialog(Some(editing), window, cx));
-            })
-            .disabled(connected),
-        ));
-        if connected {
-            entries.push(MenuEntry::Item(MenuItem::new("断开连接", action(|this, id, window, cx| this.disconnect(id, window, cx)))));
-        }
-        entries.push(MenuEntry::Separator);
-        entries.push(MenuEntry::Item(MenuItem::new("删除", action(|this, id, window, cx| this.delete_connection(id, window, cx))).destructive().disabled(connected)));
+        let entries = if on_tab {
+            // 标签：重连、复制地址、关闭其他、关闭
+            let host = conn.as_ref().map(|c| c.host.clone());
+            let copied = host.clone().unwrap_or_default();
+            vec![
+                MenuEntry::Item(MenuItem::new("重新连接", action(|this, id, window, cx| this.reconnect_tab(id, window, cx))).disabled(conn.is_none())),
+                MenuEntry::Item(
+                    MenuItem::new("复制主机地址", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))).disabled(host.is_none()),
+                ),
+                MenuEntry::Separator,
+                MenuEntry::Item(
+                    MenuItem::new("关闭其他标签", action(|this, id, window, cx| this.close_other_tabs(id, window, cx))).disabled(self.sessions.len() < 2),
+                ),
+                MenuEntry::Item(MenuItem::new("关闭", action(|this, id, window, cx| this.disconnect(id, window, cx)))),
+            ]
+        } else {
+            let conn = conn?;
+            let mut entries = vec![MenuEntry::Item(MenuItem::new("连接", action(|this, id, window, cx| this.connect_to_saved(id, window, cx))))];
+            let edit_this = this.clone();
+            entries.push(MenuEntry::Item(
+                MenuItem::new("编辑", move |window, cx| {
+                    let editing = conn.clone();
+                    let _ = edit_this.update(cx, |this, cx| this.open_connection_dialog(Some(editing), window, cx));
+                })
+                .disabled(connected),
+            ));
+            if connected {
+                entries.push(MenuEntry::Item(MenuItem::new("断开连接", action(|this, id, window, cx| this.disconnect(id, window, cx)))));
+            }
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Item(MenuItem::new("删除", action(|this, id, window, cx| this.delete_connection(id, window, cx))).destructive().disabled(connected)));
+            entries
+        };
         let panel = kit::menu_panel(entries, dismiss);
         Some(
             div()

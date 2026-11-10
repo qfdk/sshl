@@ -113,6 +113,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **快速连接**（⌘K，`quick_connect.rs`）：顶部居中的浮层，只搜保存的连接（空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里，
   名称以第一个词开头的排前面），↑↓ 选、↵ 连、Esc / 点外面关；已开着的带绿点、选了就切过去（`connect_to_saved`）。
   顺序同侧栏。侧栏收起时空页面提示 ⌘K。有对话框 / 提示框 / 正在连接时不弹。
+- **右键菜单**（`sidebar.rs` 的 `connection_menu_overlay`，`ConnectionMenu.on_tab` 区分）：侧栏连接项是 连接 / 编辑 / 断开 / 删除（连着时编辑、删除置灰）；
+  标签是 重新连接 / 复制主机地址 / 关闭其他标签 / 关闭。连接项上不放悬停按钮（和右键菜单、标签 × 重复）。
+  标签的「重新连接」对还连着的会话先在后端断开旧会话（`reconnect_tab`；终端的 reconnect 只换 shell 通道，不关旧连接）。
 - **命令片段**（`snippets.rs`，库里 `snippets` 表，`config_store::snippets`）：顶栏按钮 / ⌘P 打开面板，搜索、↑↓ 选、↵ 执行、⇧↵ 只填入。
   按粘贴发到终端（多行命令走括号粘贴，不会边粘边执行），执行时再补回车；不在终端页会先切过去。片段可以所有服务器通用，
   也可以只属于某个连接（删连接时一起删）。面板里的上下 / 回车 / Esc 绑在 `SnippetPanel > Input`，压过 gpui-base 输入框自己的绑定。

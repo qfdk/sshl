@@ -105,6 +105,8 @@ pub struct DraggedTab {
 pub struct ConnectionMenu {
     pub connection_id: String,
     pub position: Point<Pixels>,
+    /// 在标签上点的右键（菜单是标签那一套），否则是侧栏连接项。
+    pub on_tab: bool,
 }
 
 pub struct FillMenu {
@@ -319,6 +321,45 @@ impl Workspace {
                 view.update(cx, |view, cx| view.reconnect(details, window, cx));
             }
         });
+    }
+
+    /// 标签右键「重新连接」：还连着的先在后端断开旧会话（终端的 reconnect 只换 shell 通道，不关旧连接），
+    /// 再原地重连，屏幕内容和回滚历史留着。
+    pub(crate) fn reconnect_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // 连接被删了就没有参数可重连，别先把旧会话断掉
+        if self.connection(id).is_none() {
+            return;
+        }
+        let old = self.session(id).and_then(|s| s.view.read(cx).session_id().map(str::to_string));
+        if let Some(old) = old {
+            self.revalidating.remove(&old);
+            self.file_manager.update(cx, |files, _| files.forget_session(&old));
+            backend::get().runtime.spawn(async move { ssh::disconnect(&backend::get().state, &old).await });
+        }
+        self.reconnect_in_place(id, window, cx);
+    }
+
+    /// 标签右键「关闭其他标签」：一次确认，断开除它以外的所有会话，停在它上面。
+    pub(crate) fn close_other_tabs(&mut self, keep: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let others: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).filter(|id| id != keep).collect();
+        if others.is_empty() {
+            return;
+        }
+        let message = format!("确定要断开其他 {} 个会话吗？", others.len());
+        let answer = prompts::confirm(window, cx, Options::new("关闭其他标签").message(message).confirm("断开"));
+        let keep = keep.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            if !answer.await.unwrap_or(false) {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                for id in &others {
+                    this.disconnect_now(id, window, cx);
+                }
+                this.switch_to(&keep, window, cx);
+            });
+        })
+        .detach();
     }
 
     /// 已保存连接的连接参数，交给 `go`。密码方式但没存密码时先问（只用这一次，不保存）。

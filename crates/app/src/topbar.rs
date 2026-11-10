@@ -11,7 +11,7 @@ use crate::settings;
 use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
-use crate::workspace::{COLLAPSED_COLUMN_LEFT, DraggedTab, MainTab, TRAFFIC_LIGHTS_WIDTH, Workspace, drag_region};
+use crate::workspace::{COLLAPSED_COLUMN_LEFT, ConnectionMenu, DraggedTab, MainTab, TRAFFIC_LIGHTS_WIDTH, Workspace, drag_region};
 
 /// 按住 ⌘ 时浮在标签 / 按钮右上角的快捷键。
 fn hint(key: impl Into<SharedString>, visible: bool) -> AnyElement {
@@ -299,6 +299,13 @@ impl Workspace {
                     .id(SharedString::from(format!("tab-{id}")))
                     .role(Role::Tab)
                     .aria_label(name.clone())
+                    .on_mouse_down(gpui::MouseButton::Right, cx.listener({
+                        let id = id.clone();
+                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            this.menu = Some(ConnectionMenu { connection_id: id.clone(), position: event.position, on_tab: true });
+                            cx.notify();
+                        }
+                    }))
                     .relative()
                     .h(px(34.))
                     .flex()
