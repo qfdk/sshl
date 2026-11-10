@@ -20,7 +20,7 @@ use crate::assets::Icon;
 use crate::backend;
 use crate::prompts::{self, Options};
 use crate::theme::{self, ui};
-use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
+use crate::ui::{self as kit, MenuEntry, MenuItem};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const ROW_HEIGHT: f32 = 32.;
@@ -1069,13 +1069,8 @@ impl Render for SystemPanel {
                     let _ = this.update(cx, |this, cx| this.set_view(view, cx));
                 },
             ))
-            .child(div().flex_1().min_w_0().max_w(px(360.)).child(kit::text_field(&self.search, self.search_focused)))
-            .child(
-                kit::icon_button("system-refresh", Variant::Ghost, Icon::RefreshCw, "刷新")
-                    .w(px(32.))
-                    .h(px(32.))
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-            );
+            // 停在这页时每 3 秒自动刷新，不放手动刷新按钮
+            .child(div().flex_1().min_w_0().max_w(px(360.)).child(kit::text_field(&self.search, self.search_focused)));
 
         let header = match self.view {
             View::Processes => div()
