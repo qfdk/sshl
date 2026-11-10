@@ -122,7 +122,7 @@ impl Workspace {
             .cursor_pointer()
             .hover(|s| s.text_color(theme::color(if open { ui::PRIMARY } else { ui::FOREGROUND })))
             .when(!self.hint_visible, |b| b.tooltip(|window, cx| kit::tooltip("命令片段".into(), window, cx)))
-            .child(kit::icon_sized(Icon::SquareTerminal, 16.))
+            .child(kit::icon_sized(Icon::Code, 16.))
             .child(hint("P", self.hint_visible))
             .on_hover(cx.listener(|this, hovered: &bool, _, _| this.snippet_button_hovered = *hovered))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_snippets(window, cx)));

@@ -259,6 +259,8 @@ pub struct FileManager {
     /// 当前连接收藏的远程目录（按收藏先后）。
     bookmarks: Vec<String>,
     bookmark_menu: bool,
+    /// 鼠标在收藏按钮上：点按钮关菜单时，「点到菜单外面」先关了它，按钮的点击别再把它打开。
+    bookmark_button_hovered: bool,
     permission: Option<PermissionDialog>,
     new_folder: Option<NewFolderDialog>,
     dragging: Option<DragState>,
@@ -325,6 +327,7 @@ impl FileManager {
             menu: None,
             bookmarks: Vec::new(),
             bookmark_menu: false,
+            bookmark_button_hovered: false,
             permission: None,
             new_folder: None,
             dragging: None,
@@ -1296,7 +1299,9 @@ impl FileManager {
             .h(px(32.))
             .px_0()
             .aria_label("收藏的目录")
-            .tooltip(|window, cx| kit::tooltip("收藏的目录".into(), window, cx))
+            // 菜单开着时不弹提示，免得压在菜单上
+            .when(!self.bookmark_menu, |b| b.tooltip(|window, cx| kit::tooltip("收藏的目录".into(), window, cx)))
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| this.bookmark_button_hovered = *hovered))
             .child(kit::icon(Icon::Bookmark).when(marked, |g| g.text_color(theme::color(ui::PRIMARY))))
             .when(disabled, |b| b.opacity(0.5).cursor_default())
             .when(!disabled, |b| {
@@ -1331,13 +1336,21 @@ impl FileManager {
                     .icon(Icon::Folder),
                 ));
             }
+            let outside_weak = weak.clone();
             let dismiss = move |_: &mut Window, cx: &mut App| {
                 let _ = weak.update(cx, |this, cx| {
                     this.bookmark_menu = false;
                     cx.notify();
                 });
             };
-            let outside = dismiss.clone();
+            let close = dismiss.clone();
+            let outside = move |window: &mut Window, cx: &mut App| {
+                // 点的是收藏按钮：交给按钮的点击去关，不然这里先关、按钮又打开
+                if outside_weak.read_with(cx, |this, _| this.bookmark_button_hovered).unwrap_or(false) {
+                    return;
+                }
+                close(window, cx);
+            };
             div().absolute().right_0().top(px(36.)).child(
                 deferred(
                     anchored().anchor(gpui::Anchor::TopRight).child(
