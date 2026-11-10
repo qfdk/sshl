@@ -12,7 +12,17 @@ pub fn encode(keystroke: &Keystroke, repeat: bool) -> Option<KeyInput> {
         // ⌘ 组合归应用（复制、粘贴、关标签……）
         return None;
     }
-    let (key, unshifted) = physical_key(&keystroke.key)?;
+    // macOS 把 Shift 并进标点送来：Ctrl+Shift+- 是 key「_」、不带 Shift（gpui-pre-macos 的 parse_keystroke）。
+    // 还原成物理键 + Shift，打出的字符当文字给编码器，Ctrl+_ 才编成 ^_（同 Ghostty）
+    let (key, unshifted, shifted) = match physical_key(&keystroke.key) {
+        Some((key, unshifted)) => (key, unshifted, None),
+        None => {
+            let ch = single_char(&keystroke.key)?;
+            let base = unshifted_punctuation(ch)?;
+            (char_key(base)?, base, Some(ch))
+        }
+    };
+    let shift = m.shift || shifted.is_some();
     let text = keystroke.key_char.clone().filter(|t| !t.is_empty());
     let printable = unshifted != '\0';
     // 普通字符（含 Shift、Option 打出来的字符）走输入法，才能用中文输入法、死键组字
@@ -20,7 +30,7 @@ pub fn encode(keystroke: &Keystroke, repeat: bool) -> Option<KeyInput> {
         return None;
     }
     let mut mods = Mods::empty();
-    if m.shift {
+    if shift {
         mods |= Mods::SHIFT;
     }
     if m.alt {
@@ -30,15 +40,15 @@ pub fn encode(keystroke: &Keystroke, repeat: bool) -> Option<KeyInput> {
         mods |= Mods::CTRL;
     }
     let mut consumed = Mods::empty();
-    if printable && m.shift {
+    if printable && shift {
         consumed |= Mods::SHIFT;
     }
     Some(KeyInput {
         key,
         mods,
         consumed_mods: consumed,
-        // Ctrl 组合的文字（如 ^C 的 "\u{3}"）由编码器自己算，不带平台给的文字
-        text: if m.control { None } else { text },
+        // Ctrl 组合的文字（如 ^C 的 "\u{3}"）由编码器自己算，不带平台给的文字；Shift 标点给出打出的字符
+        text: if m.control { shifted.map(String::from) } else { text },
         unshifted,
         repeat,
     })
@@ -82,14 +92,47 @@ fn physical_key(name: &str) -> Option<(Key, char)> {
         "f18" => Key::F18,
         "f19" => Key::F19,
         _ => {
-            let mut chars = name.chars();
-            let (Some(ch), None) = (chars.next(), chars.next()) else {
-                return None;
-            };
-            return char_key(ch.to_ascii_lowercase()).map(|key| (key, ch.to_ascii_lowercase()));
+            let ch = single_char(name)?.to_ascii_lowercase();
+            return char_key(ch).map(|key| (key, ch));
         }
     };
     Some((named, '\0'))
+}
+
+fn single_char(name: &str) -> Option<char> {
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Some(ch),
+        _ => None,
+    }
+}
+
+/// 美式键盘上按 Shift 打出的标点 → 同一个键不按 Shift 的字符（物理键按美式布局，同 char_key）。
+fn unshifted_punctuation(ch: char) -> Option<char> {
+    Some(match ch {
+        '!' => '1',
+        '@' => '2',
+        '#' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        '"' => '\'',
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        _ => return None,
+    })
 }
 
 fn char_key(ch: char) -> Option<Key> {
@@ -180,5 +223,36 @@ mod tests {
     fn command_shortcuts_belong_to_the_app() {
         assert!(encode(&stroke("c", Some("c"), Modifiers::command()), false).is_none());
         assert!(encode(&stroke("w", None, Modifiers::command()), false).is_none());
+    }
+
+    /// 经 libghostty 编成发给服务器的字节（默认模式，非 Kitty 键盘协议）。
+    fn bytes(keystroke: Keystroke) -> Vec<u8> {
+        let input = encode(&keystroke, false).expect("应由终端编码");
+        let mut event = libghostty_vt::key::Event::new().unwrap();
+        event
+            .set_action(libghostty_vt::key::Action::Press)
+            .set_key(input.key)
+            .set_mods(input.mods)
+            .set_consumed_mods(input.consumed_mods)
+            .set_unshifted_codepoint(input.unshifted)
+            .set_utf8(input.text);
+        let mut out = Vec::new();
+        libghostty_vt::key::Encoder::new().unwrap().encode_to_vec(&event, &mut out).unwrap();
+        out
+    }
+
+    /// macOS 把 Shift 并进标点：Ctrl+Shift+- 送来的是 key「_」、不带 Shift、没有文字（gpui-pre-macos 的 parse_keystroke）。
+    #[test]
+    fn control_with_shifted_punctuation_reaches_the_shell() {
+        assert_eq!(bytes(stroke("c", None, Modifiers::control())), [0x03]);
+        assert_eq!(bytes(stroke("]", None, Modifiers::control())), [0x1d]);
+        assert_eq!(bytes(stroke("_", None, Modifiers::control())), [0x1f], "Ctrl+_：readline / zsh 撤销");
+        // Ctrl+@ 同 Ghostty 按 fixterms 编成 CSI u；要 NUL 用 Ctrl+2 / Ctrl+Space
+        assert_eq!(bytes(stroke("@", None, Modifiers::control())), b"\x1b[64;5u");
+        assert_eq!(bytes(stroke("2", None, Modifiers::control())), [0x00]);
+        assert_eq!(bytes(stroke("^", None, Modifiers::control())), [0x1e]);
+        assert_eq!(bytes(stroke("?", None, Modifiers::control())), [0x7f]);
+        // 不按 Ctrl 的 Shift 标点还是文字，走输入法
+        assert!(encode(&stroke("_", Some("_"), Modifiers::none()), false).is_none());
     }
 }
