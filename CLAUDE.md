@@ -29,7 +29,7 @@ brew install zig                   # Zig 0.17：libghostty-vt 构建用
 cargo run -p sshl                  # 开发版（debug；libghostty-vt 也是 Zig Debug，刷屏很慢，测性能用 release）
 cargo test -p sshl-core            # 后端单元测试（集成测试 #[ignore]，要 SSHL_SFTP_IT / SSHL_SUDO_IT 指向测试容器）
 cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键位、设置迁移、文件管理逻辑）
-cargo clippy --workspace
+cargo clippy --workspace --all-targets   # 自己的 crate 保持零警告（vendor/russh 那条不改，补丁保持最小）
 scripts/bundle.sh                  # release 构建 + 组装 target/release/bundle/SSHL.app（ad-hoc 签名）
 scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 + 自定义图标），先跑 bundle.sh
 ```

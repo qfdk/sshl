@@ -49,7 +49,7 @@ fn plan_prewarm<T>(
                 && !active.contains(key)
                 && failed_at
                     .get(key)
-                    .map_or(true, |at| now.duration_since(*at) >= WARM_RETRY_BACKOFF)
+                    .is_none_or(|at| now.duration_since(*at) >= WARM_RETRY_BACKOFF)
         })
         .collect()
 }

@@ -847,7 +847,9 @@ mod tests {
         assert!(!matches!(err, AppError::HostKeyDeclined) && err.to_string().contains("auth"), "{err}");
         assert_eq!(asked.lock().unwrap().len(), 1);
         asked.lock().unwrap().clear();
-        handshake(check(false)).await.err().map(|e| assert!(!matches!(e, AppError::HostKeyDeclined), "已信任不该再问：{e}"));
+        if let Err(e) = handshake(check(false)).await {
+            assert!(!matches!(e, AppError::HostKeyDeclined), "已信任不该再问：{e}");
+        }
         assert!(asked.lock().unwrap().is_empty());
 
         // 没人可问（后台预热）：未知主机直接不连

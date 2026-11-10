@@ -49,8 +49,8 @@ const DOWNLOAD_SEGMENTS: usize = 16;
 /// 不超过下载方向的通道窗口；目录下载的小文件也按它限。
 const DOWNLOAD_IN_FLIGHT_BYTES: u64 = DOWNLOAD_SEGMENTS as u64 * TRANSFER_CHUNK as u64;
 
-/// 小于此大小走单句柄流式下载。按 RTT 算（块 = TRANSFER_CHUNK）：单句柄 = open + ⌈S/块⌉ 个 READ
-/// + 1 个读到 EOF 的 READ；分段 = 段 0 open → 其余段 open → 每段 ⌈S/(段数·块)⌉ 个 READ（只有最后一段
+/// 小于此大小走单句柄流式下载。按 RTT 算（块 = TRANSFER_CHUNK）：单句柄 = open + ⌈S/块⌉ 个 READ +
+/// 1 个读到 EOF 的 READ；分段 = 段 0 open → 其余段 open → 每段 ⌈S/(段数·块)⌉ 个 READ（只有最后一段
 /// 多读一次 EOF）。2 块时两者打平、分段还多开句柄；4 块时分段 4 个 RTT 对单句柄 6 个。再往上调
 /// 只会让 1–2MB 的文件白等往返，所以保持 4 块（≈1MB）。
 const SEGMENTED_DOWNLOAD_MIN: u64 = 4 * TRANSFER_CHUNK as u64;
@@ -642,7 +642,10 @@ fn staging_from_prepare(status: u32, out: &str, err: &str) -> AppResult<String> 
 /// 登录用户没有目标目录写权限时的上传（前端在普通上传报 Permission denied 后、用户确认才调用）：
 /// 1) 先验 sudo、建 0700 暂存区（sudo_prepare_command）；2) 以登录用户身份传到暂存区；
 /// 3) sudo 以目标目录属主身份解包到位，无论成败都删暂存区（sudo_extract_command）。共两条 exec。
+///
 /// sudo 密码：前端传入 > 连接保存的登录密码 > 免密 sudo（-n）。
+// 参数都是界面一次调用带来的，没有可复用的组合，不为凑数包结构体
+#[allow(clippy::too_many_arguments)]
 pub async fn file_upload_sudo(
     events: &Events,
     state: &AppState,
@@ -960,6 +963,8 @@ fn segment_ranges(total: u64, segments: usize) -> Vec<(u64, u64)> {
 /// 各段写到自己的偏移，最终长度自然等于实际写到的末尾。非最后一段提前 EOF 说明文件在下载中变短，
 /// 直接报错，不留下零填充的空洞；最后一段不设上界读到 EOF。每段的远端句柄用完交给 `release` 关闭。
 /// 任一段出错，其余段读完手上这一块就停，等各段都交还句柄才返回第一个错误：直接丢弃在途的段会漏关它们的句柄。
+// 打开 / 释放句柄的回调各管一端，测试里要单独替换，合成结构体反而难读
+#[allow(clippy::too_many_arguments)]
 async fn download_segmented<R, W, OR, ORF, OL, OLF>(
     total: u64,
     segments: usize,
@@ -2836,10 +2841,10 @@ mod tests {
     fn in_flight_budget_fits_ssh_window_and_stall_detection() {
         // 在途再多也只是在通道窗口外排队：下载方向是我们给的连接窗口；上传方向是服务端给的
         // （OpenSSH session 通道 2MB），正好是 russh-sftp 8 路写 pipeline × 块
-        assert!(DOWNLOAD_IN_FLIGHT_BYTES <= crate::ssh::CONNECTION_WINDOW as u64);
+        const { assert!(DOWNLOAD_IN_FLIGHT_BYTES <= crate::ssh::CONNECTION_WINDOW as u64) };
         let write_pipeline = russh_sftp::client::Config::default().max_concurrent_writes as u64;
         assert_eq!(UPLOAD_IN_FLIGHT_BYTES, write_pipeline * TRANSFER_CHUNK as u64);
-        assert!(UPLOAD_IN_FLIGHT_BYTES <= 2 * 1024 * 1024);
+        const { assert!(UPLOAD_IN_FLIGHT_BYTES <= 2 * 1024 * 1024) };
         // 卡死判定只看通道多久没收到数据，与在途多少无关；上传时两个写确认之间隔一个块的发送时间，
         // 不慢于 ~5KB/s 的链路不能误判
         let slowest_ok = TRANSFER_CHUNK as u64 / SFTP_STALL.as_secs();
