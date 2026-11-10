@@ -57,8 +57,8 @@ fn main() {
         settings::init(cx);
         cx.text_system()
             .add_fonts(vec![
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf").as_slice()),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFontMono-Bold.ttf").as_slice()),
+                Cow::Borrowed(include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFont-Regular.ttf").as_slice()),
+                Cow::Borrowed(include_bytes!("../../../assets/fonts/JetBrainsMonoNerdFont-Bold.ttf").as_slice()),
             ])
             .expect("load bundled terminal font");
 

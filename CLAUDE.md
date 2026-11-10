@@ -58,7 +58,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **终端外观**：卡片按整行整列贴齐（余下不足一行 / 一列留给外面的浅色背景），四边 4px 内边距；内边距取边缘格子的主色
   并把整行有底色的边缘行延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。
   粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。
-- **内置字体**：JetBrainsMono Nerd Font Mono 两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
+- **内置字体**：JetBrainsMono Nerd Font（非 Mono 版，图标是正常大小；Mono 版把图标压成一格，用户嫌不好看）两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
 - **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的
   text_color、不继承，别直接用。图标在 `assets.rs` 的 `icons!` 表里登记。
   位图（`img()`）是双线性采样、没有 mipmap，大图缩小会发毛：侧栏标志用按 2 倍屏缩好的 `assets/sidebar-logo.png`（60px 画 30pt）。

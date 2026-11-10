@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
