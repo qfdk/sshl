@@ -13,8 +13,8 @@ use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
 use crate::workspace::{DraggedTab, MainTab, Workspace, drag_region};
 
-/// 按住 ⌘ 时浮在标签右上角的数字。
-fn hint(n: usize, visible: bool) -> AnyElement {
+/// 按住 ⌘ 时浮在标签 / 按钮右上角的快捷键。
+fn hint(key: impl Into<SharedString>, visible: bool) -> AnyElement {
     div()
         .absolute()
         .right(px(-6.))
@@ -32,7 +32,7 @@ fn hint(n: usize, visible: bool) -> AnyElement {
         .justify_center()
         .shadow_sm()
         .when(!visible, |h| h.opacity(0.))
-        .child(n.to_string())
+        .child(key.into())
         .into_any_element()
 }
 
@@ -69,7 +69,7 @@ impl Workspace {
                                 .child(text),
                         )
                     })
-                    .when(connected, |r| r.child(self.main_tabs(cx)))
+                    .when(connected, |r| r.child(self.snippet_button(cx)).child(self.main_tabs(cx)))
                     .when(connected && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
                         r.child(self.fill_button(cx))
                     })
@@ -99,9 +99,54 @@ impl Workspace {
                     .p(px(3.))
                     .flex()
                     .gap(px(2.))
-                    .children((1..=3).map(|n| div().relative().flex_1().h_full().child(hint(n, hints)))),
+                    .children((1..=3).map(|n| div().relative().flex_1().h_full().child(hint(n.to_string(), hints)))),
             )
             .into_any_element()
+    }
+
+    /// 命令片段按钮（⌘P）和它下面的面板。
+    fn snippet_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.snippets_open;
+        let button = div()
+            .id("snippets")
+            .role(Role::Button)
+            .aria_label("命令片段")
+            .relative()
+            .size(px(34.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(10.))
+            .bg(theme::color(ui::SECONDARY))
+            .text_color(theme::color(if open { ui::PRIMARY } else { ui::MUTED_FOREGROUND }))
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme::color(if open { ui::PRIMARY } else { ui::FOREGROUND })))
+            .when(!self.hint_visible, |b| b.tooltip(|window, cx| kit::tooltip("命令片段".into(), window, cx)))
+            .child(kit::icon_sized(Icon::SquareTerminal, 16.))
+            .child(hint("P", self.hint_visible))
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| this.snippet_button_hovered = *hovered))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_snippets(window, cx)));
+        let panel = open.then(|| {
+            let this = cx.entity().downgrade();
+            div().absolute().right_0().top(px(40.)).child(
+                deferred(
+                    anchored().anchor(gpui::Anchor::TopRight).child(
+                        div()
+                            .on_mouse_down_out(move |_, window, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    // 点的是片段按钮：交给按钮的点击去关，不然这里先关、按钮又打开
+                                    if !this.snippet_button_hovered {
+                                        this.close_snippets(window, cx);
+                                    }
+                                });
+                            })
+                            .child(self.snippet_panel.clone()),
+                    ),
+                )
+                .with_priority(2),
+            )
+        });
+        div().relative().child(button).when_some(panel, |d, panel| d.child(panel)).into_any_element()
     }
 
     fn fill_button(&self, cx: &mut Context<Self>) -> AnyElement {

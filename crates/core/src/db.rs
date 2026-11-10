@@ -52,6 +52,13 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connections (
             path          TEXT NOT NULL,
             sort_order    INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (connection_id, path)
+        );
+        CREATE TABLE IF NOT EXISTS snippets (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL DEFAULT '',
+            command       TEXT NOT NULL,
+            connection_id TEXT,
+            sort_order    INTEGER NOT NULL DEFAULT 0
         );";
 
 fn open() -> AppResult<Connection> {

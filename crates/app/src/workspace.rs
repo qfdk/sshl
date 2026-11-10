@@ -23,11 +23,12 @@ use crate::system_panel::SystemPanel;
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options, PasswordAnswer};
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
+use crate::snippets::{SnippetDialog, SnippetDialogEvent, SnippetPanel, SnippetPanelEvent};
 use crate::terminal::{Metrics, TerminalEvent, TerminalView};
 use crate::theme::{self, ui};
 use crate::ui as kit;
 
-actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, NewConnection, OpenSettings]);
+actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, OpenSettings]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -35,6 +36,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-1", ShowTerminal, Some("Workspace")),
         KeyBinding::new("cmd-2", ShowFiles, Some("Workspace")),
         KeyBinding::new("cmd-3", ShowSystem, Some("Workspace")),
+        KeyBinding::new("cmd-p", ShowSnippets, Some("Workspace")),
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
     ]);
@@ -139,6 +141,12 @@ pub struct Workspace {
     prompts: Entity<prompts::PromptHost>,
     pub(crate) file_manager: Entity<FileManager>,
     system_panel: Entity<SystemPanel>,
+    pub(crate) snippet_panel: Entity<SnippetPanel>,
+    /// 命令片段面板开着（顶栏按钮下面）。
+    pub(crate) snippets_open: bool,
+    /// 鼠标在片段按钮上：点按钮关面板时，「点到面板外面」先关了它，按钮的点击别再把它打开。
+    pub(crate) snippet_button_hovered: bool,
+    snippet_dialog: Option<Entity<SnippetDialog>>,
     pub(crate) focus: FocusHandle,
     /// 当前会话的往返延迟（连接 id，None = 超时）；切会话时清掉，量到再显示。
     pub(crate) latency: Option<(String, Option<std::time::Duration>)>,
@@ -151,7 +159,9 @@ impl Workspace {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索连接..."));
         let file_manager = cx.new(|cx| FileManager::new(window, cx));
         let system_panel = cx.new(|cx| SystemPanel::new(window, cx));
+        let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
         let subscriptions = vec![
+            cx.subscribe_in(&snippet_panel, window, Self::snippet_panel_event),
             cx.subscribe_in(&file_manager, window, |this, _, event: &FileManagerEvent, window, cx| match event {
                 FileManagerEvent::Reconnect(connection_id) => this.connect_to_saved(connection_id, window, cx),
             }),
@@ -206,6 +216,10 @@ impl Workspace {
             prompts,
             file_manager,
             system_panel,
+            snippet_panel,
+            snippets_open: false,
+            snippet_button_hovered: false,
+            snippet_dialog: None,
             focus: cx.focus_handle(),
             latency: None,
             _latency_task: cx.spawn(async move |this, cx| {
@@ -468,6 +482,7 @@ impl Workspace {
         self.active = Some(connection_id.to_string());
         self.measure_latency(cx);
         self.fill_menu = None;
+        self.snippets_open = false;
         let file_session = self.session(connection_id).and_then(|s| {
             let session_id = s.view.read(cx).session_id()?.to_string();
             Some(FileSession { session_id, connection_id: s.connection_id.clone(), name: s.name.clone() })
@@ -598,6 +613,7 @@ impl Workspace {
             }
             self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
             self.fill_menu = None;
+            self.snippets_open = false;
             window.focus(&self.focus, cx);
         }
     }
@@ -807,6 +823,72 @@ impl Workspace {
         self.open_fill_menu(window, cx);
     }
 
+    // ---------- 命令片段 ----------
+
+    pub(crate) fn toggle_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.snippets_open {
+            return self.close_snippets(window, cx);
+        }
+        let Some(connection_id) = self.active.clone() else { return };
+        if self.snippet_dialog.is_some() {
+            return;
+        }
+        self.fill_menu = None;
+        self.snippets_open = true;
+        self.snippet_panel.update(cx, |panel, cx| panel.open(connection_id, window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.snippets_open {
+            return;
+        }
+        self.snippets_open = false;
+        self.refocus(window, cx);
+        cx.notify();
+    }
+
+    fn snippet_panel_event(&mut self, _: &Entity<SnippetPanel>, event: &SnippetPanelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            SnippetPanelEvent::Run { command, execute } => {
+                self.snippets_open = false;
+                self.run_snippet(command, *execute, window, cx);
+            }
+            SnippetPanelEvent::New => self.open_snippet_dialog(None, window, cx),
+            SnippetPanelEvent::Edit(snippet) => self.open_snippet_dialog(Some(snippet.clone()), window, cx),
+            SnippetPanelEvent::Close => self.close_snippets(window, cx),
+        }
+    }
+
+    /// 发到当前会话的终端（不在终端页就先切过去）。
+    fn run_snippet(&mut self, command: &str, execute: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.active_session().map(|s| s.view.clone()) else { return };
+        if self.main_tab != MainTab::Terminal {
+            self.set_main_tab(MainTab::Terminal, window, cx);
+        }
+        view.update(cx, |view, _| view.send_command(command, execute));
+        self.refocus(window, cx);
+        cx.notify();
+    }
+
+    fn open_snippet_dialog(&mut self, editing: Option<sshl_core::config_store::Snippet>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.active.clone() else { return };
+        let name = self
+            .connection(&connection_id)
+            .map(|c| SharedString::from(c.name.clone()))
+            .or_else(|| self.session(&connection_id).map(|s| s.name.clone()))
+            .unwrap_or_default();
+        self.snippets_open = false;
+        let dialog = cx.new(|cx| SnippetDialog::new(editing, connection_id, name, window, cx));
+        // 存好或取消都回到片段面板：新建的那条马上就能点
+        self._subscriptions.push(cx.subscribe_in(&dialog, window, |this, _, _: &SnippetDialogEvent, window, cx| {
+            this.snippet_dialog = None;
+            this.toggle_snippets(window, cx);
+        }));
+        self.snippet_dialog = Some(dialog);
+        cx.notify();
+    }
+
     // ---------- 快捷键 ----------
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -983,6 +1065,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.set_main_tab(MainTab::Terminal, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.set_main_tab(MainTab::Files, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.set_main_tab(MainTab::System, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_snippets(window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
@@ -1054,6 +1137,7 @@ impl Render for Workspace {
             .when_some(self.connection_dialog.clone(), |root, dialog| root.child(dialog))
             .when_some(self.import_dialog.clone(), |root, dialog| root.child(dialog))
             .when_some(self.settings_dialog.clone(), |root, dialog| root.child(dialog))
+            .when_some(self.snippet_dialog.clone(), |root, dialog| root.child(dialog))
             .child(self.prompts.clone())
     }
 }

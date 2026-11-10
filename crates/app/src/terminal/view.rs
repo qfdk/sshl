@@ -386,6 +386,17 @@ impl TerminalView {
         matches!(self.status, Status::Closed | Status::Failed(_))
     }
 
+    /// 命令片段发到终端：按粘贴发（多行命令不会一行一行地先执行），`execute` 时再补一个回车。断开时不发。
+    pub fn send_command(&mut self, command: &str, execute: bool) {
+        if self.is_disconnected() || self.session_id().is_none() {
+            return;
+        }
+        self.input(Input::Paste(command.to_string()));
+        if execute {
+            self.input(Input::Text("\r".into()));
+        }
+    }
+
     /// 在终端里另起一行写一句灰色的提示（不经过远端）。
     fn notice(&mut self, text: &str) {
         let line = format!("\r\n\x1b[0m\x1b[2m[{text}]\x1b[0m\r\n");

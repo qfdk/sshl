@@ -95,6 +95,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **「系统」页**（⌘3，`system_panel.rs` + `crates/core/src/server_info.rs`）：负载 / 内存 / 磁盘 / 运行时间，进程（`ps -eo`）和监听端口
   （有 ss 用 ss、否则 Linux netstat -p、再否则 lsof），可结束进程（TERM / KILL，先确认）。命令走 `run_as_file_user`，切过来时先同步
   文件管理身份，终端 sudo -i 之后就以 root 看全部端口、结束 root 的进程。只在这页显示时每 3 秒刷新。
+- **命令片段**（`snippets.rs`，库里 `snippets` 表，`config_store::snippets`）：顶栏按钮 / ⌘P 打开面板，搜索、↑↓ 选、↵ 执行、⇧↵ 只填入。
+  按粘贴发到终端（多行命令走括号粘贴，不会边粘边执行），执行时再补回车；不在终端页会先切过去。片段可以所有服务器通用，
+  也可以只属于某个连接（删连接时一起删）。面板里的上下 / 回车 / Esc 绑在 `SnippetPanel > Input`，压过 gpui-base 输入框自己的绑定。
 - **远程目录收藏**：按连接存在 `sshl.db` 的 `bookmarks` 表（删连接时一起删）；远程栏路径框旁的收藏按钮，
   当前目录已收藏时是蓝色，菜单里收藏 / 取消收藏当前目录、点收藏的目录直接过去。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。

@@ -144,6 +144,14 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position: at }), cx);
             Ok(())
         }
+        // move X Y：鼠标移到某处（悬停状态）
+        "move" => {
+            let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+            let [x, y] = n.as_slice() else { return Err("move X Y".into()) };
+            let position = point(px(*x), px(*y));
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::none() }), cx);
+            Ok(())
+        }
         // hover X Y PATH... ：拖着文件停在某处不松手（看「松开上传」提示）
         "hover" => {
             let mut parts = rest.split_whitespace();

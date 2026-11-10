@@ -247,12 +247,88 @@ pub fn delete_connection(events: &Events, id: String) -> AppResult<()> {
     Ok(())
 }
 
-/// 连同该连接名下所有密文（password / passphrase / acct:*）和远程目录收藏一并删除。
+/// 连同该连接名下所有密文（password / passphrase / acct:*）、远程目录收藏、专属命令片段一并删除。
 fn delete_connection_rows(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM connections WHERE id=?1", rusqlite::params![id])?;
     conn.execute("DELETE FROM secrets WHERE key LIKE ?1", rusqlite::params![format!("{id}:%")])?;
     conn.execute("DELETE FROM bookmarks WHERE connection_id=?1", rusqlite::params![id])?;
+    conn.execute("DELETE FROM snippets WHERE connection_id=?1", rusqlite::params![id])?;
     Ok(())
+}
+
+/// 命令片段：常用命令存起来，一点就发到终端。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snippet {
+    pub id: i64,
+    /// 可以不起名（列表里直接显示命令）。
+    pub name: String,
+    pub command: String,
+    /// 只在这个连接里出现；None = 所有服务器通用。
+    pub connection_id: Option<String>,
+}
+
+/// 新建（id 为 None）或修改一个命令片段。
+#[derive(Debug, Clone)]
+pub struct SaveSnippetInput {
+    pub id: Option<i64>,
+    pub name: String,
+    pub command: String,
+    pub connection_id: Option<String>,
+}
+
+/// 某连接能用的命令片段：它专属的在前，再是通用的；各自按添加先后。
+pub fn snippets(connection_id: &str) -> AppResult<Vec<Snippet>> {
+    db::with_db(|conn| snippets_in(conn, connection_id))
+}
+
+pub fn save_snippet(input: SaveSnippetInput) -> AppResult<i64> {
+    let command = normalize_command(&input.command);
+    if command.trim().is_empty() {
+        return Err(AppError::Config("命令不能为空".into()));
+    }
+    let input = SaveSnippetInput { name: input.name.trim().to_string(), command, ..input };
+    db::with_db(|conn| save_snippet_in(conn, &input))
+}
+
+pub fn delete_snippet(id: i64) -> AppResult<()> {
+    db::with_db(|conn| conn.execute("DELETE FROM snippets WHERE id=?1", rusqlite::params![id]).map(|_| ()))
+}
+
+/// 去掉首尾的空行和末尾空白；行首空格留着（bash 的 HISTCONTROL=ignorespace 靠它不进历史）。
+fn normalize_command(command: &str) -> String {
+    command.trim_end().trim_start_matches(['\n', '\r']).to_string()
+}
+
+fn snippets_in(conn: &rusqlite::Connection, connection_id: &str) -> rusqlite::Result<Vec<Snippet>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, command, connection_id FROM snippets
+         WHERE connection_id IS NULL OR connection_id=?1
+         ORDER BY connection_id IS NULL, sort_order, id",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![connection_id], |r| {
+        Ok(Snippet { id: r.get(0)?, name: r.get(1)?, command: r.get(2)?, connection_id: r.get(3)? })
+    })?;
+    rows.collect()
+}
+
+fn save_snippet_in(conn: &rusqlite::Connection, input: &SaveSnippetInput) -> rusqlite::Result<i64> {
+    match input.id {
+        Some(id) => {
+            conn.execute(
+                "UPDATE snippets SET name=?2, command=?3, connection_id=?4 WHERE id=?1",
+                rusqlite::params![id, input.name, input.command, input.connection_id],
+            )?;
+            Ok(id)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO snippets(name, command, connection_id, sort_order)
+                 SELECT ?1, ?2, ?3, COALESCE(MAX(sort_order) + 1, 0) FROM snippets",
+                rusqlite::params![input.name, input.command, input.connection_id],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+    }
 }
 
 /// 某连接收藏的远程目录，按收藏先后。
@@ -356,5 +432,53 @@ mod tests {
         assert_eq!(bookmarks_in(&conn, "b").unwrap(), ["/srv"], "别的连接不受影响");
         let secrets: i64 = conn.query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0)).unwrap();
         assert_eq!(secrets, 1);
+    }
+
+    fn snippet(name: &str, command: &str, connection_id: Option<&str>) -> SaveSnippetInput {
+        SaveSnippetInput { id: None, name: name.into(), command: command.into(), connection_id: connection_id.map(Into::into) }
+    }
+
+    fn names(conn: &rusqlite::Connection, connection_id: &str) -> Vec<String> {
+        snippets_in(conn, connection_id).unwrap().into_iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn a_connection_sees_its_own_snippets_first_then_the_shared_ones() {
+        let conn = memory_db();
+        save_snippet_in(&conn, &snippet("磁盘", "df -h", None)).unwrap();
+        save_snippet_in(&conn, &snippet("部署", "cd /srv/app && git pull", Some("a"))).unwrap();
+        save_snippet_in(&conn, &snippet("别的机器", "uptime", Some("b"))).unwrap();
+        save_snippet_in(&conn, &snippet("日志", "journalctl -fu nginx", None)).unwrap();
+        save_snippet_in(&conn, &snippet("重启", "systemctl restart app", Some("a"))).unwrap();
+        assert_eq!(names(&conn, "a"), ["部署", "重启", "磁盘", "日志"]);
+        assert_eq!(names(&conn, "b"), ["别的机器", "磁盘", "日志"]);
+        assert_eq!(names(&conn, "c"), ["磁盘", "日志"]);
+    }
+
+    #[test]
+    fn editing_a_snippet_keeps_its_place_and_can_change_its_scope() {
+        let conn = memory_db();
+        let first = save_snippet_in(&conn, &snippet("一", "echo 1", None)).unwrap();
+        save_snippet_in(&conn, &snippet("二", "echo 2", None)).unwrap();
+        save_snippet_in(&conn, &SaveSnippetInput { id: Some(first), ..snippet("一改", "echo one", Some("a")) }).unwrap();
+        assert_eq!(names(&conn, "a"), ["一改", "二"]);
+        assert_eq!(names(&conn, "b"), ["二"], "改成专属后别的连接看不到");
+        let edited = &snippets_in(&conn, "a").unwrap()[0];
+        assert_eq!((edited.command.as_str(), edited.connection_id.as_deref()), ("echo one", Some("a")));
+    }
+
+    #[test]
+    fn deleting_a_connection_drops_only_its_own_snippets() {
+        let conn = memory_db();
+        save_snippet_in(&conn, &snippet("通用", "df -h", None)).unwrap();
+        save_snippet_in(&conn, &snippet("专属", "uptime", Some("a"))).unwrap();
+        delete_connection_rows(&conn, "a").unwrap();
+        assert_eq!(names(&conn, "a"), ["通用"]);
+    }
+
+    #[test]
+    fn snippet_commands_lose_blank_edges_but_keep_a_leading_space() {
+        assert_eq!(normalize_command("\n\n ls -la  \n\n"), " ls -la");
+        assert_eq!(normalize_command("cd /srv\ngit pull\n"), "cd /srv\ngit pull");
     }
 }

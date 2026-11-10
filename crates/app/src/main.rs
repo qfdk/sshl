@@ -11,6 +11,7 @@ mod screen;
 mod settings;
 mod settings_dialog;
 mod sidebar;
+mod snippets;
 mod system_panel;
 mod terminal;
 mod theme;
@@ -150,4 +151,6 @@ fn bind_keys(cx: &mut App) {
     ]);
     cx.bind_keys(terminal::view::key_bindings());
     workspace::bind_keys(cx);
+    // 晚于 gpui-base：同一节点上后绑的优先，面板里的上下 / 回车 / Esc 归片段列表
+    snippets::bind_keys(cx);
 }
