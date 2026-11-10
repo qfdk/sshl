@@ -1275,6 +1275,8 @@ impl Render for Workspace {
                         .occlude()
                         .flex()
                         .justify_center()
+                        // 不让下面那层拦截点击的 div 被拉成整列高：面板正下方也算「外面」
+                        .items_start()
                         .pt(px(72.))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_quick_connect(window, cx)))
                         .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.quick_connect.clone())),
