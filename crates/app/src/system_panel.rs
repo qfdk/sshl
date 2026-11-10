@@ -29,6 +29,8 @@ const CPU_WIDTH: f32 = 84.;
 const MEMORY_WIDTH: f32 = 96.;
 const ADDRESS_WIDTH: f32 = 250.;
 const STATUS_WIDTH: f32 = 104.;
+/// 「开机启动 ↑」放得下箭头。
+const BOOT_WIDTH: f32 = 96.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -51,6 +53,23 @@ pub enum SortKey {
 pub enum SortColumn {
     Process(SortKey),
     Port(PortSortKey),
+    Service(ServiceSortKey),
+}
+
+/// 表头文字的对齐（跟下面的列一致）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Align {
+    Start,
+    End,
+    Center,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ServiceSortKey {
+    Status,
+    Name,
+    Description,
+    Boot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,6 +118,7 @@ pub struct SystemPanel {
     error: Option<SharedString>,
     sort: (SortKey, bool),
     port_sort: (PortSortKey, bool),
+    service_sort: (ServiceSortKey, bool),
     search: Entity<InputState>,
     search_focused: bool,
     menu: Option<MenuState>,
@@ -203,13 +223,38 @@ pub fn kill_error_message(error: &str) -> String {
     }
 }
 
-/// 搜索：服务名或说明里含关键字。
-pub fn filter_services<'a>(services: &'a [ServiceInfo], query: &str) -> Vec<&'a ServiceInfo> {
+/// 搜索：服务名或说明里含关键字。按状态排（默认）同后端：失败、运行中、其余；没有说明的按说明排时总在最后；同值按显示的名字（不带 .service，apport 才在 apport-autoreport 前面）。
+pub fn filter_services<'a>(services: &'a [ServiceInfo], query: &str, sort: (ServiceSortKey, bool)) -> Vec<&'a ServiceInfo> {
     let query = query.trim().to_lowercase();
-    services
+    let mut out: Vec<&ServiceInfo> = services
         .iter()
         .filter(|s| query.is_empty() || s.unit.to_lowercase().contains(&query) || s.description.to_lowercase().contains(&query))
-        .collect()
+        .collect();
+    let status_rank = |s: &ServiceInfo| match (s.active.as_str(), s.sub.as_str()) {
+        ("failed", _) => 0,
+        ("active", "running") | ("activating" | "reloading", _) => 1,
+        _ => 2,
+    };
+    let boot_rank = |s: &ServiceInfo| match s.enabled.as_str() {
+        _ if s.starts_at_boot() => 0,
+        "disabled" => 1,
+        "masked" => 2,
+        _ => 3,
+    };
+    out.sort_by(|a, b| {
+        let missing = match sort.0 {
+            ServiceSortKey::Description => a.description.is_empty().cmp(&b.description.is_empty()),
+            _ => std::cmp::Ordering::Equal,
+        };
+        let order = match sort.0 {
+            ServiceSortKey::Status => status_rank(a).cmp(&status_rank(b)),
+            ServiceSortKey::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
+            ServiceSortKey::Description => a.description.to_lowercase().cmp(&b.description.to_lowercase()),
+            ServiceSortKey::Boot => boot_rank(a).cmp(&boot_rank(b)),
+        };
+        missing.then(if sort.1 { order.reverse() } else { order }).then_with(|| a.name().to_lowercase().cmp(&b.name().to_lowercase()))
+    });
+    out
 }
 
 /// 服务的状态文字和颜色。
@@ -336,6 +381,7 @@ impl SystemPanel {
             error: None,
             sort: (SortKey::Cpu, true),
             port_sort: (PortSortKey::Port, false),
+            service_sort: (ServiceSortKey::Status, false),
             search,
             search_focused: false,
             menu: None,
@@ -457,6 +503,9 @@ impl SystemPanel {
             }
             SortColumn::Port(key) => {
                 self.port_sort = if self.port_sort.0 == key { (key, !self.port_sort.1) } else { (key, false) };
+            }
+            SortColumn::Service(key) => {
+                self.service_sort = if self.service_sort.0 == key { (key, !self.service_sort.1) } else { (key, false) };
             }
         }
         cx.notify();
@@ -656,10 +705,11 @@ impl SystemPanel {
             .child(card(Icon::Clock, ui::SUCCESS, "已运行", uptime, None, None))
     }
 
-    fn header_cell(&self, label: &'static str, key: Option<SortColumn>, width: Option<f32>, right: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn header_cell(&self, label: &'static str, key: Option<SortColumn>, width: Option<f32>, align: Align, cx: &mut Context<Self>) -> AnyElement {
         let descending = key.and_then(|key| match key {
             SortColumn::Process(key) => (key == self.sort.0).then_some(self.sort.1),
             SortColumn::Port(key) => (key == self.port_sort.0).then_some(self.port_sort.1),
+            SortColumn::Service(key) => (key == self.service_sort.0).then_some(self.service_sort.1),
         });
         let arrow = match descending {
             Some(true) => " ↓",
@@ -675,7 +725,11 @@ impl SystemPanel {
                 Some(w) => d.w(px(w)).flex_shrink_0(),
                 None => d.flex_1().min_w_0(),
             })
-            .when(right, |d| d.justify_end())
+            .map(|d| match align {
+                Align::Start => d,
+                Align::End => d.justify_end(),
+                Align::Center => d.justify_center(),
+            })
             .child(format!("{label}{arrow}"))
             .when_some(key, |d, key| {
                 d.role(Role::Button)
@@ -858,7 +912,7 @@ impl SystemPanel {
     fn render_service_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.search.read(cx).value().to_string();
         let rows: Vec<ServiceInfo> =
-            filter_services(self.services.as_deref().unwrap_or(&[]), &query).into_iter().skip(range.start).take(range.len()).cloned().collect();
+            filter_services(self.services.as_deref().unwrap_or(&[]), &query, self.service_sort).into_iter().skip(range.start).take(range.len()).cloned().collect();
         rows.into_iter()
             .enumerate()
             .map(|(i, service)| {
@@ -930,7 +984,7 @@ impl SystemPanel {
                     .child(div().flex_1().min_w_0().px_3().truncate().text_color(theme::color(ui::MUTED_FOREGROUND)).child(service.description.clone()))
                     .child(
                         div()
-                            .w(px(80.))
+                            .w(px(BOOT_WIDTH))
                             .flex_shrink_0()
                             .flex()
                             .justify_center()
@@ -986,7 +1040,7 @@ impl Render for SystemPanel {
         let query = self.search.read(cx).value().to_string();
         let process_count = self.processes.as_deref().map(|p| filter_processes(p, &query, self.sort).len());
         let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query, self.port_sort).len());
-        let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query).len());
+        let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query, self.service_sort).len());
         let (count, loaded) = match self.view {
             View::Processes => (process_count.unwrap_or(0), self.processes.is_some()),
             View::Ports => (port_count.unwrap_or(0), self.ports.is_some()),
@@ -1034,11 +1088,11 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(76.), true, cx))
-                .child(self.header_cell("用户", Some(SortColumn::Process(SortKey::User)), Some(110.), false, cx))
-                .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), true, cx))
-                .child(self.header_cell("内存", Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), true, cx))
-                .child(self.header_cell("命令", Some(SortColumn::Process(SortKey::Command)), None, false, cx))
+                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(76.), Align::End, cx))
+                .child(self.header_cell("用户", Some(SortColumn::Process(SortKey::User)), Some(110.), Align::Start, cx))
+                .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), Align::End, cx))
+                .child(self.header_cell("内存", Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), Align::End, cx))
+                .child(self.header_cell("命令", Some(SortColumn::Process(SortKey::Command)), None, Align::Start, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Ports => div()
                 .h(px(32.))
@@ -1050,11 +1104,11 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("协议", Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), false, cx))
-                .child(self.header_cell("端口", Some(SortColumn::Port(PortSortKey::Port)), Some(86.), true, cx))
-                .child(self.header_cell("地址", Some(SortColumn::Port(PortSortKey::Address)), Some(ADDRESS_WIDTH), false, cx))
-                .child(self.header_cell("PID", Some(SortColumn::Port(PortSortKey::Pid)), Some(80.), true, cx))
-                .child(self.header_cell("进程", Some(SortColumn::Port(PortSortKey::Process)), None, false, cx))
+                .child(self.header_cell("协议", Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), Align::Start, cx))
+                .child(self.header_cell("端口", Some(SortColumn::Port(PortSortKey::Port)), Some(86.), Align::End, cx))
+                .child(self.header_cell("地址", Some(SortColumn::Port(PortSortKey::Address)), Some(ADDRESS_WIDTH), Align::Start, cx))
+                .child(self.header_cell("PID", Some(SortColumn::Port(PortSortKey::Pid)), Some(80.), Align::End, cx))
+                .child(self.header_cell("进程", Some(SortColumn::Port(PortSortKey::Process)), None, Align::Start, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Services => div()
                 .h(px(32.))
@@ -1066,10 +1120,10 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("状态", None, Some(STATUS_WIDTH), false, cx))
-                .child(self.header_cell("服务", None, Some(220.), false, cx))
-                .child(self.header_cell("说明", None, None, false, cx))
-                .child(div().w(px(80.)).flex_shrink_0().flex().justify_center().child("开机启动"))
+                .child(self.header_cell("状态", Some(SortColumn::Service(ServiceSortKey::Status)), Some(STATUS_WIDTH), Align::Start, cx))
+                .child(self.header_cell("服务", Some(SortColumn::Service(ServiceSortKey::Name)), Some(220.), Align::Start, cx))
+                .child(self.header_cell("说明", Some(SortColumn::Service(ServiceSortKey::Description)), None, Align::Start, cx))
+                .child(self.header_cell("开机启动", Some(SortColumn::Service(ServiceSortKey::Boot)), Some(BOOT_WIDTH), Align::Center, cx))
                 .child(div().w(px(150.)).flex_shrink_0()),
         };
 
@@ -1282,14 +1336,43 @@ mod tests {
     #[test]
     fn services_are_searched_by_name_or_description_and_labelled_by_state() {
         let all = vec![service("nginx.service", "A high performance web server", "active", "running"), service("ufw.service", "Uncomplicated firewall", "active", "exited")];
-        assert_eq!(filter_services(&all, "WEB").len(), 1);
-        assert_eq!(filter_services(&all, "ufw")[0].unit, "ufw.service");
-        assert_eq!(filter_services(&all, " ").len(), 2);
+        let by_status = (ServiceSortKey::Status, false);
+        assert_eq!(filter_services(&all, "WEB", by_status).len(), 1);
+        assert_eq!(filter_services(&all, "ufw", by_status)[0].unit, "ufw.service");
+        assert_eq!(filter_services(&all, " ", by_status).len(), 2);
         assert_eq!(service_status(&all[0]), ("运行中", ui::SUCCESS));
         assert_eq!(service_status(&all[1]).0, "已生效");
         assert_eq!(service_status(&service("mysql.service", "", "failed", "failed")), ("失败", ui::DESTRUCTIVE));
         assert_eq!(service_status(&service("redis.service", "", "inactive", "dead")).0, "已停止");
         assert_eq!(service_status(&service("docker.service", "", "activating", "start-pre")).0, "启动中");
+    }
+
+    #[test]
+    fn services_sort_by_any_column() {
+        let with_boot = |mut s: ServiceInfo, enabled: &str| {
+            s.enabled = enabled.into();
+            s
+        };
+        let all = vec![
+            with_boot(service("nginx.service", "Web server", "active", "running"), "enabled"),
+            service("mysql.service", "Database", "failed", "failed"),
+            with_boot(service("cron.service", "cron daemon", "inactive", "dead"), "disabled"),
+            with_boot(service("apparmor.service", "", "active", "exited"), "enabled"),
+        ];
+        let names = |key: ServiceSortKey, descending: bool| filter_services(&all, "", (key, descending)).iter().map(|s| s.name().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(ServiceSortKey::Status, false), ["mysql", "nginx", "apparmor", "cron"], "默认同后端：失败、运行中、其余，同级按名字");
+        assert_eq!(names(ServiceSortKey::Status, true), ["apparmor", "cron", "nginx", "mysql"]);
+        assert_eq!(names(ServiceSortKey::Name, false), ["apparmor", "cron", "mysql", "nginx"]);
+        assert_eq!(names(ServiceSortKey::Name, true), ["nginx", "mysql", "cron", "apparmor"]);
+        assert_eq!(names(ServiceSortKey::Description, false), ["cron", "mysql", "nginx", "apparmor"], "不分大小写，没有说明的在最后");
+        assert_eq!(names(ServiceSortKey::Description, true), ["nginx", "mysql", "cron", "apparmor"]);
+        assert_eq!(names(ServiceSortKey::Boot, false), ["apparmor", "nginx", "cron", "mysql"], "开机启动的在前");
+        // 按显示的名字排（不带 .service）：apport 在 apport-autoreport 前面
+        let similar = vec![service("apport-autoreport.service", "", "inactive", "dead"), service("apport.service", "", "inactive", "dead")];
+        let order = filter_services(&similar, "", (ServiceSortKey::Name, false)).iter().map(|s| s.name().to_string()).collect::<Vec<_>>();
+        assert_eq!(order, ["apport", "apport-autoreport"]);
+        let order = filter_services(&similar, "", (ServiceSortKey::Status, false)).iter().map(|s| s.name().to_string()).collect::<Vec<_>>();
+        assert_eq!(order, ["apport", "apport-autoreport"], "同状态也按显示的名字");
     }
 
     #[test]
