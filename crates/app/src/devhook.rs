@@ -14,7 +14,7 @@ use std::os::unix::net::UnixListener;
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{
-    AnyWindowHandle, App, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput,
+    AnyWindowHandle, App, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput,
     point, px,
 };
 
@@ -75,6 +75,16 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
                 let keystroke = Keystroke::parse_with_os(spec, gpui::OperatingSystem::Mac).map_err(|e| format!("{spec}: {e}"))?;
                 window.dispatch_keystroke(keystroke, cx);
             }
+            Ok(())
+        }
+        // mods cmd | none：按住 / 松开修饰键（只发 ModifiersChanged），测按住 ⌘ 浮出的快捷键角标
+        "mods" => {
+            let modifiers = match rest.trim() {
+                "cmd" => Modifiers::command(),
+                "none" | "" => Modifiers::none(),
+                other => return Err(format!("mods {other}：只认 cmd / none")),
+            };
+            window.dispatch_event(PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers, capslock: Default::default() }), cx);
             Ok(())
         }
         "type" => {

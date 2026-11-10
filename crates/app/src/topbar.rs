@@ -134,7 +134,8 @@ impl Workspace {
             .hover(|s| s.text_color(theme::color(if open { ui::PRIMARY } else { ui::FOREGROUND })))
             .when(!self.hint_visible, |b| b.tooltip(|window, cx| kit::tooltip("命令片段".into(), window, cx)))
             .child(kit::icon_sized(Icon::CodeXml, 16.))
-            .child(hint("P", self.hint_visible))
+            // 和「终端 / 文件管理 / 系统」的 1 / 2 / 3 同一个基准：分段控件里的选项内缩 3px，角标相对选项定位
+            .child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint("P", self.hint_visible))))
             .on_hover(cx.listener(|this, hovered: &bool, _, _| this.snippet_button_hovered = *hovered))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_snippets(window, cx)));
         let panel = open.then(|| {

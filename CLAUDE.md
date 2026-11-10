@@ -133,7 +133,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   键盘 / 辅助功能「按下」（`on_a11y_action(Click)`）直接连。
 - **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
   且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
-  `type echo hi`），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
+  `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
   `cargo build -p sshl --release --features devhook`；`scripts/bundle.sh` 的正式构建不带这个 feature。macOS 的套接字路径上限 104 字节。
 - **Rust 后端规则**：core 不依赖界面；新增界面需求优先在 app 里做，确实要改 core 的行为（SFTP、sudo、known_hosts）
   要带测试。core 的集成测试用 `tests/fixtures-sudo.Dockerfile` 起的容器。
