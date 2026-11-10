@@ -297,6 +297,8 @@ pub struct FileManager {
     remote_empty_connection: Option<String>,
     active: bool,
     syncing: bool,
+    /// 身份同步完成后要接着做的事（如拖到终端的上传）：文件身份和终端一致了才做，取消 / 失败就丢掉。
+    after_sync: Vec<AfterSync>,
     /// 排队等着传的：一次只传一个，后加的接在后面（多批同时传会抢带宽、进度条来回跳）。
     queue: VecDeque<Job>,
     /// 队列在跑。
@@ -351,6 +353,9 @@ fn alert(cx: &mut AsyncWindowContext, title: impl Into<SharedString>, message: i
     let _ = cx.update(|window, cx| prompts::alert_later(window, cx, options));
 }
 
+/// 身份同步完成后接着做的事（见 `FileManager::after_sync`）。
+type AfterSync = Box<dyn FnOnce(&mut FileManager, &mut Window, &mut Context<FileManager>)>;
+
 impl FileManager {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         bind_keys(cx);
@@ -375,6 +380,7 @@ impl FileManager {
             remote_empty_connection: None,
             active: false,
             syncing: false,
+            after_sync: Vec::new(),
             queue: VecDeque::new(),
             worker: false,
             finished: 0,
@@ -1355,7 +1361,16 @@ impl FileManager {
     }
 
     /// 文件拖到终端上：传到终端此刻所在的目录（读不到就传到文件管理的远程目录，再不行传到主目录）。
+    /// 先对一下终端此刻是谁：root 登录后 su 成别人，传上去的文件要归那个人，不能还是 root 的。
     pub fn upload_to_terminal_cwd(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        self.after_sync.push(Box::new(move |this, window, cx| this.upload_to_terminal_cwd_now(paths, window, cx)));
+        self.sync_identity(true, window, cx);
+    }
+
+    fn upload_to_terminal_cwd_now(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else { return };
         let fallback = self.remote.path.clone();
         let sid = session.session_id.clone();
@@ -1631,6 +1646,8 @@ impl FileManager {
             let (login_user, terminal_user) = names.borrow().clone();
             let _ = this.update_in(cx, |this, window, cx| {
                 this.syncing = false;
+                // 等着这次同步的事先取出来：下面提前返回时也一并丢掉，不会留给别的会话去做
+                let pending = std::mem::take(&mut this.after_sync);
                 // 会话在等密码时已被移除：丢弃结果，不写记录、不刷新、不弹报错
                 if !record_sync_result(&mut this.records, &sid, &result, &login_user, &terminal_user, record.declined.as_deref()) {
                     return;
@@ -1656,6 +1673,12 @@ impl FileManager {
                         Options::new(format!("无法以 {terminal_user} 身份管理文件")).message(sudo_error_message(result.error.as_deref())),
                     ),
                     _ => {}
+                }
+                // 等着这次同步的事：身份对上了（没变或刚切过去）且还在这个会话上才做，否则丢掉
+                if matches!(result.status, SyncStatus::Same | SyncStatus::Switched) && this.session_id().as_deref() == Some(sid.as_str()) {
+                    for then in pending {
+                        then(this, window, cx);
+                    }
                 }
                 cx.notify();
             });

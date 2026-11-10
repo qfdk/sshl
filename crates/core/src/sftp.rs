@@ -121,7 +121,7 @@ async fn sftp_for(session: &Arc<SshSession>) -> AppResult<Arc<Sftp>> {
     let elevation = session.elevation.lock().await.clone();
     let sftp = match elevation {
         // 终端切换了用户：以他的身份起 sftp-server（缓存的会话断了也按同一身份重开）
-        Some(e) => open_sftp_as(channel, &e.user, e.via, e.password.as_deref()).await?,
+        Some(e) => open_sftp_as(channel, &session.username, &e.user, e.via, e.password.as_deref()).await?,
         None => {
             channel.request_subsystem(true, "sftp").await
                 .map_err(|e| AppError::Sftp(format!("request sftp subsystem: {e}")))?;
@@ -156,13 +156,21 @@ const SFTP_REQUEST_TIMEOUT_SECS: u64 = 3600;
 /// 在 exec 通道上以 `user` 身份起 sftp-server（见 terminal_user::sftp_server_script），返回 SFTP 会话。
 /// 等到 stderr 出现密码提示才写密码、出现就绪标记才开始 SFTP 协议：免密 sudo 不会把密码误当成 SFTP 数据，
 /// 密码错（sudo 再次提示 / su 报 Authentication failure）在协议开始前就能识别。
+/// su 没给密码时要不要先拦下来：普通用户空密码跑 su 会在服务器认证日志里记一次失败（多了可能锁号）；
+/// 但 SSH 登录用户是 root 时 su 到谁都不要密码、也不记失败——root 登录后 `su - 某人`，文件管理要能直接跟过去，
+/// 上传的文件归那个人，而不是弹框要一个他多半没设的密码。
+fn su_needs_password(via: Via, password: Option<&str>, login_user: &str) -> bool {
+    via == Via::Su && password.is_none() && login_user != "root"
+}
+
 async fn open_sftp_as(
     mut channel: russh::Channel<russh::client::Msg>,
+    login_user: &str,
     user: &str,
     via: Via,
     password: Option<&str>,
 ) -> AppResult<Sftp> {
-    let ready = if via == Via::Su && password.is_none() {
+    let ready = if su_needs_password(via, password, login_user) {
         // 没密码就不跑 su：空密码同样会记一次认证失败
         Err(AppError::Other(format!("SUDO_PASSWORD_REQUIRED: 需要 {user} 的密码")))
     } else {
@@ -598,7 +606,7 @@ pub async fn file_switch_user(
     };
     let via = if via.as_deref() == Some("sudo") { Via::Sudo } else { Via::Su };
     let password = pick_sudo_password(session.connection_id.as_deref(), credential.as_deref(), password, load_secret)?;
-    let sftp = open_sftp_as(open_exec_channel(&session).await?, &user, via, password.as_deref()).await?;
+    let sftp = open_sftp_as(open_exec_channel(&session).await?, &session.username, &user, via, password.as_deref()).await?;
     *session.elevation.lock().await = Some(Arc::new(Elevation { user, via, password }));
     *session.sftp.lock().await = Some(Arc::new(sftp));
     Ok(())
@@ -1663,6 +1671,17 @@ pub fn emit_upload_progress(events: &Events, payload: UploadProgress) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn su_without_password_is_only_blocked_for_non_root_logins() {
+        // 普通用户登录：su 不给密码先拦下（免得服务器记一次认证失败）
+        assert!(su_needs_password(Via::Su, None, "ubuntu"));
+        // root 登录：su 到谁都不要密码，直接跑
+        assert!(!su_needs_password(Via::Su, None, "root"));
+        // 给了密码、或走 sudo（-n 失败不记认证失败）都不拦
+        assert!(!su_needs_password(Via::Su, Some("pw"), "ubuntu"));
+        assert!(!su_needs_password(Via::Sudo, None, "ubuntu"));
+    }
+
     use super::{
         create_dir_levels, download_dir_files, download_segmented, follow_symlinks, join_remote, parse_id_map,
         scan_local, scan_remote, segment_ranges, shell_quote, stream_to_local, stream_to_remote,
@@ -1670,7 +1689,7 @@ mod tests {
         DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY, DOWNLOAD_IN_FLIGHT_BYTES, DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, SFTP_REQUEST_TIMEOUT_SECS,
         SFTP_STALL, TRANSFER_CHUNK, UPLOAD_IN_FLIGHT_BYTES,
     };
-    use super::{staging_from_prepare, sudo_prepare_command};
+    use super::{staging_from_prepare, su_needs_password, sudo_prepare_command, Via};
 
     /// 假 sudo：按真 sudo 的参数形态吃掉 -S（读一行密码，"wrong" 按密码错处理）/-p ''/-n/-u 用户，然后原样执行命令。
     /// 用来在本机跑通 sudo_prepare_command / sudo_extract_command 生成的整条 shell（引号、tar、stat 回落）。
@@ -2015,7 +2034,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("终端里等不到 {until:?}，已输出：{seen}"));
         }
         async fn sftp_err(h: &H, user: &str, via: Via, pw: Option<&str>) -> String {
-            open_sftp_as(channel(h).await, user, via, pw).await.err().expect("应当失败").to_string()
+            open_sftp_as(channel(h).await, "alice", user, via, pw).await.err().expect("应当失败").to_string()
         }
 
         let alice = crate::ssh::do_handshake(host, port, "alice", crate::ssh::Credentials::Password("alicepw"), crate::known_hosts::HostKeyCheck::trust_any_for_tests()).await.unwrap();
@@ -2044,7 +2063,7 @@ mod tests {
         // 以 root 起 SFTP：密码错 / 没给密码在协议开始前识别，且没给密码时根本不跑 su
         assert!(sftp_err(&alice, "root", Via::Su, Some("wrong")).await.contains("SUDO_PASSWORD_INCORRECT"));
         assert!(sftp_err(&alice, "root", Via::Su, None).await.contains("SUDO_PASSWORD_REQUIRED"));
-        let sftp = open_sftp_as(channel(&alice).await, "root", Via::Su, Some("rootpw")).await.unwrap();
+        let sftp = open_sftp_as(channel(&alice).await, "alice", "root", Via::Su, Some("rootpw")).await.unwrap();
         assert_eq!(sftp.canonicalize(".").await.unwrap(), "/root", "主目录跟着变成 root 的");
         sftp.read_dir("/root").await.expect("能看到 root 的东西");
         let mut f = sftp.create("/home/bob/uploads/by-root.txt").await.expect("root 能写进 bob 的目录");
@@ -2066,7 +2085,7 @@ mod tests {
         assert!(err.contains("SUDO_PASSWORD_INCORRECT"), "{err}");
         let err = sftp_err(&alice, "root", Via::Sudo, None).await;
         assert!(err.contains("SUDO_PASSWORD_REQUIRED"), "{err}");
-        let sftp = open_sftp_as(channel(&alice).await, "root", Via::Sudo, Some("alicepw")).await.unwrap();
+        let sftp = open_sftp_as(channel(&alice).await, "alice", "root", Via::Sudo, Some("alicepw")).await.unwrap();
         assert_eq!(sftp.canonicalize(".").await.unwrap(), "/root");
 
         // su 成普通用户 bob：以 bob 身份，主目录是 bob 的
@@ -2074,7 +2093,7 @@ mod tests {
         type_line(&mut term, "su - bob", "Password:").await;
         type_line(&mut term, "bobpw", "$ ").await;
         assert_eq!(identify(&alice).await, Some((bob_uid, Some(Via::Su))));
-        let sftp = open_sftp_as(channel(&alice).await, "bob", Via::Su, Some("bobpw")).await.unwrap();
+        let sftp = open_sftp_as(channel(&alice).await, "alice", "bob", Via::Su, Some("bobpw")).await.unwrap();
         assert_eq!(sftp.canonicalize(".").await.unwrap(), "/home/bob");
     }
 
