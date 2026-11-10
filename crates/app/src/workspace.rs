@@ -19,7 +19,7 @@ use crate::backend;
 use crate::connection_dialog::{ConnectionDialog, ConnectionDialogEvent, ConnectionForm};
 use crate::import_dialog::{ImportDialog, ImportDialogEvent};
 use crate::files::{FileManager, FileManagerEvent, FileSession};
-use crate::system_panel::SystemPanel;
+use crate::system_panel::{SystemPanel, SystemPanelEvent};
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options, PasswordAnswer};
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
@@ -162,6 +162,10 @@ impl Workspace {
         let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&snippet_panel, window, Self::snippet_panel_event),
+            // 系统页：没权限时的 sudo 命令、看服务日志，都发到终端
+            cx.subscribe_in(&system_panel, window, |this, _, event: &SystemPanelEvent, window, cx| match event {
+                SystemPanelEvent::RunInTerminal(command) => this.run_in_terminal(command, true, window, cx),
+            }),
             cx.subscribe_in(&file_manager, window, |this, _, event: &FileManagerEvent, window, cx| match event {
                 FileManagerEvent::Reconnect(connection_id) => this.connect_to_saved(connection_id, window, cx),
             }),
@@ -852,7 +856,7 @@ impl Workspace {
         match event {
             SnippetPanelEvent::Run { command, execute } => {
                 self.snippets_open = false;
-                self.run_snippet(command, *execute, window, cx);
+                self.run_in_terminal(command, *execute, window, cx);
             }
             SnippetPanelEvent::New => self.open_snippet_dialog(None, window, cx),
             SnippetPanelEvent::Edit(snippet) => self.open_snippet_dialog(Some(snippet.clone()), window, cx),
@@ -861,7 +865,7 @@ impl Workspace {
     }
 
     /// 发到当前会话的终端（不在终端页就先切过去）。
-    fn run_snippet(&mut self, command: &str, execute: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_in_terminal(&mut self, command: &str, execute: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(view) = self.active_session().map(|s| s.view.clone()) else { return };
         if self.main_tab != MainTab::Terminal {
             self.set_main_tab(MainTab::Terminal, window, cx);

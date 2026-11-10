@@ -196,7 +196,7 @@ pub fn kill_command(pid: u32, force: bool) -> String {
     format!("kill -{} {pid}", if force { "KILL" } else { "TERM" })
 }
 
-async fn run(state: &AppState, session_id: &str, command: &str) -> AppResult<String> {
+pub(crate) async fn run(state: &AppState, session_id: &str, command: &str) -> AppResult<String> {
     let session = state.get(session_id).await.ok_or_else(|| AppError::SessionNotFound(session_id.to_string()))?;
     crate::sftp::run_as_file_user(&session, command).await
 }
@@ -313,7 +313,8 @@ Chrome     2222 qfdk   30u  IPv4 0x2222222222222222      0t0  UDP 192.168.1.2:51
         let (_, out, _) = exec(PORTS_COMMAND.into()).await;
         assert!(out.starts_with("@@"), "{out}");
         let ports = parse_ports(&out);
-        assert!(ports.iter().any(|p| p.port == port.parse::<u16>().unwrap()), "看得到 sshd 自己监听的端口：{ports:?}");
+        // 端口转发进来的（如 lima 虚拟机）sshd 在里面听的是 22
+        assert!(ports.iter().any(|p| p.port == port.parse::<u16>().unwrap() || p.port == 22), "看得到 sshd 自己监听的端口：{ports:?}");
         let overview = parse_overview(&exec(OVERVIEW_COMMAND.into()).await.1);
         assert!(overview.load.is_some() && overview.cpus.is_some() && overview.mem_total.is_some() && overview.disk_total.is_some(), "{overview:?}");
         let uptime = overview.uptime_secs.unwrap_or(0);
