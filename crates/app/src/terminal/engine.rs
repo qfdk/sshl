@@ -305,9 +305,10 @@ impl Engine {
         let mut bell = false;
         let mut last_frame = Instant::now() - FRAME_INTERVAL;
         loop {
-            // 有积压就不阻塞；否则等消息（有待发的 PTY 尺寸时最多等到它该发的时刻）
+            // 有积压就不阻塞；否则等消息。有待发的 PTY 尺寸、或画面改了但还没到出帧时刻时，最多等到那一刻
             let wait = if backlog.is_empty() {
-                self.pty_deadline().map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                let frame_due = dirty.then(|| last_frame + FRAME_INTERVAL);
+                earliest(self.pty_deadline(), frame_due).map(|deadline| deadline.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
             };
@@ -356,8 +357,9 @@ impl Engine {
                 self.shell.lock().unwrap().ack(std::mem::take(&mut self.unacked));
             }
             self.flush_pty_size();
-            // 出帧：积压清空时立刻出；刷屏中最多每 FRAME_INTERVAL 一帧，整理帧不拖慢解析
-            if dirty && (backlog.is_empty() || last_frame.elapsed() >= FRAME_INTERVAL) {
+            // 出帧：两帧至少隔 FRAME_INTERVAL（屏幕刷新一次）。原来积压一清空就立刻出帧，刷屏时数据一小块一小块地到、
+            // 每块都清空积压，一秒出上千帧（屏幕只显示 60 帧），多出来的都白算。打字时两次按键间隔远大于它，回显照样立刻出帧
+            if dirty && last_frame.elapsed() >= FRAME_INTERVAL {
                 if let Err(error) = self.publish() {
                     tracing::warn!("terminal frame failed: {error}");
                 }
@@ -770,6 +772,14 @@ impl SelectionGesture {
         // 双击 / 三击的间隔（同 macOS 默认）
         press.set_repeat_interval(Duration::from_millis(500))?;
         Ok(Self { gesture: Gesture::new()?, press, drag: DragEvent::new()?, release: ReleaseEvent::new()?, start: Instant::now(), pressed: false })
+    }
+}
+
+/// 两个截止时刻里早的那个（都没有就 None：一直等消息）。
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
