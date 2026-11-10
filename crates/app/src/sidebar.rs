@@ -1,7 +1,7 @@
 //! 侧栏：应用标识、搜索、按分组的连接列表（拖动换组 / 排序）、新建连接与设置（旧 Sidebar.tsx + ConnectionList.tsx）。
 
 use gpui::{
-    AccessibleAction, AnyElement, AppContext, ClickEvent, Context, DragMoveEvent, FontWeight, InteractiveElement,
+    AccessibleAction, AnyElement, AppContext, ClickEvent, Context, DragMoveEvent, Focusable, FontWeight, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
     Styled, Window, anchored, deferred, div, img, prelude::FluentBuilder, px,
 };
@@ -31,17 +31,37 @@ impl Render for DragPreview {
     }
 }
 
+/// 收起 / 展开侧栏的按钮（⌘B）：展开时在侧栏头部，收起时在顶栏红绿灯右边。
+pub(crate) fn sidebar_toggle_button(collapsed: bool, cx: &mut Context<Workspace>) -> gpui::Stateful<gpui::Div> {
+    let (label, tip) = if collapsed { ("展开侧边栏", "展开侧边栏  ⌘B") } else { ("收起侧边栏", "收起侧边栏  ⌘B") };
+    kit::button("toggle-sidebar", Variant::Ghost)
+        .w(px(32.))
+        .h(px(32.))
+        .px_0()
+        .aria_label(label)
+        .tooltip(move |window, cx| kit::tooltip(tip.into(), window, cx))
+        .child(kit::icon(Icon::PanelLeft))
+        .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
+}
+
 impl Workspace {
-    fn sidebar_collapsed(&self, cx: &gpui::App) -> bool {
-        settings::get(cx).sidebar_collapsed
+    pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let collapsing = !settings::get(cx).sidebar_collapsed;
+        settings::update(cx, |s| s.sidebar_collapsed = collapsing);
+        // 搜索框跟着侧栏一起不画了，焦点不能留在看不见的输入框里。
+        // 直接问焦点句柄，不看 search_focused：窗口不在前台时 GPUI 不发 Focus 事件，那个标记会是旧的
+        if collapsing && self.search.read(cx).focus_handle(cx).contains_focused(window, cx) {
+            self.refocus(window, cx);
+        }
+        cx.notify();
     }
 
+    /// 展开状态的侧栏；收起时整个不画（`Workspace::render`）。
     pub(crate) fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !cx.has_active_drag() {
             self.drop_target = None;
             self.dragging = None;
         }
-        let collapsed = self.sidebar_collapsed(cx);
         let new_connection = kit::button("new-connection", Variant::Ghost)
             .w(px(32.))
             .h(px(32.))
@@ -50,77 +70,67 @@ impl Workspace {
             .tooltip(|window, cx| kit::tooltip("新建连接  ⌘N".into(), window, cx))
             .child(kit::icon(Icon::Plus))
             .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx)));
-        let toggle = kit::icon_button("toggle-sidebar", Variant::Ghost, if collapsed { Icon::ChevronRight } else { Icon::ChevronLeft }, if collapsed { "展开侧边栏" } else { "收起侧边栏" })
-            .w(px(32.))
-            .h(px(32.))
-            .on_click(cx.listener(|_, _, _, cx| {
-                settings::update(cx, |s| s.sidebar_collapsed = !s.sidebar_collapsed);
-                cx.notify();
-            }));
         div()
-            .w(px(if collapsed { 76. } else { 240. }))
+            .w(px(240.))
             .h_full()
             .flex()
             .flex_col()
             .flex_shrink_0()
             .overflow_hidden()
-            // 透明标题栏：红绿灯单独占这一行，只作窗口拖动区。收起时 76px 宽刚好容下红绿灯。
+            // 透明标题栏：红绿灯单独占这一行，只作窗口拖动区。
             // 全屏时红绿灯藏起来（鼠标移到屏幕顶端才浮出），不再给它留一行，侧栏标题和顶栏标签对齐
             .child(drag_region("sidebar-titlebar").h(px(if window.is_fullscreen() { 6. } else { 50. })).flex_shrink_0())
-            .map(|s| {
-                if collapsed {
-                    s.child(div().flex().flex_col().items_center().gap_1().pb_1().child(toggle).child(new_connection))
-                } else {
-                    s.child(
-                        drag_region("sidebar-header")
-                            .h(px(44.))
-                            .pl_3()
-                            .pr_2()
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap_2()
-                            .child(img(APP_ICON).size(px(APP_ICON_SIZE)).m(px(-3.)))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("SSHL"))
-                            .child(div().ml_auto().flex().items_center().gap_1().child(new_connection).child(toggle)),
-                    )
-                    .child(
-                        div().px_3().pb_2().child(
-                            div()
-                                .relative()
-                                .child(kit::text_field(&self.search, self.search_focused).pl(px(35.)))
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(11.))
-                                        .top(px(10.))
-                                        .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                        .child(kit::icon(Icon::Search)),
-                                ),
-                        ),
-                    )
-                }
-            })
-            .child(div().mt_1().flex_1().min_h_0().child(self.connection_list(collapsed, window, cx)))
             .child(
-                div().mt_auto().flex_shrink_0().map(|f| if collapsed { f.flex().justify_center().p_2() } else { f.px_3().py_2() }).child(
+                drag_region("sidebar-header")
+                    .h(px(44.))
+                    .pl_3()
+                    .pr_2()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    .child(img(APP_ICON).size(px(APP_ICON_SIZE)).m(px(-3.)))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("SSHL"))
+                    .child(div().ml_auto().flex().items_center().gap_1().child(new_connection).child(sidebar_toggle_button(false, cx))),
+            )
+            .child(
+                div().px_3().pb_2().child(
+                    div()
+                        .relative()
+                        .child(kit::text_field(&self.search, self.search_focused).pl(px(35.)))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(11.))
+                                .top(px(10.))
+                                .text_color(theme::color(ui::MUTED_FOREGROUND))
+                                .child(kit::icon(Icon::Search)),
+                        ),
+                ),
+            )
+            .child(div().mt_1().flex_1().min_h_0().child(self.connection_list(window, cx)))
+            .child(
+                div().mt_auto().flex_shrink_0().px_3().py_2().child(
                     kit::button("open-settings", Variant::Ghost)
                         .h(px(32.))
+                        .w_full()
+                        .justify_start()
+                        .px_2()
+                        .gap(px(8.))
                         .aria_label("设置")
                         .tooltip(|window, cx| kit::tooltip("设置  ⌘,".into(), window, cx))
                         .text_size(px(13.))
                         .text_color(theme::color(ui::MUTED_FOREGROUND))
-                        .map(|b| if collapsed { b.w(px(32.)).px_0() } else { b.w_full().justify_start().px_2().gap(px(8.)) })
                         .child(kit::icon(Icon::Settings))
-                        .when(!collapsed, |b| b.child("设置"))
+                        .child("设置")
                         .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
                 ),
             )
             .into_any_element()
     }
 
-    fn connection_list(&mut self, collapsed: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let query = if collapsed { String::new() } else { self.search.read(cx).value().to_string() };
+    fn connection_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let query = self.search.read(cx).value().to_string();
         let visible: Vec<StoredConnection> = self.connections.iter().filter(|c| groups::matches(c, &query)).cloned().collect();
         if visible.is_empty() {
             let text = if self.connections.is_empty() { "没有保存的连接" } else { "没有匹配的连接" };
@@ -143,7 +153,8 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .map(|l| if collapsed { l.px_1().py_2() } else { l.px_3().py_2() })
+            .px_3()
+            .py_2()
             // 列表里的空白 = 移出分组
             .on_drag_move::<DraggedConnection>(cx.listener(|this, event: &DragMoveEvent<DraggedConnection>, _, cx| {
                 if event.bounds.contains(&event.event.position) && this.drop_target.is_none() {
@@ -157,7 +168,7 @@ impl Workspace {
                 }
             }));
 
-        let items: Vec<AnyElement> = ungrouped.iter().map(|c| self.connection_item(c, "", collapsed, window, cx)).collect();
+        let items: Vec<AnyElement> = ungrouped.iter().map(|c| self.connection_item(c, "", window, cx)).collect();
         list = list.child(
             div()
                 .flex()
@@ -181,9 +192,11 @@ impl Workspace {
             let header = div()
                 .id(SharedString::from(format!("group-{name}")))
                 .role(Role::Button)
-                .aria_label(SharedString::from(if collapsed { format!("{name}，{count} 个连接") } else { name.clone() }))
+                .aria_label(SharedString::from(name.clone()))
                 .flex()
                 .items_center()
+                .gap_1()
+                .px(px(10.))
                 .py_1()
                 .rounded(px(6.))
                 .text_xs()
@@ -191,43 +204,9 @@ impl Workspace {
                 .text_color(theme::color(if drop_here { ui::PRIMARY } else { ui::MUTED_FOREGROUND }))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::alpha(ui::FOREGROUND, 0.04)))
-                .map(|h| {
-                    if collapsed {
-                        // 收起后裸数字看不出是什么：文件夹图标（形态即展开状态）+ 右上角数量角标
-                        h.justify_center().child(
-                            div()
-                                .relative()
-                                .size(px(28.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(kit::icon(if group_collapsed { Icon::Folder } else { Icon::FolderOpen }))
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .top(px(-4.))
-                                        .right(px(-4.))
-                                        .h(px(14.))
-                                        .min_w(px(14.))
-                                        .px_1()
-                                        .rounded_full()
-                                        .bg(theme::alpha(ui::MUTED_FOREGROUND, 0.2))
-                                        .text_size(px(9.))
-                                        .text_color(theme::color(ui::FOREGROUND))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(count.to_string()),
-                                ),
-                        )
-                    } else {
-                        h.gap_1()
-                            .px(px(10.))
-                            .child(kit::icon_sized(if group_collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, 14.))
-                            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                            .child(count.to_string())
-                    }
-                })
+                .child(kit::icon_sized(if group_collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, 14.))
+                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                .child(count.to_string())
                 .on_click(cx.listener(move |_, _, _, cx| {
                     let name = toggle_name.clone();
                     settings::update(cx, |s| {
@@ -241,7 +220,7 @@ impl Workspace {
                 }));
             let target_name = name.clone();
             let items: Vec<AnyElement> =
-                if group_collapsed { Vec::new() } else { connections.iter().map(|c| self.connection_item(c, &name, collapsed, window, cx)).collect() };
+                if group_collapsed { Vec::new() } else { connections.iter().map(|c| self.connection_item(c, &name, window, cx)).collect() };
             list = list.child(
                 div()
                     .id(SharedString::from(format!("section-{name}")))
@@ -261,22 +240,13 @@ impl Workspace {
                         }
                     }))
                     .child(header)
-                    .when(!items.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .when(collapsed, |d| d.ml(px(6.)).border_l_1().border_color(theme::color(ui::BORDER)).pl_1())
-                                .children(items),
-                        )
-                    }),
+                    .when(!items.is_empty(), |d| d.child(div().flex().flex_col().gap_1().children(items))),
             );
         }
         list.into_any_element()
     }
 
-    fn connection_item(&mut self, conn: &StoredConnection, group: &str, collapsed: bool, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn connection_item(&mut self, conn: &StoredConnection, group: &str, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let id = conn.id.clone();
         let connected = self.session(&conn.id).is_some();
         let active = connected && self.active.as_deref() == Some(conn.id.as_str());
@@ -291,97 +261,54 @@ impl Workspace {
         let (connect_id, menu_id, drag_id, item_group, item_id) = (id.clone(), id.clone(), id.clone(), group.to_string(), id.clone());
         let item_name = name.clone();
 
-        let body = if collapsed {
-            // 收起后一排相同的小圆点分不出哪台机器，改成名称缩写徽章，状态点退到角上
-            div()
-                .flex_1()
-                .flex()
-                .justify_center()
-                .py(px(6.))
-                .child(
-                    div()
-                        .relative()
-                        .size(px(32.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(6.))
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .map(|b| {
-                            if active {
-                                b.bg(theme::color(ui::PRIMARY)).text_color(theme::color(ui::PRIMARY_FOREGROUND))
-                            } else if connected {
-                                b.bg(theme::alpha(ui::SUCCESS, 0.2))
-                            } else {
-                                b.bg(theme::color(ui::MUTED)).text_color(theme::color(ui::MUTED_FOREGROUND))
-                            }
-                        })
-                        .child(groups::initials(&conn.name, &conn.host))
-                        .when(connected, |b| {
-                            b.child(
-                                div()
-                                    .absolute()
-                                    .top(px(-2.))
-                                    .right(px(-2.))
-                                    .size(px(10.))
-                                    .rounded_full()
-                                    .bg(theme::color(ui::SUCCESS))
-                                    .border_2()
-                                    .border_color(theme::color(ui::CARD)),
-                            )
-                        }),
-                )
-        } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(10.))
-                .py(px(6.))
-                .child(
-                    // 在线状态是图标角上的绿点，不占一列文字宽度，地址少被截断
-                    div()
-                        .relative()
-                        .flex_shrink_0()
-                        .text_color(theme::color(if connected { ui::FOREGROUND } else { ui::MUTED_FOREGROUND }))
-                        .child(kit::icon(Icon::Server))
-                        .when(connected, |d| {
-                            d.child(
-                                div()
-                                    .absolute()
-                                    .bottom(px(-2.))
-                                    .right(px(-2.))
-                                    .size(px(8.))
-                                    .rounded_full()
-                                    .bg(theme::color(ui::SUCCESS))
-                                    .border_2()
-                                    .border_color(theme::color(if active { ui::CARD } else { ui::SHELL })),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().truncate().font_weight(FontWeight::MEDIUM).line_height(px(20.)).child(name.clone()))
-                        .child(
+        let body = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(10.))
+            .py(px(6.))
+            .child(
+                // 在线状态是图标角上的绿点，不占一列文字宽度，地址少被截断
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .text_color(theme::color(if connected { ui::FOREGROUND } else { ui::MUTED_FOREGROUND }))
+                    .child(kit::icon(Icon::Server))
+                    .when(connected, |d| {
+                        d.child(
                             div()
-                                .truncate()
-                                .font_family(settings::DEFAULT_FONT_FAMILY)
-                                .text_size(px(11.))
-                                .line_height(px(16.))
-                                .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                .child(address.clone()),
-                        ),
-                )
-        };
+                                .absolute()
+                                .bottom(px(-2.))
+                                .right(px(-2.))
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(theme::color(ui::SUCCESS))
+                                .border_2()
+                                .border_color(theme::color(if active { ui::CARD } else { ui::SHELL })),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().font_weight(FontWeight::MEDIUM).line_height(px(20.)).child(name.clone()))
+                    .child(
+                        div()
+                            .truncate()
+                            .font_family(settings::DEFAULT_FONT_FAMILY)
+                            .text_size(px(11.))
+                            .line_height(px(16.))
+                            .text_color(theme::color(ui::MUTED_FOREGROUND))
+                            .child(address.clone()),
+                    ),
+            );
 
-        let actions = (!collapsed).then(|| {
+        let actions = {
             let (disconnect_id, edit_id, delete_id) = (id.clone(), id.clone(), id.clone());
             let editing = conn.clone();
             div()
@@ -424,7 +351,7 @@ impl Workspace {
                             }
                         })),
                 )
-        });
+        };
 
         div()
             .id(SharedString::from(format!("item-{}", conn.id)))
@@ -446,10 +373,6 @@ impl Workspace {
                 }
             })
             .when(dragging, |d| d.opacity(0.4))
-            .when(collapsed, |d| d.tooltip({
-                let text: SharedString = format!("{} · {}", conn.name, if connected { "已连接" } else { "未连接" }).into();
-                move |window, cx| kit::tooltip(text.clone(), window, cx)
-            }))
             // 插入线：看得出会落在这一项的上边还是下边
             .when_some(edge, |d, side| {
                 d.child(
@@ -464,7 +387,7 @@ impl Workspace {
                 )
             })
             .child(body)
-            .when_some(actions, |d, actions| d.child(actions))
+            .child(actions)
             // 鼠标单击不连接，双击才连；键盘和辅助功能的「按下」直接连接（VoiceOver 才连得上）
             .on_click(cx.listener({
                 let id = connect_id.clone();

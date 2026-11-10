@@ -22,13 +22,14 @@ use crate::files::{FileManager, FileManagerEvent, FileSession};
 use crate::system_panel::{SystemPanel, SystemPanelEvent};
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options, PasswordAnswer};
+use crate::settings;
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use crate::snippets::{SnippetDialog, SnippetDialogEvent, SnippetPanel, SnippetPanelEvent};
 use crate::terminal::{Metrics, TerminalEvent, TerminalView};
 use crate::theme::{self, ui};
 use crate::ui as kit;
 
-actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, OpenSettings]);
+actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, OpenSettings, ToggleSidebar]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -40,6 +41,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-p", ShowSnippets, Some("Workspace")),
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
+        KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
     ]);
 }
 
@@ -1038,6 +1040,13 @@ fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<W
         )
 }
 
+/// 红绿灯（`main.rs` 的 `traffic_light_position`）连同右边留白占的宽度：侧栏收起时顶栏从这里往右排。
+pub(crate) const TRAFFIC_LIGHTS_WIDTH: f32 = 84.;
+/// 侧栏收起时右栏的上边距：让 34px 高的顶栏和红绿灯竖直居中对齐。
+const TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS: f32 = 7.;
+/// 侧栏收起时右栏的左边距（展开时紧挨侧栏只留 4px）。
+pub(crate) const COLLAPSED_COLUMN_LEFT: f32 = 12.;
+
 /// 透明标题栏下的拖动区：按住拖动窗口，双击缩放（同系统标题栏）。
 pub fn drag_region(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
     div().id(id).on_mouse_down(MouseButton::Left, |event, window, _| {
@@ -1055,6 +1064,7 @@ impl Render for Workspace {
         let entity = cx.entity();
         let overlay = self.pending.as_ref().filter(|p| p.show_overlay).map(|_| self.connecting_overlay(cx));
         let menu = self.connection_menu_overlay(window, cx);
+        let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
         div()
             .size_full()
             .relative()
@@ -1087,6 +1097,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_snippets(window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .capture_key_down(cx.listener(Self::capture_key))
             .child(
@@ -1094,7 +1105,8 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.sidebar(window, cx))
+                    // 收起 = 整个侧栏不画，展开按钮挪到顶栏红绿灯右边（`top_bar`）
+                    .when(!sidebar_collapsed, |row| row.child(self.sidebar(window, cx)))
                     .child(
                         div()
                             .flex_1()
@@ -1102,10 +1114,11 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            .pt_3()
+                            // 侧栏收起时顶栏和红绿灯同一行：上边距收到让两者竖直居中对齐
+                            .map(|column| if sidebar_collapsed && !window.is_fullscreen() { column.pt(px(TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS)) } else { column.pt_3() })
                             .pr_3()
                             .pb_3()
-                            .pl_1()
+                            .map(|column| if sidebar_collapsed { column.pl(px(COLLAPSED_COLUMN_LEFT)) } else { column.pl_1() })
                             .child(self.top_bar(window, cx))
                             .child(
                                 div()
@@ -1141,7 +1154,7 @@ impl Render for Workspace {
                                                 .justify_center()
                                                 .flex_col()
                                                 .gap_4()
-                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child("点击左侧连接或创建新连接开始使用"))
+                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child(if sidebar_collapsed { "按 ⌘B 展开侧边栏选择连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
                                                 .child(
                                                     kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), "新建连接")
                                                         .h(px(32.))

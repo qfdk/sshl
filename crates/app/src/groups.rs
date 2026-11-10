@@ -1,7 +1,6 @@
 //! 连接分组与排序（旧 lib/connection-groups.ts、lib/session-tabs.ts 的原生版）。
 
 use sshl_core::config_store::StoredConnection;
-use unicode_segmentation::UnicodeSegmentation;
 
 pub fn normalize(group: &str) -> &str {
     group.trim()
@@ -104,12 +103,6 @@ pub fn matches(conn: &StoredConnection, query: &str) -> bool {
     [&conn.name, &conn.host, &conn.username, &conn.group].iter().any(|v| v.to_lowercase().contains(&needle))
 }
 
-/// 侧栏收起后的方块：名称的第一个字形簇（emoji 开头就是那个 emoji），字母大写。
-pub fn initials(name: &str, host: &str) -> String {
-    let source = if name.trim().is_empty() { host.trim() } else { name.trim() };
-    source.graphemes(true).next().map_or_else(|| "?".to_string(), |g| g.to_uppercase())
-}
-
 /// 名称旁边的主机名：连接就是以主机名命名时不再重复显示一遍。
 pub fn distinct_host<'a>(name: &str, host: &'a str) -> &'a str {
     if host.is_empty() || name.trim().eq_ignore_ascii_case(host.trim()) { "" } else { host }
@@ -184,16 +177,6 @@ mod tests {
         let item = conn("server", "production");
         assert!(matches(&item, "PROD"));
         assert!(!matches(&item, "missing"));
-    }
-
-    #[test]
-    fn initials_take_the_first_grapheme() {
-        assert_eq!(initials("prod-web-01", ""), "P");
-        assert_eq!(initials("生产数据库", ""), "生");
-        assert_eq!(initials("🚀 deploy", ""), "🚀");
-        assert_eq!(initials("👨‍💻 dev", ""), "👨‍💻");
-        assert_eq!(initials("", "db.example.com"), "D");
-        assert_eq!(initials("", ""), "?");
     }
 
     #[test]

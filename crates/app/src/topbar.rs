@@ -8,10 +8,10 @@ use gpui::{
 use crate::assets::Icon;
 use crate::groups::{self, Side};
 use crate::settings;
-use crate::sidebar::DragPreview;
+use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
-use crate::workspace::{DraggedTab, MainTab, Workspace, drag_region};
+use crate::workspace::{COLLAPSED_COLUMN_LEFT, DraggedTab, MainTab, TRAFFIC_LIGHTS_WIDTH, Workspace, drag_region};
 
 /// 按住 ⌘ 时浮在标签 / 按钮右上角的快捷键。
 fn hint(key: impl Into<SharedString>, visible: bool) -> AnyElement {
@@ -42,12 +42,23 @@ impl Workspace {
             self.tab_drop = None;
         }
         let connected = self.active.is_some();
+        let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
         drag_region("topbar")
             .flex()
             .flex_shrink_0()
             .flex_wrap()
             .items_center()
             .gap(px(10.))
+            // 侧栏收起后整列让给终端，红绿灯右边只留展开按钮（全屏时红绿灯藏起来，不用让位）。
+            // 新建连接不再放一个：有标签时标签栏末尾有 +，没标签时页面中间有「新建连接」
+            .when(sidebar_collapsed, |bar| {
+                bar.child(
+                    div()
+                        .flex_shrink_0()
+                        .when(!window.is_fullscreen(), |d| d.pl(px(TRAFFIC_LIGHTS_WIDTH - COLLAPSED_COLUMN_LEFT)))
+                        .child(sidebar_toggle_button(true, cx)),
+                )
+            })
             .child(self.session_tabs(cx))
             .child(
                 div()

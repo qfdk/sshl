@@ -43,6 +43,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **冷启动**：从 `open` 到窗口显示中位 ~300ms（旧 Tauri 版 ~600ms）。启动路径上别加同步 IO、字体枚举、网络；
   系统字体列表只在设置对话框里后台加载。启动时不主动激活应用（Finder / Dock 打开时系统会激活）。
 - **窗口**：透明标题栏，红绿灯在侧栏顶部单独一行；拖动区用 `workspace::drag_region`（按下移动窗口、双击缩放）。
+  侧栏收起（⌘B，`settings.sidebar_collapsed`）= 整个不画，不留图标栏：顶栏和红绿灯同一行，左边让出 `TRAFFIC_LIGHTS_WIDTH`、
+  只放展开按钮（新建连接不重复放，标签栏末尾有 +）。收起时焦点在搜索框里就交回内容区——直接问焦点句柄，
+  不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。
   关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock 走 `on_reopen` 显示；⌘Q 退出。
 - **终端线程模型**：libghostty-vt 的类型都是 `!Send`，每个会话一个终端线程独占它（`terminal/engine.rs`）。
   SSH 输出、键鼠、改尺寸都以 `Input` 消息进来；界面只拿 `Frame` 快照来画，行是 `Arc<Row>`，没变的行沿用。
