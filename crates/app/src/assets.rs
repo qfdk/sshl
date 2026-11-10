@@ -36,7 +36,7 @@ icons! {
     ChevronDown => "chevron-down",
     ChevronLeft => "chevron-left",
     ChevronRight => "chevron-right",
-    Code => "code",
+    CodeXml => "code-xml",
     Download => "download",
     FileText => "file-text",
     Folder => "folder",

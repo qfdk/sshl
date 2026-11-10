@@ -132,8 +132,8 @@ pub struct Workspace {
     pub(crate) fill_menu: Option<FillMenu>,
     pub(crate) fill_feedback: bool,
     fill_feedback_task: Option<Task<()>>,
-    /// 终端界面右下角显示的传输进度（0–100，说明）。
-    transfer_shown: Option<(u32, String)>,
+    /// 终端界面右下角显示的传输进度（0–100，说明，是否还在传）。
+    transfer_shown: Option<(u32, String, bool)>,
     /// 后台探活中的会话：会话 id → 连接 id。用户在探活期间主动断开会移除它，借此区分「连接失效该重连」和「用户自己断开」。
     revalidating: HashMap<String, String>,
     connection_dialog: Option<Entity<ConnectionDialog>>,
@@ -185,7 +185,8 @@ impl Workspace {
             cx.observe(&prompts, |_, _, cx| cx.notify()),
             // 在终端界面时也显示传输进度（从终端拖文件上传）：只在进度真有变化时重画
             cx.observe(&file_manager, |this: &mut Self, files, cx| {
-                let shown = files.read(cx).transfer_status().map(|s| (s.progress, s.info.clone()));
+                let files = files.read(cx);
+                let shown = files.transfer_status().map(|s| (s.progress, s.info.clone(), files.is_transferring()));
                 if shown != this.transfer_shown {
                     this.transfer_shown = shown;
                     if this.main_tab == MainTab::Terminal {
@@ -996,7 +997,7 @@ impl ConnectionForm {
 }
 
 /// 终端界面右下角的传输进度（从终端拖文件上传时，不用切到文件管理也看得到）。
-fn transfer_toast(progress: u32, info: String) -> impl IntoElement {
+fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
     div()
         .absolute()
         .right(px(12.))
@@ -1013,7 +1014,20 @@ fn transfer_toast(progress: u32, info: String) -> impl IntoElement {
         .bg(theme::color(ui::CARD))
         .shadow_lg()
         .text_size(px(12.))
-        .child(div().truncate().child(info))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(div().flex_1().min_w_0().truncate().child(info))
+                .when(running, |row| {
+                    row.child(
+                        kit::mini_button("toast-stop", crate::assets::Icon::X, "停止传输", ui::MUTED_FOREGROUND)
+                            .size(px(20.))
+                            .on_click(cx.listener(|this, _, _, cx| this.file_manager.update(cx, |files, cx| files.stop_transfers(cx)))),
+                    )
+                }),
+        )
         .child(
             div()
                 .h(px(4.))
@@ -1111,7 +1125,9 @@ impl Render for Workspace {
                                     .map(|area| match (terminal, self.main_tab) {
                                         (Some(view), MainTab::Terminal) => area
                                             .child(div().absolute().size_full().child(view))
-                                            .when_some(self.transfer_shown.clone(), |area, (progress, info)| area.child(transfer_toast(progress, info))),
+                                            .when_some(self.transfer_shown.clone(), |area, (progress, info, running)| {
+                                                area.child(transfer_toast(progress, info, running, cx))
+                                            }),
                                         (Some(_), MainTab::Files) => area.child(div().absolute().size_full().child(self.file_manager.clone())),
                                         (Some(_), MainTab::System) => area.child(div().absolute().size_full().child(self.system_panel.clone())),
                                         (None, _) => area.child(

@@ -10,6 +10,8 @@ pub enum Outcome {
     Ok,
     /// 用户在确认框或密码框里取消：不算失败，不弹报错。
     Cancelled,
+    /// 用户点了停止（传输中途停下）：不弹报错。
+    Stopped,
     Failed(String),
 }
 
@@ -19,6 +21,14 @@ impl Outcome {
             Some(Ok(_)) => Outcome::Ok,
             Some(Err(error)) => Outcome::Failed(error.to_string()),
             None => Outcome::Failed("后台任务异常退出".into()),
+        }
+    }
+
+    /// 传输的结果：停止（`AppError::Cancelled`）单独算，不当失败。
+    pub fn from_transfer<T>(result: Option<sshl_core::error::AppResult<T>>) -> Self {
+        match result {
+            Some(Err(sshl_core::error::AppError::Cancelled)) => Outcome::Stopped,
+            other => Self::from_result(other),
         }
     }
 
@@ -215,6 +225,14 @@ mod tests {
             elevated,
         ));
         (outcome, calls.into_inner())
+    }
+
+    #[test]
+    fn a_stopped_transfer_is_not_a_failure() {
+        use sshl_core::error::AppError;
+        assert_eq!(Outcome::from_transfer::<()>(Some(Err(AppError::Cancelled))), Outcome::Stopped);
+        assert_eq!(Outcome::from_transfer::<()>(Some(Err(AppError::Sftp("boom".into())))), Outcome::Failed("sftp error: boom".into()));
+        assert_eq!(Outcome::from_transfer(Some(Ok(()))), Outcome::Ok);
     }
 
     #[test]

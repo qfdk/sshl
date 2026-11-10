@@ -152,7 +152,7 @@ pub async fn sync_file_user(
     .await;
     let mut out = match &result {
         Outcome::Ok => SyncResult::new(SyncStatus::Switched, Some(who.user.clone()), Some(who.user.clone())),
-        Outcome::Cancelled => unchanged(SyncStatus::Cancelled),
+        Outcome::Cancelled | Outcome::Stopped => unchanged(SyncStatus::Cancelled),
         Outcome::Failed(error) => SyncResult { error: Some(error.clone()), ..unchanged(SyncStatus::Failed) },
     };
     out.saved = saved;

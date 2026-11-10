@@ -1,10 +1,11 @@
 //! 文件管理视图（旧 FileManager.tsx + FilePane.tsx + useFileList.ts + useTransfer.ts）。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use gpui::{
@@ -31,7 +32,7 @@ use super::model::{
     format_permissions, is_root_path, join_path, normalize_remote_path, parent_path, permissions_to_checks,
     readable_permissions, remote_home_from, valid_octal, visible_files,
 };
-use super::progress::{TransferProgress, TransferStatus, describe_progress};
+use super::progress::{SpeedMeter, TransferProgress, TransferStatus, describe_progress};
 use super::sudo::{Outcome, Secret, saved_password_choices, sudo_error_message, upload_with_sudo_fallback};
 use crate::assets::Icon;
 use crate::backend;
@@ -252,7 +253,15 @@ pub struct FileManager {
     remote_empty_connection: Option<String>,
     active: bool,
     syncing: bool,
-    transfers: usize,
+    /// 排队等着传的：一次只传一个，后加的接在后面（多批同时传会抢带宽、进度条来回跳）。
+    queue: VecDeque<Job>,
+    /// 队列在跑。
+    worker: bool,
+    /// 这一轮（队列从空到空）传完了几个：传完的提示说「3 个已上传到 …」。
+    finished: usize,
+    /// 正在传的那一个的停止开关；None = 没在传。
+    current: Option<Arc<AtomicBool>>,
+    speed: SpeedMeter,
     status: TransferStatus,
     hide_status: Option<Task<()>>,
     menu: Option<MenuState>,
@@ -321,7 +330,11 @@ impl FileManager {
             remote_empty_connection: None,
             active: false,
             syncing: false,
-            transfers: 0,
+            queue: VecDeque::new(),
+            worker: false,
+            finished: 0,
+            current: None,
+            speed: SpeedMeter::default(),
             status: TransferStatus::default(),
             hide_status: None,
             menu: None,
@@ -345,8 +358,23 @@ impl FileManager {
     // ---------------------------------------------------------------- 对外接口
 
     /// 正在进行的传输数（断开确认文案用）。
+    /// 正在传的和排队的一共几个（断开前提醒用）。
     pub fn active_transfers(&self) -> usize {
-        self.transfers
+        self.queue.len() + usize::from(self.current.is_some())
+    }
+
+    /// 有传输正在进行（显示「停止」）。
+    pub fn is_transferring(&self) -> bool {
+        self.current.is_some()
+    }
+
+    /// 停止：排队的不传了，正在传的在下一块时停下（服务器 / 本地原有的同名文件不受影响）。
+    pub fn stop_transfers(&mut self, cx: &mut Context<Self>) {
+        self.queue.clear();
+        if let Some(stop) = &self.current {
+            stop.store(true, Ordering::Relaxed);
+        }
+        cx.notify();
     }
 
     /// 文件管理标签显示 / 隐藏。显示时加载两侧并同步终端用户。
@@ -435,7 +463,8 @@ impl FileManager {
             CoreEvent::DownloadProgress(p) => ("下载", TransferProgress::from(p)),
             CoreEvent::ConnectionsUpdated => return,
         };
-        self.status = describe_progress(verb, &progress);
+        let speed = self.speed.record(std::time::Instant::now(), progress.transferred);
+        self.status = describe_progress(verb, &progress, speed, self.queue.len());
         cx.notify();
     }
 
@@ -918,14 +947,16 @@ impl FileManager {
     fn upload_items(&mut self, items: Vec<FileEntry>, directory: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else { return };
         let directory = directory.unwrap_or_else(|| self.remote.path.clone());
-        cx.spawn_in(window, async move |this, cx| {
-            for item in items {
-                let destination = join_path(&directory, &basename(&item.path));
-                let op = if item.is_directory { Op::UploadDir } else { Op::UploadFile };
-                run_transfer(&this, cx, &session, op, item.path.clone(), destination).await;
-            }
-        })
-        .detach();
+        let jobs = items
+            .into_iter()
+            .map(|item| Job {
+                session: session.clone(),
+                op: if item.is_directory { Op::UploadDir } else { Op::UploadFile },
+                destination: join_path(&directory, &basename(&item.path)),
+                source: item.path,
+            })
+            .collect();
+        self.enqueue(jobs, window, cx);
     }
 
     fn download_items(&mut self, items: Vec<FileEntry>, directory: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -934,14 +965,16 @@ impl FileManager {
         if directory.is_empty() {
             return;
         }
-        cx.spawn_in(window, async move |this, cx| {
-            for item in items {
-                let destination = join_path(&directory, &basename(&item.path));
-                let op = if item.is_directory { Op::DownloadDir } else { Op::DownloadFile };
-                run_transfer(&this, cx, &session, op, item.path.clone(), destination).await;
-            }
-        })
-        .detach();
+        let jobs = items
+            .into_iter()
+            .map(|item| Job {
+                session: session.clone(),
+                op: if item.is_directory { Op::DownloadDir } else { Op::DownloadFile },
+                destination: join_path(&directory, &basename(&item.path)),
+                source: item.path,
+            })
+            .collect();
+        self.enqueue(jobs, window, cx);
     }
 
     fn upload_paths(&mut self, paths: Vec<String>, directory: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -949,10 +982,45 @@ impl FileManager {
         let kinds = backend::spawn(local_fs::file_local_kinds(paths.clone()));
         cx.spawn_in(window, async move |this, cx| {
             let kinds = kinds.await.unwrap_or_else(|| vec![false; paths.len()]);
-            for (index, local) in paths.into_iter().enumerate() {
-                let destination = join_path(&directory, &basename(&local));
-                let op = if kinds.get(index).copied().unwrap_or(false) { Op::UploadDir } else { Op::UploadFile };
-                run_transfer(&this, cx, &session, op, local, destination).await;
+            let jobs = paths
+                .into_iter()
+                .enumerate()
+                .map(|(index, local)| Job {
+                    session: session.clone(),
+                    op: if kinds.get(index).copied().unwrap_or(false) { Op::UploadDir } else { Op::UploadFile },
+                    destination: join_path(&directory, &basename(&local)),
+                    source: local,
+                })
+                .collect();
+            let _ = this.update_in(cx, |this, window, cx| this.enqueue(jobs, window, cx));
+        })
+        .detach();
+    }
+
+    /// 加进传输队列；队列没在跑就跑起来，一个传完接下一个。
+    fn enqueue(&mut self, jobs: Vec<Job>, window: &mut Window, cx: &mut Context<Self>) {
+        if jobs.is_empty() {
+            return;
+        }
+        self.queue.extend(jobs);
+        cx.notify();
+        if self.worker {
+            return;
+        }
+        self.worker = true;
+        self.finished = 0;
+        cx.spawn_in(window, async move |this, cx| {
+            // 取下一个和「队列空了就停」在同一次 update 里：中间不会有新加的任务被漏掉
+            while let Some(job) = this
+                .update(cx, |this, _| {
+                    let job = this.queue.pop_front();
+                    this.worker = job.is_some();
+                    job
+                })
+                .ok()
+                .flatten()
+            {
+                run_transfer(&this, cx, job).await;
             }
         })
         .detach();
@@ -2027,7 +2095,7 @@ impl FileManager {
             .into_any_element()
     }
 
-    fn render_status(&self) -> AnyElement {
+    fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
         let progress = self.status.progress.min(100) as f32 / 100.;
         div()
             .h(px(44.))
@@ -2064,6 +2132,12 @@ impl FileManager {
                     .bg(theme::alpha(ui::PRIMARY, 0.2))
                     .child(div().h_full().w(gpui::relative(progress)).bg(theme::color(ui::PRIMARY))),
             )
+            .when(self.current.is_some(), |d| {
+                d.child(
+                    kit::mini_button("transfer-stop", Icon::X, "停止传输", ui::MUTED_FOREGROUND)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop_transfers(cx))),
+                )
+            })
             .into_any_element()
     }
 
@@ -2324,11 +2398,19 @@ impl Render for FileManager {
                             .child(remote),
                     ),
             )
-            .when(self.status.active, |root| root.child(self.render_status()))
+            .when(self.status.active, |root| root.child(self.render_status(cx)))
             .children(menu)
             .children(permission)
             .children(new_folder)
     }
+}
+
+/// 传输队列里的一项。
+struct Job {
+    session: FileSession,
+    op: Op,
+    source: String,
+    destination: String,
 }
 
 /// 一次传输（旧 useTransfer.run）：进度条、完成后刷新目标一侧、失败弹框、3 秒后收起。
@@ -2356,53 +2438,74 @@ impl Op {
 }
 
 /// 传完的提示写明落在哪个目录：从终端拖文件上传时，看这一句就知道传到哪了。
-fn finished_message(op: Op, destination: &str) -> String {
+/// 一次排了好几个时说一共几个（`count` = 这一轮传完的个数，含这一个）。
+fn finished_message(op: Op, destination: &str, count: usize) -> String {
     let side = if op.is_upload() { PaneKind::Remote } else { PaneKind::Local };
     let place = if op.is_upload() { "已上传到" } else { "已下载到" };
-    format!("{} {place} {}", basename(destination), parent_path(destination, side))
+    let what = if count > 1 { format!("{count} 个") } else { format!("{} ", basename(destination)) };
+    format!("{what}{place} {}", parent_path(destination, side))
 }
 
-async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContext, session: &FileSession, op: Op, source: String, destination: String) -> Outcome {
+async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContext, job: Job) -> Outcome {
+    let Job { session, op, source, destination } = job;
+    let destination_for_message = destination.clone();
     let verb = op.verb();
     let name = basename(&source);
-    let done = finished_message(op, &destination);
+    let stop = Arc::new(AtomicBool::new(false));
     let started = this.update(cx, |this, cx| {
-        this.transfers += 1;
+        this.current = Some(stop.clone());
+        this.speed.reset();
         this.hide_status = None;
-        this.status = TransferStatus::show(0, format!("正在{verb}: {name}"));
+        let queued = if this.queue.is_empty() { String::new() } else { format!(" · 还有 {} 个", this.queue.len()) };
+        this.status = TransferStatus::show(0, format!("正在{verb} {name}{queued}"));
         cx.notify();
     });
     if started.is_err() {
         return Outcome::Cancelled;
     }
     let outcome = match op {
-        Op::UploadFile | Op::UploadDir => upload_with_sudo(this, cx, session, source, destination, matches!(op, Op::UploadDir)).await,
+        Op::UploadFile | Op::UploadDir => upload_with_sudo(this, cx, &session, source, destination, matches!(op, Op::UploadDir), stop).await,
         Op::DownloadFile => {
             let sid = session.session_id.clone();
             let b = backend::get();
-            Outcome::from_result(backend::spawn(async move { sftp::file_download(&b.events, &b.state, sid, source, destination).await }).await)
+            Outcome::from_transfer(
+                backend::spawn(sftp::cancellable(stop, async move { sftp::file_download(&b.events, &b.state, sid, source, destination).await })).await,
+            )
         }
         Op::DownloadDir => {
             let sid = session.session_id.clone();
             let b = backend::get();
-            Outcome::from_result(backend::spawn(async move { sftp::file_download_directory(&b.events, &b.state, sid, source, destination).await }).await)
+            Outcome::from_transfer(
+                backend::spawn(sftp::cancellable(stop, async move { sftp::file_download_directory(&b.events, &b.state, sid, source, destination).await }))
+                    .await,
+            )
         }
     };
     let finished = outcome.clone();
     let _ = this.update_in(cx, |this, window, cx| {
+        this.current = None;
         match &finished {
             Outcome::Ok => {
-                this.status = TransferStatus::show(100, done);
+                this.finished += 1;
+                this.status = TransferStatus::show(100, finished_message(op, &destination_for_message, this.finished));
                 this.transfer_finished(op, window, cx);
             }
             // 用户在 sudo 确认或密码框里取消：不算失败，不弹报错
             Outcome::Cancelled => this.status = TransferStatus::show(0, format!("已取消{verb}")),
+            // 停在中途：目录传输已经传完的文件留着，刷新一下目标那边
+            Outcome::Stopped => {
+                this.status = TransferStatus::show(0, format!("已停止{verb}"));
+                this.transfer_finished(op, window, cx);
+            }
             Outcome::Failed(error) => {
                 this.status = TransferStatus::show(0, format!("{verb}失败"));
+                // 会话没了：同一会话后面排队的也传不了，别一个个弹框
+                if error.contains("session not found") {
+                    this.queue.retain(|job| job.session.session_id != session.session_id);
+                }
                 prompts::alert_later(window, cx, Options::new(format!("{verb}失败")).message(error.clone()));
             }
         }
-        this.transfers = this.transfers.saturating_sub(1);
         this.hide_status = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(3)).await;
             let _ = this.update(cx, |this, cx| {
@@ -2416,7 +2519,16 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
 }
 
 /// 普通上传；目标目录无写权限时问一次是否用 sudo（见 sudo.rs）。
-async fn upload_with_sudo(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContext, session: &FileSession, local: String, remote: String, is_dir: bool) -> Outcome {
+async fn upload_with_sudo(
+    this: &WeakEntity<FileManager>,
+    cx: &mut AsyncWindowContext,
+    session: &FileSession,
+    local: String,
+    remote: String,
+    is_dir: bool,
+    stop: Arc<AtomicBool>,
+) -> Outcome {
+    let sudo_stop = stop.clone();
     let sid = session.session_id.clone();
     let elevated = this.read_with(cx, |this, _| this.records.get(&sid).and_then(|r| r.identity.as_ref()).is_some_and(FileIdentity::elevated)).unwrap_or(false);
     let user = Rc::new(RefCell::new(String::new()));
@@ -2438,14 +2550,14 @@ async fn upload_with_sudo(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowCo
     let outcome = upload_with_sudo_fallback(
         async move || {
             let b = backend::get();
-            Outcome::from_result(
-                backend::spawn(async move {
+            Outcome::from_transfer(
+                backend::spawn(sftp::cancellable(stop, async move {
                     if is_dir {
                         sftp::file_upload_directory(&b.events, &b.state, normal_sid, normal_local, normal_remote).await
                     } else {
                         sftp::file_upload(&b.events, &b.state, normal_sid, normal_local, normal_remote).await
                     }
-                })
+                }))
                 .await,
             )
         },
@@ -2453,8 +2565,11 @@ async fn upload_with_sudo(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowCo
             let b = backend::get();
             let (password, credential) = split_secret(secret);
             let (sid, local, remote) = (sudo_sid.clone(), sudo_local.clone(), sudo_remote.clone());
-            Outcome::from_result(
-                backend::spawn(async move { sftp::file_upload_sudo(&b.events, &b.state, sid, local, remote, is_dir, password, credential).await }).await,
+            Outcome::from_transfer(
+                backend::spawn(sftp::cancellable(sudo_stop.clone(), async move {
+                    sftp::file_upload_sudo(&b.events, &b.state, sid, local, remote, is_dir, password, credential).await
+                }))
+                .await,
             )
         },
         async move || {
@@ -2534,8 +2649,9 @@ mod tests {
 
     #[test]
     fn finished_transfers_say_where_the_file_went() {
-        assert_eq!(finished_message(Op::UploadFile, "/var/www/html/a.zip"), "a.zip 已上传到 /var/www/html");
-        assert_eq!(finished_message(Op::UploadDir, "/srv/app"), "app 已上传到 /srv");
-        assert_eq!(finished_message(Op::DownloadFile, "/Users/me/Downloads/log.txt"), "log.txt 已下载到 /Users/me/Downloads");
+        assert_eq!(finished_message(Op::UploadFile, "/var/www/html/a.zip", 1), "a.zip 已上传到 /var/www/html");
+        assert_eq!(finished_message(Op::UploadDir, "/srv/app", 1), "app 已上传到 /srv");
+        assert_eq!(finished_message(Op::DownloadFile, "/Users/me/Downloads/log.txt", 1), "log.txt 已下载到 /Users/me/Downloads");
+        assert_eq!(finished_message(Op::UploadFile, "/home/q/b.txt", 3), "3 个已上传到 /home/q", "排了好几个时说一共几个");
     }
 }
