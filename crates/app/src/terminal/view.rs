@@ -1,5 +1,5 @@
-//! 终端视图：一张深色圆角卡片，按整行整列贴齐（余下的不足一行 / 一列交给卡片外的浅色背景），
-//! 四边 4px 内边距；内边距用边缘格子的底色延伸（全屏 TUI 的状态栏、cursorline 贴到卡片边）。
+//! 终端视图：铺满内容区的深色直角卡片。左、右、上 4px 内边距，底边不留（最后一行贴着底边）；
+//! 内边距用边缘格子的底色延伸（全屏 TUI 的 cursorline 贴到卡片边）。
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -74,10 +74,10 @@ impl Metrics {
         Self { font_size: size, cell_width: snap(advance), line_height: snap(height), scale }
     }
 
-    /// 在 `available` 大小的区域里能排下的网格（四边扣掉内边距）。
+    /// 在 `available` 大小的区域里能排下的网格（左、右、上扣掉内边距；底边不留，最后一行贴着底边）。
     pub fn grid(&self, available: gpui::Size<Pixels>) -> GridSize {
-        let pad = px(TERMINAL_PADDING) * 2.;
-        let cols = ((available.width - pad) / self.cell_width).floor().max(1.0) as u16;
+        let pad = px(TERMINAL_PADDING);
+        let cols = ((available.width - pad * 2.) / self.cell_width).floor().max(1.0) as u16;
         let rows = ((available.height - pad) / self.line_height).floor().max(1.0) as u16;
         GridSize {
             cols,
@@ -793,9 +793,9 @@ impl EntityInputHandler for TerminalView {
 }
 
 /// 网格离卡片左 / 上边的距离（逻辑像素）：固定内边距 + 排不下整格的余量里放在这一边的份额（`share`，0–1），
-/// 按设备像素取整（不足一个设备像素的留在另一边）。
-fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32) -> f32 {
-    let leftover = (available - TERMINAL_PADDING * 2. - cell * f32::from(cells)).max(0.);
+/// 按设备像素取整（不足一个设备像素的留在另一边）。`pad_after` 是另一边的内边距（底边不留，是 0）。
+fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32, pad_after: f32) -> f32 {
+    let leftover = (available - TERMINAL_PADDING - pad_after - cell * f32::from(cells)).max(0.);
     TERMINAL_PADDING + (leftover * share * scale).floor() / scale
 }
 
@@ -855,13 +855,13 @@ impl Element for TerminalElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut Window, cx: &mut App) -> (Bounds<Pixels>, Point<Pixels>) {
         let grid = self.metrics.grid(bounds.size);
         let m = &self.metrics;
-        // 卡片铺满（同 Ghostty）。排不下一整行的余量全放在上面：最后一行（nvim 状态栏）贴着底边，下面只有 4px 内边距、
-        // 铺它自己的颜色；放在底下的话状态栏下面不是多一条深色边，就是颜色铺下去像多了一行。上面那条是终端底色，
+        // 卡片铺满（同 Ghostty）。底边不留内边距，排不下一整行的余量也全放在上面：最后一行（nvim 状态栏）正好贴着底边。
+        // 底下留 4px 的话，不是状态栏下面多一条深色边，就是它的颜色铺下去、状态栏比别的行高出一截。上面那条是终端底色，
         // 和第一行连成一片看不出来。左右的余量平分（行的底色左右本来就铺到边）
         let origin = bounds.origin
             + point(
-                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5)),
-                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1.)),
+                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5, TERMINAL_PADDING)),
+                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1., 0.)),
             );
         self.view.update(cx, |view, _| view.resize(grid, origin));
         (bounds, origin)
@@ -884,7 +884,7 @@ impl Element for TerminalElement {
         let cell_y = |y: usize| origin.y + m.line_height * y as f32;
 
         // 内边距延伸：边缘整行有底色时铺进内边距。上边只铺固定的内边距那么高（再往上是余量，用卡片底色，
-        // 整行往上拉长看着像多了一行）；下边余量不到一个设备像素，铺到底；左右照旧铺到边（cursorline 之类贴边才自然）
+        // 整行往上拉长看着像多了一行）；下边没有内边距，只剩不到一个设备像素的取整余量，铺到底；左右照旧铺到边（cursorline 之类贴边才自然）
         let ext = &frame.extension;
         let strip = |window: &mut Window, colors: &[Rgb], top: Pixels, height: Pixels, round_top: bool| {
             if colors.is_empty() {
@@ -1156,12 +1156,24 @@ mod tests {
 
     #[test]
     fn leftover_rows_go_on_top_and_leftover_columns_are_split() {
-        // 高 500、行高 18：(500 - 8) / 18 = 27 行，余 6px 全放上面：最后一行离底边只有 4px 内边距
-        assert_eq!(grid_offset(500., 27, 18., 2., 1.), 10.);
+        // 高 500、行高 18：底边不留内边距，27 行占 486，剩下 14px 全在上面，最后一行贴着底边
+        assert_eq!(grid_offset(500., 27, 18., 2., 1., 0.), 14.);
         // 左右平分；余 7px 时 2 倍屏上能放 3.5px，1 倍屏按整像素取 3px（多的 1px 留在另一边）
-        assert_eq!(grid_offset(501., 27, 18., 2., 0.5), 7.5);
-        assert_eq!(grid_offset(501., 27, 18., 1., 0.5), 7.);
+        assert_eq!(grid_offset(501., 27, 18., 2., 0.5, TERMINAL_PADDING), 7.5);
+        assert_eq!(grid_offset(501., 27, 18., 1., 0.5, TERMINAL_PADDING), 7.);
         // 正好排满：只有内边距
-        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1.), 4.);
+        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1., TERMINAL_PADDING), 4.);
+        assert_eq!(grid_offset(4. + 18. * 10., 10, 18., 2., 1., 0.), 4.);
+    }
+
+    /// nvim 状态栏下面不留那 4px：行数只扣上边的内边距，最后一行正好落在底边上。
+    #[test]
+    fn the_last_row_sits_on_the_bottom_edge() {
+        let m = Metrics { font_size: px(13.), cell_width: px(8.), line_height: px(18.), scale: 2. };
+        // 高 4 + 18 × 10：正好 10 行（上下各扣 4px 的话只排得下 9 行）
+        let grid = m.grid(size(px(8. + 8. * 80.), px(4. + 18. * 10.)));
+        assert_eq!((grid.cols, grid.rows), (80, 10));
+        let top = grid_offset(4. + 18. * 10., grid.rows, 18., 2., 1., 0.);
+        assert_eq!(top + 18. * f32::from(grid.rows), 4. + 18. * 10.);
     }
 }
