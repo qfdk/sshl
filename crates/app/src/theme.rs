@@ -69,5 +69,3 @@ pub mod term {
 
 /// 终端卡片四边的内边距（逻辑像素）。
 pub const TERMINAL_PADDING: f32 = 4.0;
-/// 终端卡片圆角。
-pub const CARD_RADIUS: f32 = 8.0;

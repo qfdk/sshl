@@ -1234,8 +1234,9 @@ fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<W
 pub(crate) const TRAFFIC_LIGHTS_WIDTH: f32 = 84.;
 /// 侧栏收起时右栏的上边距：让 34px 高的顶栏和红绿灯竖直居中对齐。
 pub(crate) const TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS: f32 = 7.;
-/// 侧栏展开时内容区（终端 / 文件管理 / 系统页）到窗口右边、下边的留白（左边紧挨侧栏只留 4px）；
-/// 侧栏收起时内容区贴满窗口、不留白边（终端卡片也不画圆角和阴影），顶栏两边留这么多。
+/// 顶栏两边的留白；侧栏展开时文件管理 / 系统页到窗口右边、下边也留这么多（左边紧挨侧栏只留 4px）。
+/// 终端页（和没有会话时的空页面）任何时候都贴满：左边贴侧栏 / 窗口，右边、下边贴窗口，同 Ghostty；
+/// 侧栏收起时文件管理 / 系统页也贴满。
 pub(crate) const CONTENT_EDGE: f32 = 6.;
 
 /// 拖动区里的控件（标签、按钮）包一层：在它们上面按下不把事件冒泡给拖动区，
@@ -1316,13 +1317,15 @@ impl Render for Workspace {
                             .flex_col()
                             .gap(px(10.))
                             // 上边距算在顶栏里（顶栏是拖动区，窗口最上面那条也要能拖），见 `top_bar`
-                            .when(!sidebar_collapsed, |column| column.pl_1().pr(px(CONTENT_EDGE)).pb(px(CONTENT_EDGE)))
                             .child(self.top_bar(window, cx))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_h_0()
                                     .relative()
+                                    .when(!sidebar_collapsed && terminal.is_some() && self.main_tab != MainTab::Terminal, |area| {
+                                        area.ml_1().mr(px(CONTENT_EDGE)).mb(px(CONTENT_EDGE))
+                                    })
                                     .child(
                                         canvas(
                                             move |bounds, _, cx| {
@@ -1345,7 +1348,6 @@ impl Render for Workspace {
                                             div()
                                                 .absolute()
                                                 .size_full()
-                                                .when(!sidebar_collapsed, |d| d.rounded(px(8.)))
                                                 .bg(theme::color(0x1d1d1d))
                                                 .flex()
                                                 .items_center()

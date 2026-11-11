@@ -48,8 +48,9 @@ impl Workspace {
         drag_region("topbar")
             // 窗口顶上到标签之间那条也属于拖动区；侧栏收起时顶栏和红绿灯同一行，上边距收到让两者竖直居中对齐
             .map(|bar| if sidebar_collapsed && !window.is_fullscreen() { bar.pt(px(TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS)) } else { bar.pt_3() })
-            // 侧栏收起时内容区贴满窗口，两边的留白只给顶栏
-            .when(sidebar_collapsed, |bar| bar.px(px(CONTENT_EDGE)))
+            // 内容区（终端页）贴满窗口，两边的留白只给顶栏；侧栏展开时左边紧挨侧栏只留 4px
+            .pr(px(CONTENT_EDGE))
+            .map(|bar| if sidebar_collapsed { bar.pl(px(CONTENT_EDGE)) } else { bar.pl_1() })
             .flex()
             .flex_shrink_0()
             .flex_wrap()

@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
-    App, BorderStyle, Bounds, BoxShadow, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
+    App, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
     Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
@@ -28,7 +28,7 @@ use super::frame::{Frame, Rgb, flags};
 use super::keys;
 use crate::backend;
 use crate::prompts::{self, Options};
-use crate::theme::{self, CARD_RADIUS, TERMINAL_PADDING};
+use crate::theme::{self, TERMINAL_PADDING};
 
 actions!(terminal, [Copy, Paste, SelectAll]);
 
@@ -140,7 +140,6 @@ fn drop_hint() -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
-        .rounded(px(CARD_RADIUS))
         .border_2()
         .border_color(theme::color(theme::ui::PRIMARY))
         .bg(theme::alpha(theme::ui::PRIMARY, 0.12))
@@ -736,7 +735,6 @@ impl Render for TerminalView {
                 focused,
                 cursor_on: self.blink_on || !focused,
                 marked: self.marked.clone(),
-                full_bleed: crate::settings::get(cx).sidebar_collapsed,
             })
             .when(self.drop_hover, |d| d.child(drop_hint()))
     }
@@ -817,8 +815,6 @@ struct TerminalElement {
     focused: bool,
     cursor_on: bool,
     marked: Option<String>,
-    /// 侧栏收起、卡片贴满窗口：不画圆角和阴影。
-    full_bleed: bool,
 }
 
 impl IntoElement for TerminalElement {
@@ -863,19 +859,10 @@ impl Element for TerminalElement {
         let frame = self.frame.clone();
         let m = &self.metrics;
         let pad = px(TERMINAL_PADDING);
-        let radius = Corners::all(px(if self.full_bleed { 0. } else { CARD_RADIUS }));
+        // 终端贴满内容区（同 Ghostty）：直角、不画阴影；窗口的圆角由系统裁
+        let radius = Corners::all(px(0.));
         let padding_color = if frame.rows.is_empty() { theme::term::BACKGROUND } else { frame.padding };
 
-        if !self.full_bleed {
-            window.paint_drop_shadows(
-                card,
-                radius,
-                &[
-                    BoxShadow { color: theme::alpha(0x16181d, 0.10), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false },
-                    BoxShadow { color: theme::alpha(0x16181d, 0.10), offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.), inset: false },
-                ],
-            );
-        }
         window.paint_quad(quad(card, radius, hsla(padding_color), px(0.), gpui::transparent_black(), BorderStyle::default()));
 
         let origin = card.origin + point(pad, pad);
