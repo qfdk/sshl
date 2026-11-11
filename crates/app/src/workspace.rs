@@ -1502,7 +1502,7 @@ impl Render for Workspace {
             )
             .when_some(overlay, |root, overlay| root.child(overlay))
             .when_some(menu, |root, menu| root.child(menu))
-            // 快速连接：浮在顶部居中，点面板外面关掉
+            // 快速连接：浮在中间偏上，点面板外面关掉
             .when(self.quick_open, |root| {
                 root.child(
                     div()
@@ -1514,7 +1514,7 @@ impl Render for Workspace {
                         .justify_center()
                         // 不让下面那层拦截点击的 div 被拉成整列高：面板正下方也算「外面」
                         .items_start()
-                        .pt(px(72.))
+                        .pt(px(quick_connect::top_offset(f32::from(window.viewport_size().height))))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_quick_connect(window, cx)))
                         .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.quick_connect.clone())),
                 )

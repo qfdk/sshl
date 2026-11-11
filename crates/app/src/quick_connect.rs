@@ -43,6 +43,16 @@ pub fn sidebar_order(connections: &[StoredConnection], group_order: &[String]) -
 
 /// 按搜索词筛选：空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里（不分大小写）；
 /// 名称以第一个词开头的排前面（敲开头几个字母就能回车），其余保持原顺序。返回下标。
+/// 面板最高时的高度：搜索行 + 分隔线 + 列表上限 380 + 内边距。
+const PANEL_MAX_HEIGHT: f32 = 440.;
+
+/// 面板顶边离窗口顶的距离：窗口高度的 30%，搜索框落在中线上方一点、列表往下展开。
+/// 定的是顶边而不是整体居中：敲字过滤、列表变短时搜索框不跟着上下跳。
+/// 矮窗口里往上收，让最高的面板底下还留 24；再矮也不低于 72。
+pub fn top_offset(window_height: f32) -> f32 {
+    (window_height * 0.3).min(window_height - PANEL_MAX_HEIGHT - 24.).max(72.).round()
+}
+
 pub fn filter_connections(connections: &[StoredConnection], query: &str) -> Vec<usize> {
     let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut matched: Vec<usize> = connections
@@ -282,6 +292,15 @@ mod tests {
 
     fn names(list: &[StoredConnection], picked: &[usize]) -> Vec<String> {
         picked.iter().map(|&i| list[i].name.clone()).collect()
+    }
+
+    #[test]
+    fn panel_top_sits_a_little_above_the_middle() {
+        assert_eq!(top_offset(1000.), 300.);
+        assert_eq!(top_offset(1400.), 420.);
+        // 矮窗口：最高的面板也要放得下，底下留 24
+        assert_eq!(top_offset(600.), 136.);
+        assert_eq!(top_offset(300.), 72.);
     }
 
     #[test]

@@ -156,7 +156,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段「仅本机」归属 `local`，所有本机标签共用。
   标签切换 ⌘⇧] / ⌘⇧[、⌃Tab / ⌃⇧Tab（`groups::cycle_tab`，两头绕回）；⌘1 … ⌘9 切到第几个标签（`groups::nth_tab`，本机标签也算，
   没那么多就不动）。点标签、⌘ 数字、⌘⇧] 都走 `Workspace::select_tab`。按住 ⌘ 时前 9 个标签角上浮出序号，视图按钮浮出 I / O / P。
-- **快速连接**（⌘K，`quick_connect.rs`）：顶部居中的浮层，只搜保存的连接（空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里，
+- **快速连接**（⌘K，`quick_connect.rs`）：左右居中、中间偏上的浮层（顶边在窗口高度 30% 处，矮窗口往上收，`top_offset`；用户嫌离顶 72px 太靠上，要窗口中间略偏上），只搜保存的连接（空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里，
   名称以第一个词开头的排前面），↑↓ 选、↵ 连、Esc / 点外面关；已开着的带绿点、选了就切过去（`connect_to_saved`）。
   顺序同侧栏。侧栏收起时空页面提示 ⌘K。有对话框 / 提示框 / 正在连接时不弹。
 - **右键菜单**（`sidebar.rs` 的 `connection_menu_overlay`，`ConnectionMenu.on_tab` 区分）：侧栏连接项是 连接 / 编辑 / 断开 / 删除（连着时编辑、删除置灰）；
