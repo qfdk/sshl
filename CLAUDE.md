@@ -89,6 +89,16 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   并把整行有底色的边缘行（除了最后一行往下）延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
   不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
   粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。
+- **终端配色**（设置 →「终端」页的「配色」，`settings.terminal_theme` 存主题 id，默认 `carbonfox`）：内置主题在 `theme.rs` 的 `term::THEMES`
+  （`term::Theme`：底色、前景、光标、选区底 / 字、16 色；`term::find` 查不到退回默认，存的 id 不改写）。默认的 Carbonfox 就是原来写死的那套
+  （用户 Ghostty 配置），颜色一个都不能变（有测试盯着）。其他主题的颜色取自官方配置，出处写在每套上面；只有两处为了看得清偏离官方：
+  Solarized Light 的前景 / 光标用 base01（官方 base00 对底色只有 4.1:1）、Catppuccin Latte 的光标用 Text（官方 Rosewater 只有 2.3:1）。
+  测试要求每套前景对底色 ≥ 4.5:1、光标 ≥ 3:1。搜索高亮三个颜色不属于主题，是常量。
+  换配色：`TerminalView` 用 `observe_global::<Settings>` 盯着（预览、保存、关对话框还原都会触发），id 变了就给终端线程发
+  `Input::Theme(&'static Theme)`，不在前台的标签也发；新终端在 `engine::spawn` 时就拿当前主题。终端线程的 `apply_theme` 交给 libghostty
+  改默认前景 / 背景 / 光标和调色板前 16 色（程序用 OSC 改过的照留），libghostty 因此把整屏标脏，下一帧所有行重建：格子里存的是
+  「默认色 / 第几号色」，屏幕上和回滚历史里的字都跟着变，真彩色不变。选区色不在 libghostty 里，`Painter.theme` 跟着换。
+  终端没出第一帧时的底色、没会话时的空页面、设置里的字体预览也跟着配色；输入法组字用帧里的 `Frame.foreground` / `background`。
 - **内置字体**：JetBrainsMono Nerd Font（非 Mono 版，图标是正常大小；Mono 版把图标压成一格，用户嫌不好看）两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
 - **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的
   text_color、不继承，别直接用。图标在 `assets.rs` 的 `icons!` 表里登记。
@@ -185,7 +195,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   点了过去、悬停的 × 直接删（不用先进那个目录）、↑↓ ↵ 可选，一敲字换成子目录补全。文件管理里不另放收藏按钮 / 菜单（顶栏那个星星是全局入口）。
   地址栏的两个下拉都包在 `deferred` 里画，否则会被后面的表头和文件行盖住。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
-- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴）。首次启动从旧版 WebView 的
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色）。首次启动从旧版 WebView 的
   localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
 - **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
   （填充密码由后端解密直接写通道）。

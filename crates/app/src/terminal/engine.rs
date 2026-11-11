@@ -24,7 +24,7 @@ use libghostty_vt::{RenderState, Terminal};
 use sshl_core::ssh::ShellHandle;
 
 use super::frame::{self, flags, Cell, Cursor, CursorShape, Frame, Rgb, Row};
-use crate::theme::term as colors;
+use crate::theme::term::Theme;
 
 /// 给远端 PTY 的 window_change 最多约 30 次/秒：拖动窗口时本地每帧都重排，远端只跟最后的尺寸。
 const PTY_RESIZE_INTERVAL: Duration = Duration::from_millis(33);
@@ -97,6 +97,8 @@ pub enum Input {
     LinkAt { x: f32, y: f32, reply: futures::channel::oneshot::Sender<Option<String>> },
     /// 断线重连：之后的输入、终端应答、改尺寸、流控确认都写到新的 shell 通道。屏幕和回滚历史不动。
     Rebind(ShellHandle),
+    /// 换配色（设置里选了别的、包括预览）：屏幕上和回滚历史里用默认色、色号的字一起换，真彩色的不变。
+    Theme(&'static Theme),
     Shutdown,
 }
 
@@ -147,6 +149,7 @@ impl Drop for TerminalHandle {
 pub fn spawn(
     size: GridSize,
     shell: ShellHandle,
+    theme: &'static Theme,
     notify: impl Fn(Event) + Send + 'static,
 ) -> TerminalHandle {
     let (tx, rx) = mpsc::channel();
@@ -156,7 +159,7 @@ pub fn spawn(
         .name("terminal".into())
         .spawn(move || {
             let notify: Box<dyn Fn(Event) + Send> = Box::new(notify);
-            match Engine::new(size, shell, thread_shared, notify) {
+            match Engine::new(size, shell, theme, thread_shared, notify) {
                 Ok(mut engine) => engine.run(rx),
                 Err(error) => tracing::error!("terminal engine failed to start: {error}"),
             }
@@ -171,6 +174,21 @@ fn rgb(c: RgbColor) -> Rgb {
 
 fn ghostty(c: Rgb) -> RgbColor {
     RgbColor { r: c.r, g: c.g, b: c.b }
+}
+
+/// 配色交给 libghostty：改的是默认前景 / 背景 / 光标色和调色板前 16 色，程序用 OSC 10 / 11 / 12 / 4 改过的照样留着。
+/// 格子里记的是「默认色 / 第几号色」，画的时候才查颜色；libghostty 改完把整屏标脏，下一帧所有行按新颜色重建，
+/// 回滚历史滚出来时也是新颜色。真彩色记的是颜色本身，不受影响。
+fn apply_theme(term: &mut Terminal<'static, 'static>, theme: &Theme) -> libghostty_vt::error::Result<()> {
+    term.set_default_fg_color(Some(ghostty(theme.foreground)))?;
+    term.set_default_bg_color(Some(ghostty(theme.background)))?;
+    term.set_default_cursor_color(Some(ghostty(theme.cursor)))?;
+    let mut palette = term.default_color_palette()?;
+    for (i, color) in theme.ansi.iter().enumerate() {
+        palette.set(PaletteIndex(i as _), ghostty(*color));
+    }
+    term.set_default_color_palette(Some(palette))?;
+    Ok(())
 }
 
 /// 进行中的搜索。libghostty 自己跟着屏幕变化、换屏、改尺寸更新结果，这里只负责分片推进和取结果。
@@ -240,6 +258,8 @@ struct Painter {
     held_since: Option<Instant>,
     /// 搜索状态（终端线程每轮算好放这儿），拼帧时带上。
     search: Option<Arc<frame::SearchInfo>>,
+    /// 当前配色：选区的颜色从这里取（默认色和调色板在 libghostty 那边）。
+    theme: &'static Theme,
     shared: Arc<Shared>,
     notify: Rc<dyn Fn(Event) + Send>,
 }
@@ -302,23 +322,17 @@ impl Engine {
     fn new(
         size: GridSize,
         shell: ShellHandle,
+        theme: &'static Theme,
         shared: Arc<Shared>,
         notify: Box<dyn Fn(Event) + Send>,
     ) -> libghostty_vt::error::Result<Self> {
         let mut term = Terminal::new(size.cols.max(1), size.rows.max(1))?;
         term.resize(size.cols.max(1), size.rows.max(1), size.cell_width, size.cell_height)?;
         term.set_scrollback_max_bytes(Some(SCROLLBACK_BYTES))?;
-        term.set_default_fg_color(Some(ghostty(colors::FOREGROUND)))?;
-        term.set_default_bg_color(Some(ghostty(colors::BACKGROUND)))?;
-        term.set_default_cursor_color(Some(ghostty(colors::CURSOR)))?;
+        apply_theme(&mut term, theme)?;
         // 默认光标：闪烁竖线。程序发 DECSCUSR 0（nvim 退出时）就回到这里。
         term.set_default_cursor_style(Some(CursorStyle::Bar))?;
         term.set_default_cursor_blink(Some(true))?;
-        let mut palette = term.default_color_palette()?;
-        for (i, color) in colors::ANSI.iter().enumerate() {
-            palette.set(PaletteIndex(i as _), ghostty(*color));
-        }
-        term.set_default_color_palette(Some(palette))?;
         // 终端应答（光标位置报告等）也走可替换的那条通道：断线重连后写到新连接
         let shell = Arc::new(Mutex::new(shell));
         let reply = shell.clone();
@@ -335,6 +349,7 @@ impl Engine {
             unsent: false,
             held_since: None,
             search: None,
+            theme,
             shared,
             notify: notify.clone(),
         }));
@@ -529,6 +544,12 @@ impl Engine {
                 *self.shell.lock().unwrap() = shell;
                 // 旧通道没确认完的字节不能记到新通道头上
                 self.unacked = 0;
+            }
+            Input::Theme(theme) => {
+                if let Err(error) = apply_theme(&mut self.term, theme) {
+                    tracing::warn!("terminal theme failed: {error}");
+                }
+                self.painter.borrow_mut().theme = theme;
             }
             Input::SelectAll => {
                 if let Ok(Some(all)) = self.term.select_all() {
@@ -1038,8 +1059,8 @@ impl Painter {
                     }
                     out.base_bg = bg;
                     if cell.is_selected()? {
-                        fg = colors::SELECTION_FG;
-                        bg = Some(colors::SELECTION_BG);
+                        fg = self.theme.selection_fg.unwrap_or(fg);
+                        bg = Some(self.theme.selection_bg);
                         out.flags |= flags::SELECTED;
                     }
                     out.fg = fg;
@@ -1095,6 +1116,7 @@ impl Painter {
             rows: self.rows.clone(),
             cursor,
             background,
+            foreground,
             padding,
             extension,
             password_prompt,
@@ -1141,12 +1163,13 @@ fn flag(on: bool, bit: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::term;
 
     fn engine() -> (Engine, Arc<Shared>) {
         let (shell, _rx) = sshl_core::ssh::shell_channel();
         let shared = Arc::new(Shared { frame: Mutex::new(Arc::new(Frame::default())), notified: AtomicBool::new(false) });
         let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
-        (Engine::new(size, shell, shared.clone(), Box::new(|_| {})).unwrap(), shared)
+        (Engine::new(size, shell, term::find(term::DEFAULT_ID), shared.clone(), Box::new(|_| {})).unwrap(), shared)
     }
 
     fn cursor_x(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> u16 {
@@ -1402,6 +1425,56 @@ mod tests {
         let frame = shared.frame.lock().unwrap().clone();
         let wrapped: Vec<bool> = frame.rows.iter().take(3).map(|row| row.wrapped).collect();
         assert_eq!(wrapped, [true, false, false]);
+    }
+
+    /// 换配色：屏幕上和回滚历史里用默认色、色号的字跟着变成新主题的颜色，程序用真彩色指定的不变。
+    #[test]
+    fn changing_the_theme_recolors_existing_text_but_not_truecolor() {
+        let (mut engine, shared) = engine();
+        let (old, new) = (term::find(term::DEFAULT_ID), term::find("solarized-light"));
+        // 默认色 a、31 号红字 b、44 号蓝底 c、真彩色字 d、真彩色底 e。一份推进回滚历史，屏幕最后一行再一份
+        let line = b"a\x1b[31mb\x1b[0m\x1b[44mc\x1b[0m\x1b[38;2;1;2;3md\x1b[0m\x1b[48;2;4;5;6me\x1b[0m";
+        engine.write_output(line);
+        engine.write_output(&b"\r\n".repeat(60));
+        engine.write_output(line);
+        engine.paint().unwrap();
+        let colors = |shared: &Shared, y: usize| {
+            let frame = shared.frame.lock().unwrap().clone();
+            let cells = &frame.rows[y].cells;
+            (cells[0].fg, cells[1].fg, cells[2].bg, cells[3].fg, cells[4].bg)
+        };
+        let (true_fg, true_bg) = (Rgb { r: 1, g: 2, b: 3 }, Some(Rgb { r: 4, g: 5, b: 6 }));
+        assert_eq!(colors(&shared, 23), (old.foreground, old.ansi[1], Some(old.ansi[4]), true_fg, true_bg));
+
+        engine.handle(Input::Theme(new));
+        engine.paint().unwrap();
+        let expected = (new.foreground, new.ansi[1], Some(new.ansi[4]), true_fg, true_bg);
+        assert_eq!(colors(&shared, 23), expected, "屏幕上的");
+        let frame = shared.frame.lock().unwrap().clone();
+        assert_eq!((frame.background, frame.foreground), (new.background, new.foreground));
+        assert_eq!(frame.cursor.unwrap().color, new.cursor);
+        engine.handle(Input::Scroll(-1000));
+        engine.paint().unwrap();
+        assert_eq!(colors(&shared, 0), expected, "回滚历史里的");
+    }
+
+    /// 选区用当前主题的颜色；Nord 那样不定选中字色的，字保持原来的颜色。
+    #[test]
+    fn the_selection_follows_the_theme() {
+        let (mut engine, shared) = engine();
+        engine.write_output(b"x\x1b[32my\x1b[0m");
+        engine.handle(Input::SelectAll);
+        engine.paint().unwrap();
+        let cells = |shared: &Shared| shared.frame.lock().unwrap().rows[0].cells[..2].to_vec();
+        let old = term::find(term::DEFAULT_ID);
+        let c = cells(&shared);
+        assert_eq!((c[0].fg, c[0].bg), (old.selection_fg.unwrap(), Some(old.selection_bg)));
+        let nord = term::find("nord");
+        engine.handle(Input::Theme(nord));
+        engine.paint().unwrap();
+        let c = cells(&shared);
+        assert_eq!((c[0].fg, c[0].bg), (nord.foreground, Some(nord.selection_bg)));
+        assert_eq!((c[1].fg, c[1].bg), (nord.ansi[2], Some(nord.selection_bg)), "选中的绿字还是绿的");
     }
 
     /// Claude Code 先用 DECRQM 问支不支持 2026，答了「支持」才发同步输出（它不认识 TERM_PROGRAM=SSHL）。

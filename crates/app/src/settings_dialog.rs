@@ -1,11 +1,11 @@
-//! 设置（旧 SettingsDialog.tsx + GroupTree.tsx）：终端字号 / 字体（实时预览），分组管理（改完要点保存）。
+//! 设置（旧 SettingsDialog.tsx + GroupTree.tsx）：终端字号 / 字体 / 配色（实时预览），分组管理（改完要点保存）。
 
 use std::collections::HashSet;
 
 use gpui::{
     AnyElement, AppContext, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, deferred, div, prelude::FluentBuilder, px,
+    HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
+    StatefulInteractiveElement, StyledText, Styled, Subscription, Toggled, Window, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, ConnectionLayoutInput, StoredConnection};
@@ -16,6 +16,8 @@ use crate::groups::{self, Side};
 use crate::prompts::{self, Options};
 use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Settings};
 use crate::sidebar::DragPreview;
+use crate::terminal::frame::Rgb;
+use crate::theme::term::{self, Theme};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
 
@@ -196,7 +198,7 @@ impl SettingsDialog {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        // 预览过的字体 / 字号没保存就换回去
+        // 预览过的字体 / 字号 / 配色没保存就换回去
         let snapshot = self.snapshot.clone();
         let current = settings::get(cx).clone();
         let restored = Settings {
@@ -204,6 +206,7 @@ impl SettingsDialog {
             font_family: snapshot.font_family,
             copy_on_select: snapshot.copy_on_select,
             right_click_paste: snapshot.right_click_paste,
+            terminal_theme: snapshot.terminal_theme,
             ..current.clone()
         };
         if restored != current {
@@ -250,7 +253,13 @@ impl SettingsDialog {
             s.font_family = DEFAULT_FONT_FAMILY.into();
             s.copy_on_select = defaults.copy_on_select;
             s.right_click_paste = defaults.right_click_paste;
+            s.terminal_theme = defaults.terminal_theme;
         });
+        cx.notify();
+    }
+
+    fn pick_theme(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        settings::preview(cx, |s| s.terminal_theme = id.into());
         cx.notify();
     }
 
@@ -404,7 +413,17 @@ impl Render for SettingsDialog {
                             .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, "终端", self.tab == Tab::Font, cx))
                             .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, "分组管理", self.tab == Tab::Groups, cx)),
                     )
-                    .child(div().flex_1().min_w_0().p_5().child(panel)),
+                    // 窗口矮（最小 600）时「终端」这页放不下：右边这块自己滚动，标题栏和保存按钮不会被挤出窗口
+                    .child(
+                        div()
+                            .id("settings-panel")
+                            .flex_1()
+                            .min_w_0()
+                            .max_h(window.viewport_size().height - px(96.))
+                            .overflow_y_scroll()
+                            .p_5()
+                            .child(panel),
+                    ),
             );
         kit::modal("settings-dialog", 768., body)
     }
@@ -476,7 +495,10 @@ impl SettingsDialog {
                 .occlude()
                 .children(rows)
         });
-        let preview_line = |text: &'static str, color: u32| div().truncate().text_color(theme::color(color)).child(text);
+        let palette = current.terminal_theme();
+        // 第二行是浅灰的 ls 输出，用 7 号白；浅色主题的白在浅底上看不清，改用前景色
+        let dim = if palette.is_light() { palette.foreground } else { palette.ansi[7] };
+        let preview_line = |text: &'static str, color: Rgb| div().truncate().text_color(term::hsla(color)).child(text);
         div()
             .flex()
             .flex_col()
@@ -535,17 +557,18 @@ impl SettingsDialog {
                     .px_4()
                     .py_3()
                     .rounded(px(12.))
-                    .bg(theme::color(0x1d1d1d))
+                    .bg(term::hsla(palette.background))
                     .shadow_md()
                     .font_family(current.font_family.clone())
                     .text_size(px(current.font_size))
                     .line_height(px(current.font_size * 1.5))
-                    .child(preview_line("user@host:~$ ls -la /etc", 0xf6f825))
-                    .child(preview_line("drwxr-xr-x  123 root  4096 May 24 10:42 .", 0xdfdfe0))
-                    .child(preview_line("The quick brown fox 0123456789 → ✓", 0xf6f825))
-                    .child(preview_line("Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文", 0xf6f825))
-                    .child(preview_line("Nerd Font 图标: \u{e0b0} \u{f07b} \u{f015} \u{f120} \u{e0a0} \u{f09b} \u{f135}", 0xf6f825)),
+                    .child(preview_line("user@host:~$ ls -la /etc", palette.foreground))
+                    .child(preview_line("drwxr-xr-x  123 root  4096 May 24 10:42 .", dim))
+                    .child(preview_line("The quick brown fox 0123456789 → ✓", palette.foreground))
+                    .child(preview_line("Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文", palette.foreground))
+                    .child(preview_line("Nerd Font 图标: \u{e0b0} \u{f07b} \u{f015} \u{f120} \u{e0a0} \u{f09b} \u{f135}", palette.foreground)),
             )
+            .child(div().flex().flex_col().gap_2().child(kit::field_label("配色")).child(self.theme_cards(palette, cx)))
             .child(
                 div()
                     .flex()
@@ -565,6 +588,39 @@ impl SettingsDialog {
                     .child(kit::labeled_button("settings-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
+    }
+
+    /// 配色：每套一张小卡片，主题的底色上用它的前景和两个 ANSI 色写一行提示符 + 命令，下面是名字；
+    /// 选中的描主色蓝边。点了先预览（所有终端跟着换），保存才写盘。
+    fn theme_cards(&self, current: &'static Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // 目录蓝（4 号）、提示符绿（2 号）、命令是前景色
+        const SAMPLE: &str = "~/app $ ls -la";
+        let cards = term::THEMES.iter().enumerate().map(|(i, t)| {
+            let active = t.id == current.id;
+            let id = t.id;
+            let color = |c: Rgb| HighlightStyle { color: Some(term::hsla(c)), ..Default::default() };
+            let sample = StyledText::new(SAMPLE).with_highlights([(0..5, color(t.ansi[4])), (6..7, color(t.ansi[2]))]);
+            div()
+                .id(("terminal-theme", i))
+                .role(Role::RadioButton)
+                .aria_label(t.name)
+                .aria_toggled(if active { Toggled::True } else { Toggled::False })
+                .min_w_0()
+                .px(px(8.))
+                .py(px(4.))
+                .rounded(px(8.))
+                .border_2()
+                .border_color(theme::color(if active { ui::PRIMARY } else { ui::BORDER }))
+                .when(!active, |card| card.hover(|s| s.border_color(theme::color(ui::RING))))
+                .bg(term::hsla(t.background))
+                .text_color(term::hsla(t.foreground))
+                .line_height(px(16.))
+                .cursor_pointer()
+                .child(div().truncate().font_family(DEFAULT_FONT_FAMILY).text_size(px(11.)).child(sample))
+                .child(div().truncate().text_xs().child(t.name))
+                .on_click(cx.listener(move |this, _, _, cx| this.pick_theme(id, cx)))
+        });
+        div().id("terminal-themes").role(Role::RadioGroup).aria_label("配色").grid().grid_cols(4).gap(px(6.)).children(cards)
     }
 
     /// 一行开关：勾选框 + 名称 + 灰色说明。和字体一样先预览，保存才写盘。

@@ -16,6 +16,7 @@
 - libghostty-vt 解析、GPU 绘制，内置 JetBrainsMono Nerd Font，图标与 Powerline 字形开箱可用
 - 中文、emoji 宽字符对齐；中文输入法组字直接在光标处
 - 字体、字号可调，可选系统字体或自定义 `fontFamily`
+- 配色可选：默认 Carbonfox，另有 Tokyo Night、Dracula、Catppuccin、Gruvbox、Nord、One Dark、Solarized、GitHub Light 等深浅主题，选了立即生效，屏幕上已有的内容也跟着换色
 - 终端出现 sudo / su 密码提示时一键填入已保存的密码，同一台机器可存多个账号
 - 本机终端（⌘T）：登录 shell，新标签沿用当前本机标签的目录；从 Finder 拖文件进来填入路径；`exit` 即关标签
 - 查找（⌘F）：搜屏幕和全部回滚历史，匹配处高亮，回车逐个跳

@@ -1,4 +1,4 @@
-//! 终端视图：铺满内容区的深色直角卡片，四边 4px 内边距。左、右、上的内边距用边缘格子的底色延伸
+//! 终端视图：铺满内容区的直角卡片（颜色跟着设置里的配色），四边 4px 内边距。左、右、上的内边距用边缘格子的底色延伸
 //! （全屏 TUI 的 cursorline 贴到卡片边）；底边那 4px 不延伸，是卡片的底色。
 
 use std::ops::Range;
@@ -12,7 +12,7 @@ use futures::channel::oneshot;
 use gpui::{
     App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
-    Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
+    InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
     Role, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
     fill, font, point, prelude::FluentBuilder, px, quad, relative, size,
@@ -30,6 +30,8 @@ use super::keys;
 use crate::assets::Icon;
 use crate::backend;
 use crate::prompts::{self, Options};
+use crate::settings::{self, Settings};
+use crate::theme::term::{Theme, hsla};
 use crate::theme::{self, TERMINAL_PADDING};
 use crate::ui as kit;
 
@@ -261,6 +263,8 @@ pub struct TerminalView {
     cmd_down: bool,
     /// 这次左键按下是 ⌘ 点链接（按下的位置）：之后的拖动和松开都不交给选区、也不上报给程序，松开时打开。
     link_press: Option<Point<Pixels>>,
+    /// 终端线程现在用的配色。
+    theme: &'static Theme,
     _tasks: Vec<Task<()>>,
 }
 
@@ -297,7 +301,8 @@ impl TerminalView {
         let (shell, shell_rx) = ssh::shell_channel();
         let (ui_tx, mut ui_rx) = unbounded::<UiMsg>();
         let notify_tx = ui_tx.clone();
-        let handle = engine::spawn(grid, shell.clone(), move |event| {
+        let theme = settings::get(cx).terminal_theme();
+        let handle = engine::spawn(grid, shell.clone(), theme, move |event| {
             let _ = notify_tx.unbounded_send(UiMsg::Engine(event));
         });
         let sink = Arc::new(Sink { output: handle.sender(), ui: ui_tx });
@@ -393,6 +398,16 @@ impl TerminalView {
             }
         });
 
+        // 换了配色（设置对话框里预览、保存、关掉还原）：每个终端都换，不在前台的标签也换，切过去时已经是新颜色
+        let theme_watch = cx.observe_global::<Settings>(|view, cx| {
+            let theme = settings::get(cx).terminal_theme();
+            if theme.id != view.theme.id {
+                view.theme = theme;
+                view.handle.send(Input::Theme(theme));
+                cx.notify();
+            }
+        });
+
         let view = Self {
             handle,
             shell,
@@ -415,11 +430,12 @@ impl TerminalView {
             scroll_remainder: 0.0,
             search,
             search_open: false,
-            _subscriptions: vec![search_subscription, activation],
+            _subscriptions: vec![search_subscription, activation, theme_watch],
             hover_link: None,
             pointer: None,
             cmd_down: false,
             link_press: None,
+            theme,
             _tasks: vec![events_task, blink_task],
         };
         (view, shell_rx)
@@ -971,6 +987,7 @@ impl Render for TerminalView {
             .child(TerminalElement {
                 view: cx.entity(),
                 frame: self.frame.clone(),
+                background: self.theme.background,
                 metrics,
                 focused,
                 cursor_on: self.blink_on || !focused,
@@ -1094,13 +1111,11 @@ fn shell_escape(path: &str) -> String {
     out
 }
 
-fn hsla(c: Rgb) -> Hsla {
-    theme::color(c.to_u32())
-}
-
 struct TerminalElement {
     view: Entity<TerminalView>,
     frame: Arc<Frame>,
+    /// 配色的底色：终端线程还没出第一帧时铺它。
+    background: Rgb,
     metrics: Metrics,
     focused: bool,
     cursor_on: bool,
@@ -1159,7 +1174,7 @@ impl Element for TerminalElement {
         let pad = px(TERMINAL_PADDING);
         // 终端贴满内容区（同 Ghostty）：直角、不画阴影；窗口的圆角由系统裁
         let radius = Corners::all(px(0.));
-        let padding_color = if frame.rows.is_empty() { theme::term::BACKGROUND } else { frame.padding };
+        let padding_color = if frame.rows.is_empty() { self.background } else { frame.padding };
 
         window.paint_quad(quad(card, radius, hsla(padding_color), px(0.), gpui::transparent_black(), BorderStyle::default()));
 
@@ -1328,12 +1343,12 @@ impl Element for TerminalElement {
                 }
             }
 
-            // 输入法组字：画在光标处，带下划线
+            // 输入法组字：画在光标处，带下划线；用终端的默认前景 / 底色（跟着配色，程序用 OSC 10 / 11 改过就是改后的）
             if let Some(marked) = &self.marked {
                 let run = TextRun {
                     len: marked.len(),
                     font: fonts.regular.clone(),
-                    color: hsla(theme::term::FOREGROUND),
+                    color: hsla(frame.foreground),
                     background_color: Some(hsla(frame.background)),
                     underline: Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false }),
                     strikethrough: None,

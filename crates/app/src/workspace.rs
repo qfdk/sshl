@@ -1450,6 +1450,9 @@ impl Render for Workspace {
         let overlay = self.pending.as_ref().filter(|p| p.show_overlay).map(|_| self.connecting_overlay(cx));
         let menu = self.connection_menu_overlay(window, cx);
         let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
+        // 没会话时的空页面看着像个空终端：底色跟着配色，提示字在浅底上换成深灰
+        let palette = settings::get(cx).terminal_theme();
+        let empty_hint = if palette.is_light() { ui::MUTED_FOREGROUND } else { 0xcbd5e1 };
         div()
             .size_full()
             .relative()
@@ -1537,13 +1540,13 @@ impl Render for Workspace {
                                             div()
                                                 .absolute()
                                                 .size_full()
-                                                .bg(theme::color(0x1d1d1d))
+                                                .bg(theme::term::hsla(palette.background))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
                                                 .flex_col()
                                                 .gap_4()
-                                                .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child(if sidebar_collapsed { "按 ⌘K 快速连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
+                                                .child(div().text_sm().text_color(theme::color(empty_hint)).child(if sidebar_collapsed { "按 ⌘K 快速连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
                                                 .child(
                                                     div()
                                                         .flex()

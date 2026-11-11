@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 
+use crate::theme::term;
+
 pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
@@ -24,6 +26,8 @@ pub struct Settings {
     pub copy_on_select: bool,
     /// 终端里右键直接粘贴（程序在接收鼠标时除外）。
     pub right_click_paste: bool,
+    /// 终端配色的 id（`theme::term::THEMES`）。不认识的按默认显示，存的值不动。
+    pub terminal_theme: String,
 }
 
 impl Default for Settings {
@@ -37,7 +41,14 @@ impl Default for Settings {
             show_hidden_files: false,
             copy_on_select: false,
             right_click_paste: false,
+            terminal_theme: term::DEFAULT_ID.into(),
         }
+    }
+}
+
+impl Settings {
+    pub fn terminal_theme(&self) -> &'static term::Theme {
+        term::find(&self.terminal_theme)
     }
 }
 
@@ -211,6 +222,34 @@ mod tests {
         assert_eq!(clamp_font_size(4.0), 8.0);
         assert_eq!(clamp_font_size(99.0), 40.0);
         assert_eq!(clamp_font_size(f32::NAN), DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn old_settings_without_a_terminal_theme_use_the_default() {
+        let s: Settings = serde_json::from_str(r#"{"fontSize":14,"fontFamily":"Menlo","copyOnSelect":true}"#).unwrap();
+        assert_eq!(s.terminal_theme, "carbonfox");
+        assert_eq!(s.terminal_theme().id, "carbonfox");
+        assert_eq!((s.font_size, s.copy_on_select), (14.0, true), "其他字段照常读出来");
+    }
+
+    #[test]
+    fn the_terminal_theme_round_trips() {
+        let s = Settings { terminal_theme: "nord".into(), ..Settings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""terminalTheme":"nord""#), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.terminal_theme().name, "Nord");
+    }
+
+    /// 不认识的 id（手改的、以后删掉的主题）：照默认的显示，存的值原样留着，不报错、别的设置也不丢。
+    #[test]
+    fn an_unknown_terminal_theme_shows_the_default_and_is_kept_as_is() {
+        let s: Settings = serde_json::from_str(r#"{"fontSize":15,"terminalTheme":"no-such-theme"}"#).unwrap();
+        assert_eq!(s.font_size, 15.0);
+        assert_eq!(s.terminal_theme, "no-such-theme");
+        assert_eq!(s.terminal_theme().id, "carbonfox");
+        assert!(serde_json::to_string(&s).unwrap().contains(r#""terminalTheme":"no-such-theme""#), "写盘时不改写");
     }
 
     #[test]

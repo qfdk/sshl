@@ -354,6 +354,8 @@ pub struct Frame {
     pub cursor: Option<Cursor>,
     /// 终端默认底色（OSC 11 改过就是改后的）。
     pub background: Rgb,
+    /// 终端默认前景色（OSC 10 改过就是改后的）：输入法组字用它。
+    pub foreground: Rgb,
     /// 卡片和内边距的底色：边缘格子的主色（全屏 TUI 的根背景），定不下来时是 background。
     pub padding: Rgb,
     pub extension: EdgeExtension,
