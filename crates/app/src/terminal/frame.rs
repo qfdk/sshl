@@ -64,6 +64,8 @@ impl Cell {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Row {
     pub cells: Vec<Cell>,
+    /// 软换行：这一行排满了，内容接着下一行（长命令、长网址折成几行）。
+    pub wrapped: bool,
 }
 
 impl Row {
@@ -185,6 +187,127 @@ pub fn newest_index<K: Ord>(len: usize, position: impl Fn(usize) -> Option<K>) -
         }
     }
     low
+}
+
+/// 一行里一段链接的格子（`start..end` 是格子列号，不含 end）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub y: u16,
+    pub start: u16,
+    pub end: u16,
+}
+
+/// 屏幕上的一个纯文本网址：按住 ⌘ 时画下划线、点击打开。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub url: String,
+    /// 网址占的格子，按行切好（折行的网址有好几段）。
+    pub spans: Vec<LinkSpan>,
+}
+
+/// 认作网址开头的 scheme（ASCII 字母不分大小写）。
+const URL_SCHEMES: &[&str] = &["http://", "https://", "ftp://"];
+
+/// 格子 `(x, y)` 处的纯文本网址。整条逻辑行一起看：上一行是软换行就接着往上找开头，本行是软换行就接着往下，
+/// 登录类命令打印的长链接折成几行也是同一个。
+pub fn link_at(rows: &[Arc<Row>], x: usize, y: usize) -> Option<Link> {
+    if x >= rows.get(y)?.cells.len() {
+        return None;
+    }
+    let mut first = y;
+    while first > 0 && rows[first - 1].wrapped {
+        first -= 1;
+    }
+    let mut last = y;
+    while last + 1 < rows.len() && rows[last].wrapped {
+        last += 1;
+    }
+    // 逻辑行的字符（宽字符的占位格跳过）和每个字符所在的格子
+    let mut chars = Vec::new();
+    let mut cells = Vec::new();
+    let mut target = None;
+    for (row_y, row) in rows.iter().enumerate().take(last + 1).skip(first) {
+        for (col, cell) in row.cells.iter().enumerate() {
+            if cell.has(flags::SPACER) {
+                continue;
+            }
+            if (row_y, col) == (y, x) {
+                target = Some(chars.len());
+            }
+            chars.push(cell.ch);
+            cells.push((row_y as u16, col as u16));
+        }
+    }
+    let target = target?;
+    let mut start = 0;
+    while start <= target {
+        let Some(end) = url_end(&chars, start) else {
+            start += 1;
+            continue;
+        };
+        if target < end {
+            let url = chars[start..end].iter().collect();
+            return Some(Link { url, spans: link_spans(&cells[start..end]) });
+        }
+        start = end;
+    }
+    None
+}
+
+/// `start` 处是网址开头的话，返回网址（去掉结尾标点后）的结尾下标（不含）。
+fn url_end(chars: &[char], start: usize) -> Option<usize> {
+    // 前面紧挨着字母数字（xhttps://、nothttp://）不算开头
+    if start > 0 && chars[start - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let rest = &chars[start..];
+    let scheme = URL_SCHEMES
+        .iter()
+        .find(|scheme| scheme.len() <= rest.len() && scheme.chars().zip(rest).all(|(want, got)| got.eq_ignore_ascii_case(&want)))?;
+    let body = start + scheme.len();
+    let mut end = body;
+    while end < chars.len() && chars[end].is_ascii_graphic() && !"\"<>\\`{}|^".contains(chars[end]) {
+        end += 1;
+    }
+    // 结尾的标点多半属于句子；没配对的右括号是外面套的括号（网址里有对应的左括号时留着，如维基百科的 Rust_(language)）
+    while end > body {
+        let unpaired = |open: char, close: char| {
+            let count = |c: char| chars[body..end].iter().filter(|&&x| x == c).count();
+            count(open) < count(close)
+        };
+        let trim = match chars[end - 1] {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' => true,
+            ')' => unpaired('(', ')'),
+            ']' => unpaired('[', ']'),
+            _ => false,
+        };
+        if !trim {
+            break;
+        }
+        end -= 1;
+    }
+    // 只有 scheme（`https://` 单独出现）不算
+    (end > body).then_some(end)
+}
+
+/// 网址的格子按行切成段。
+fn link_spans(cells: &[(u16, u16)]) -> Vec<LinkSpan> {
+    let mut spans: Vec<LinkSpan> = Vec::new();
+    for &(y, x) in cells {
+        match spans.last_mut() {
+            Some(span) if span.y == y => span.end = x + 1,
+            _ => spans.push(LinkSpan { y, start: x, end: x + 1 }),
+        }
+    }
+    spans
+}
+
+/// ⌘ 点击时允许打开的链接：只开网页、FTP 和邮件（ASCII 不分大小写）；file:、javascript:、
+/// 打开系统设置之类的 scheme 一律不开（OSC 8 的链接是远端程序写的，不能由它决定打开什么）。
+pub fn openable(url: &str) -> bool {
+    ["http://", "https://", "ftp://", "mailto:"]
+        .iter()
+        .any(|scheme| url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme)))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -457,12 +580,73 @@ mod tests {
         assert_eq!(find(&[211, 128, 127, 126, 125, 124, 123, 122, 121, 120, 119, 111, 11, 301, 300]), 13);
     }
 
+    fn text_rows(lines: &[(&str, bool)]) -> Vec<Arc<Row>> {
+        lines
+            .iter()
+            .map(|(text, wrapped)| Arc::new(Row { cells: text.chars().map(|ch| Cell { ch, ..Cell::BLANK }).collect(), wrapped: *wrapped }))
+            .collect()
+    }
+
+    /// 网址和它的格子（行, 起, 止）。
+    type Found = (String, Vec<(u16, u16, u16)>);
+
+    fn link(lines: &[(&str, bool)], x: usize, y: usize) -> Option<Found> {
+        link_at(&text_rows(lines), x, y).map(|link| (link.url, link.spans.iter().map(|s| (s.y, s.start, s.end)).collect()))
+    }
+
+    #[test]
+    fn a_url_under_the_pointer_is_found_with_its_cells() {
+        let lines = [("see https://example.com/a?b=1 for more", false)];
+        let url = Some(("https://example.com/a?b=1".to_string(), vec![(0, 4, 29)]));
+        assert_eq!(link(&lines, 4, 0), url, "第一个字符");
+        assert_eq!(link(&lines, 28, 0), url, "最后一个字符");
+        assert_eq!(link(&lines, 3, 0), None, "前面的空格");
+        assert_eq!(link(&lines, 29, 0), None, "后面的空格");
+        assert_eq!(link(&lines, 0, 5), None, "行号越界");
+    }
+
+    #[test]
+    fn trailing_punctuation_and_brackets_are_not_part_of_the_url() {
+        assert_eq!(link(&[("(see http://a.io/x).", false)], 6, 0).unwrap().0, "http://a.io/x");
+        assert_eq!(link(&[("wiki https://en.wikipedia.org/wiki/Rust_(language), ok", false)], 10, 0).unwrap().0, "https://en.wikipedia.org/wiki/Rust_(language)");
+        assert_eq!(link(&[("\"https://a.io/x\"", false)], 3, 0).unwrap().0, "https://a.io/x");
+        // 中文紧跟在后面：不算进网址
+        assert_eq!(link(&[("打开https://a.io/x。然后", false)], 4, 0).unwrap().0, "https://a.io/x");
+        // 不是网址
+        assert_eq!(link(&[("xhttps://a.io nothttp:// https://", false)], 3, 0), None);
+        assert_eq!(link(&[("xhttps://a.io nothttp:// https://", false)], 27, 0), None);
+    }
+
+    #[test]
+    fn a_soft_wrapped_url_is_one_link_across_rows() {
+        // 登录类命令打印的长链接折成两行（第一行软换行）
+        let lines = [("$ login", false), ("open https://a.io/auth?c", true), ("ode=42 now", false), ("https://b.io", false)];
+        let url = Some(("https://a.io/auth?code=42".to_string(), vec![(1, 5, 24), (2, 0, 6)]));
+        assert_eq!(link(&lines, 10, 1), url);
+        assert_eq!(link(&lines, 2, 2), url, "点第二行那一截也是同一个");
+        assert_eq!(link(&lines, 8, 2), None);
+        // 硬换行的下一行是另一个网址，不拼在一起
+        assert_eq!(link(&lines, 3, 3).unwrap().0, "https://b.io");
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_opened() {
+        assert!(openable("https://example.com"));
+        assert!(openable("HTTP://example.com"));
+        assert!(openable("mailto:me@example.com"));
+        assert!(openable("ftp://example.com/file"));
+        assert!(!openable("file:///etc/passwd"));
+        assert!(!openable("javascript:alert(1)"));
+        assert!(!openable("x-apple.systempreferences:com.apple.preference"));
+        assert!(!openable(""));
+    }
+
     #[test]
     fn row_text_skips_wide_char_spacers() {
         let mut wide = Cell { ch: '中', ..Cell::BLANK };
         wide.flags = flags::WIDE;
         let spacer = Cell { flags: flags::SPACER, ..Cell::BLANK };
-        let row = Row { cells: vec![wide, spacer, Cell { ch: 'a', ..Cell::BLANK }] };
+        let row = Row { cells: vec![wide, spacer, Cell { ch: 'a', ..Cell::BLANK }], wrapped: false };
         assert_eq!(row.text(), "中a");
     }
 }

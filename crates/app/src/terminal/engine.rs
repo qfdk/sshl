@@ -91,6 +91,8 @@ pub enum Input {
     Search(String),
     /// 选中下一个匹配并滚到它：`older` 往更早的（上面），否则往更新的；到头绕回。
     SearchStep { older: bool },
+    /// ⌘ 点击：查那一格的 OSC 8 超链接（x、y 同 [`MouseInput`]，相对网格左上角的设备像素）；没有回 None。
+    LinkAt { x: f32, y: f32, reply: futures::channel::oneshot::Sender<Option<String>> },
     /// 断线重连：之后的输入、终端应答、改尺寸、流控确认都写到新的 shell 通道。屏幕和回滚历史不动。
     Rebind(ShellHandle),
     Shutdown,
@@ -401,6 +403,8 @@ impl Engine {
                 match input {
                     Input::Shutdown => return,
                     Input::Output(bytes) => backlog.push_back(bytes),
+                    // 只读查询不改画面，不为它出帧
+                    query @ (Input::Copy(_) | Input::LinkAt { .. }) => self.handle(query),
                     other => {
                         self.handle(other);
                         dirty = true;
@@ -483,6 +487,9 @@ impl Engine {
             }
             Input::Search(needle) => self.set_search(&needle),
             Input::SearchStep { older } => self.search_step(older),
+            Input::LinkAt { x, y, reply } => {
+                let _ = reply.send(self.hyperlink_at(x, y));
+            }
             Input::Rebind(shell) => {
                 *self.shell.lock().unwrap() = shell;
                 // 旧通道没确认完的字节不能记到新通道头上
@@ -667,6 +674,22 @@ impl Engine {
             _ => {}
         }
         Ok(())
+    }
+
+    /// 那一格的 OSC 8 超链接（程序用 `ESC ] 8 ;; 网址 ST 文字 ESC ] 8 ;; ST` 写的，文字不一定是网址本身）。
+    fn hyperlink_at(&self, x: f32, y: f32) -> Option<String> {
+        let grid_ref = self.term.grid_ref(self.viewport_point(x, y)).ok()?;
+        let mut buf = vec![0u8; 256];
+        let len = match grid_ref.hyperlink_uri(&mut buf) {
+            Ok(len) => len,
+            // 网址比缓冲区长：按它要的大小再取一次
+            Err(libghostty_vt::error::Error::OutOfSpace { required }) => {
+                buf.resize(required, 0);
+                grid_ref.hyperlink_uri(&mut buf).ok()?
+            }
+            Err(_) => return None,
+        };
+        (len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
     }
 
     fn clear_selection(&mut self) {
@@ -892,6 +915,7 @@ impl Painter {
                 break;
             }
             if full || row.dirty()? {
+                let wrapped = row.raw_row()?.is_wrapped()?;
                 let mut cells = Vec::with_capacity(usize::from(cols));
                 let mut cell_it = self.cell_it.update(row)?;
                 while let Some(cell) = cell_it.next() {
@@ -949,7 +973,7 @@ impl Painter {
                     out.bg = bg;
                     cells.push(out);
                 }
-                self.rows[y] = Arc::new(Row { cells });
+                self.rows[y] = Arc::new(Row { cells, wrapped });
             }
             y += 1;
         }
@@ -1238,6 +1262,44 @@ mod tests {
         assert_eq!(info.total, 2);
         assert_eq!(info.spans.len(), 2);
         assert!(searched(&mut engine, &shared, Input::Search(String::new())).is_none());
+    }
+
+    /// 问 `col` 列、第 0 行那一格的 OSC 8 超链接（格子 8×16 设备像素，取格子中间）。
+    fn hyperlink(engine: &mut Engine, col: u16) -> Option<String> {
+        let (reply, mut answer) = futures::channel::oneshot::channel();
+        engine.handle(Input::LinkAt { x: f32::from(col) * 8.0 + 4.0, y: 8.0, reply });
+        answer.try_recv().unwrap().expect("终端线程处理时就答了")
+    }
+
+    /// ⌘ 点击 OSC 8 链接：链接文字所在的格子查得到网址，后面的普通文字没有。
+    #[test]
+    fn osc8_hyperlinks_are_found_by_cell() {
+        let (mut engine, _shared) = engine();
+        engine.write_output(b"\x1b]8;;https://example.com/x\x1b\\link\x1b]8;;\x1b\\ plain");
+        assert_eq!(hyperlink(&mut engine, 0).as_deref(), Some("https://example.com/x"));
+        assert_eq!(hyperlink(&mut engine, 3).as_deref(), Some("https://example.com/x"));
+        assert_eq!(hyperlink(&mut engine, 4), None, "链接后面的空格");
+        assert_eq!(hyperlink(&mut engine, 6), None, "plain");
+    }
+
+    /// 网址比默认缓冲区（256 字节）长：按 libghostty 给的大小再取一次，拿到完整的。
+    #[test]
+    fn long_osc8_hyperlinks_are_read_in_full() {
+        let (mut engine, _shared) = engine();
+        let url = format!("https://example.com/{}", "a".repeat(500));
+        engine.write_output(format!("\x1b]8;;{url}\x1b\\link\x1b]8;;\x1b\\").as_bytes());
+        assert_eq!(hyperlink(&mut engine, 1), Some(url));
+    }
+
+    /// 排满一行接着写的（软换行）在帧里标出来：⌘ 点击按它把折成几行的网址拼回一个。回车换行的不算。
+    #[test]
+    fn soft_wrapped_rows_are_marked_in_the_frame() {
+        let (mut engine, shared) = engine();
+        engine.write_output(format!("{}tail\r\nnext", "x".repeat(80)).as_bytes());
+        engine.paint().unwrap();
+        let frame = shared.frame.lock().unwrap().clone();
+        let wrapped: Vec<bool> = frame.rows.iter().take(3).map(|row| row.wrapped).collect();
+        assert_eq!(wrapped, [true, false, false]);
     }
 
     /// Claude Code 先用 DECRQM 问支不支持 2026，答了「支持」才发同步输出（它不认识 TERM_PROGRAM=SSHL）。

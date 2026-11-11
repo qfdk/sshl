@@ -12,8 +12,8 @@ use futures::channel::oneshot;
 use gpui::{
     App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
-    Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
+    Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
     Role, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
     fill, font, point, prelude::FluentBuilder, px, quad, relative, size,
 };
@@ -25,7 +25,7 @@ use sshl_core::local_shell::{self, LocalOptions, LocalShell};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
-use super::frame::{Frame, MatchSpan, Rgb, SearchInfo, flags};
+use super::frame::{Frame, Link, MatchSpan, Rgb, SearchInfo, flags, link_at, openable};
 use super::keys;
 use crate::assets::Icon;
 use crate::backend;
@@ -33,7 +33,7 @@ use crate::prompts::{self, Options};
 use crate::theme::{self, TERMINAL_PADDING};
 use crate::ui as kit;
 
-actions!(terminal, [Copy, Paste, SelectAll, Find, FindNext, FindPrev, FindClose]);
+actions!(terminal, [Copy, Paste, SelectAll, Find, FindNext, FindPrev, FindClose, ZoomIn, ZoomOut, ZoomReset]);
 
 const CONTEXT: &str = "Terminal";
 /// 搜索条（⌘F）。它和终端是并排的兄弟，不在终端的上下文里：在里面敲的字不会被终端的按键处理发给远端。
@@ -56,6 +56,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", FindNext, Some("TerminalSearch > Input")),
         KeyBinding::new("shift-enter", FindPrev, Some("TerminalSearch > Input")),
         KeyBinding::new("escape", FindClose, Some("TerminalSearch > Input")),
+        // 字号：美式键盘上 ⌘⇧= 报成 cmd-+，不按 Shift 的 ⌘= 也算放大（同浏览器）
+        KeyBinding::new("cmd-=", ZoomIn, Some(CONTEXT)),
+        KeyBinding::new("cmd-+", ZoomIn, Some(CONTEXT)),
+        KeyBinding::new("cmd--", ZoomOut, Some(CONTEXT)),
+        KeyBinding::new("cmd-0", ZoomReset, Some(CONTEXT)),
         KeyBinding::new("tab", NoAction, Some(CONTEXT)),
         KeyBinding::new("shift-tab", NoAction, Some(CONTEXT)),
     ]
@@ -248,6 +253,14 @@ pub struct TerminalView {
     search: Entity<InputState>,
     search_open: bool,
     _search_subscription: Subscription,
+    /// 按住 ⌘ 时鼠标下的纯文本网址（画下划线、手形光标）。
+    hover_link: Option<Link>,
+    /// 鼠标最近一次在终端上的位置（窗口坐标）；移出终端是 None。按下 / 松开 ⌘ 时据此重新找链接。
+    pointer: Option<Point<Pixels>>,
+    /// ⌘ 按着。
+    cmd_down: bool,
+    /// 这次左键按下是 ⌘ 点链接：之后的拖动和松开都不交给选区、也不上报给程序。
+    link_press: bool,
     _tasks: Vec<Task<()>>,
 }
 
@@ -298,6 +311,10 @@ impl TerminalView {
                             view.show_cursor();
                         }
                         view.frame = frame;
+                        // 内容滚动了，链接可能不在原处
+                        if view.hover_link.is_some() {
+                            view.update_hover_link(cx);
+                        }
                         if view.frame.password_prompt != view.password_prompt {
                             view.password_prompt = view.frame.password_prompt;
                             cx.emit(TerminalEvent::PasswordPrompt);
@@ -390,6 +407,10 @@ impl TerminalView {
             search,
             search_open: false,
             _search_subscription: search_subscription,
+            hover_link: None,
+            pointer: None,
+            cmd_down: false,
+            link_press: false,
             _tasks: vec![events_task, blink_task],
         };
         (view, shell_rx)
@@ -615,6 +636,63 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// ⌘+ / ⌘- / ⌘0：改全局字号并存盘（所有终端一起变，上下限由 settings 管）。
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        crate::settings::update(cx, |s| s.font_size = (s.font_size + 1.).round());
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+        crate::settings::update(cx, |s| s.font_size = (s.font_size - 1.).round());
+    }
+
+    fn zoom_reset(&mut self, _: &ZoomReset, _: &mut Window, cx: &mut Context<Self>) {
+        crate::settings::update(cx, |s| s.font_size = crate::settings::DEFAULT_FONT_SIZE);
+    }
+
+    /// 窗口坐标落在哪一格（列, 行）；在网格外是 None。
+    fn cell_at(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
+        let m = self.metrics.as_ref()?;
+        grid_cell(position, self.grid_origin, size(m.cell_width, m.line_height), self.grid)
+    }
+
+    /// 按住 ⌘ 时找鼠标下的网址；变了才重绘。
+    fn update_hover_link(&mut self, cx: &mut Context<Self>) {
+        let link = if self.cmd_down {
+            self.pointer.and_then(|p| self.cell_at(p)).and_then(|(x, y)| link_at(&self.frame.rows, x, y))
+        } else {
+            None
+        };
+        if link != self.hover_link {
+            self.hover_link = link;
+            cx.notify();
+        }
+    }
+
+    fn modifiers_changed(&mut self, event: &ModifiersChangedEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.cmd_down != event.modifiers.platform {
+            self.cmd_down = event.modifiers.platform;
+            self.update_hover_link(cx);
+        }
+    }
+
+    /// ⌘ 点击：那里有纯文本网址就打开；没有就问终端线程那一格有没有 OSC 8 超链接。只开 http / https / ftp / mailto。
+    fn open_link_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some((x, y)) = self.cell_at(position) else { return };
+        if let Some(link) = link_at(&self.frame.rows, x, y) {
+            open_link(&link.url, cx);
+            return;
+        }
+        let (x, y) = self.mouse_position(position);
+        let (reply, answer) = oneshot::channel();
+        self.handle.send(Input::LinkAt { x, y, reply });
+        cx.spawn(async move |_, cx| {
+            if let Ok(Some(url)) = answer.await {
+                cx.update(|cx| open_link(&url, cx));
+            }
+        })
+        .detach();
+    }
+
     fn search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let label = search_label(&self.search.read(cx).value(), self.frame.search.as_deref());
         div()
@@ -705,6 +783,15 @@ impl TerminalView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // ⌘ 点击开链接：这次按下不做选区、也不上报给程序。每次左键按下都重设标记：
+        // 上一次在终端外松开（收不到 mouse_up）时不会卡住，把之后正常的松开也吞掉
+        if event.button == MouseButton::Left {
+            self.link_press = event.modifiers.platform;
+            if self.link_press {
+                self.open_link_at(event.position, cx);
+                return;
+            }
+        }
         // 右键粘贴（Xshell / PuTTY 习惯）；程序在接收鼠标时右键还是交给它
         if event.button == MouseButton::Right && !self.reports_mouse(&event.modifiers) && crate::settings::get(cx).right_click_paste {
             self.paste_clipboard(cx);
@@ -720,6 +807,10 @@ impl TerminalView {
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // ⌘ 点链接那次的松开：不交给选区 / 程序，也不「选中即复制」
+        if event.button == MouseButton::Left && std::mem::take(&mut self.link_press) {
+            return;
+        }
         if event.button != MouseButton::Left && !self.reports_mouse(&event.modifiers) {
             return;
         }
@@ -734,10 +825,16 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.pointer = Some(event.position);
+        self.cmd_down = event.modifiers.platform;
+        self.update_hover_link(cx);
         // 拖到窗口外或取消了拖动：收起「松开上传」提示
         if self.drop_hover && !cx.has_active_drag() {
             self.drop_hover = false;
             cx.notify();
+        }
+        if self.link_press {
+            return;
         }
         if !self.reports_mouse(&event.modifiers) && event.pressed_button != Some(MouseButton::Left) {
             return;
@@ -809,12 +906,24 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::find))
             .on_action(cx.listener(Self::find_next))
             .on_action(cx.listener(Self::find_prev))
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
             .map(|d| {
                 #[cfg(any(debug_assertions, feature = "devhook"))]
                 let d = d.on_action(cx.listener(Self::log_selection));
                 d
             })
             .on_key_down(cx.listener(Self::key_down))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
+            // 移出终端（到侧栏、搜索条上）：之后按 ⌘ 不再按旧位置找链接
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.pointer = None;
+                    this.update_hover_link(cx);
+                }
+            }))
+            .when(self.hover_link.is_some(), |d| d.cursor_pointer())
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
@@ -853,6 +962,7 @@ impl Render for TerminalView {
                 focused,
                 cursor_on: self.blink_on || !focused,
                 marked: self.marked.clone(),
+                link: self.hover_link.clone(),
             })
             .when(self.drop_hover, |d| d.child(drop_hint()));
         div().relative().size_full().child(terminal).when(self.search_open, |d| d.child(self.search_bar(cx)))
@@ -934,6 +1044,31 @@ fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32, pa
     TERMINAL_PADDING + (leftover * share * scale).floor() / scale
 }
 
+/// 用默认程序打开链接（只开 `openable` 认的那几种）。
+fn open_link(url: &str, cx: &mut App) {
+    if !openable(url) {
+        return;
+    }
+    tracing::info!("open link: {url}");
+    // 测试口开着（无头测试）：只记日志，不去抢用户的浏览器
+    #[cfg(any(debug_assertions, feature = "devhook"))]
+    if std::env::var_os("SSHL_DEV_SOCKET").is_some() {
+        return;
+    }
+    cx.open_url(url);
+}
+
+/// 窗口坐标落在网格的哪一格（列, 行）：`origin` 是网格左上角，`cell` 是一格的大小；在网格外（内边距、余量里）是 None。
+fn grid_cell(position: Point<Pixels>, origin: Point<Pixels>, cell: gpui::Size<Pixels>, grid: GridSize) -> Option<(usize, usize)> {
+    let x = (position.x - origin.x) / cell.width;
+    let y = (position.y - origin.y) / cell.height;
+    if !(x >= 0. && y >= 0.) {
+        return None;
+    }
+    let (x, y) = (x as usize, y as usize);
+    (x < usize::from(grid.cols) && y < usize::from(grid.rows)).then_some((x, y))
+}
+
 /// 拖进本机终端的路径：shell 特殊字符前加反斜杠（中文等非 ASCII 原样保留）。
 fn shell_escape(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
@@ -957,6 +1092,8 @@ struct TerminalElement {
     focused: bool,
     cursor_on: bool,
     marked: Option<String>,
+    /// 按住 ⌘ 时鼠标下的网址：每段格子底下画下划线。
+    link: Option<Link>,
 }
 
 impl IntoElement for TerminalElement {
@@ -1144,6 +1281,15 @@ impl Element for TerminalElement {
             }
         }
 
+        // ⌘ 悬停的链接：每段格子底边画 1px 的线，颜色同那段第一格的字
+        for span in self.link.iter().flat_map(|link| &link.spans) {
+            let y = usize::from(span.y);
+            let Some(cell) = frame.rows.get(y).and_then(|row| row.cells.get(usize::from(span.start))) else { continue };
+            let bottom = cell_y(y + 1);
+            let b = Bounds::from_corners(point(cell_x(span.start.into()), bottom - px(1.)), point(cell_x(span.end.into()), bottom));
+            window.paint_quad(fill(b, hsla(cell.fg)));
+        }
+
         // 光标
         if let Some(cursor) = frame.cursor {
             let (cx0, cy0) = (cell_x(usize::from(cursor.x)), cell_y(usize::from(cursor.y)));
@@ -1304,6 +1450,37 @@ mod tests {
         assert_eq!(resolve(&keymap, "tab"), 0);
         assert_eq!(resolve(&keymap, "shift-tab"), 0);
         assert_eq!(resolve(&keymap, "cmd-c"), 1);
+    }
+
+    #[test]
+    fn zoom_keys_change_the_font_size_in_the_terminal() {
+        let mut keymap = Keymap::new(Vec::new());
+        keymap.add_bindings(key_bindings());
+        let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let first = |key: &'static str| {
+            let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
+            bindings.first().map(|b| b.action().name().to_string())
+        };
+        assert_eq!(first("cmd-=").as_deref(), Some("terminal::ZoomIn"));
+        // 美式键盘的 ⌘⇧=：macOS 报成 cmd-+（Shift 已算进字符里）
+        assert_eq!(first("cmd-+").as_deref(), Some("terminal::ZoomIn"));
+        assert_eq!(first("cmd--").as_deref(), Some("terminal::ZoomOut"));
+        assert_eq!(first("cmd-0").as_deref(), Some("terminal::ZoomReset"));
+    }
+
+    #[test]
+    fn window_positions_map_to_grid_cells() {
+        let grid = GridSize { cols: 80, rows: 24, cell_width: 16, cell_height: 36 };
+        // 网格左上角在 (10, 20)，一格 8×18
+        let at = |x: f32, y: f32| grid_cell(point(px(x), px(y)), point(px(10.), px(20.)), size(px(8.), px(18.)), grid);
+        assert_eq!(at(10., 20.), Some((0, 0)));
+        assert_eq!(at(17.9, 37.9), Some((0, 0)));
+        assert_eq!(at(18., 38.), Some((1, 1)));
+        assert_eq!(at(10. + 8. * 79. + 1., 20. + 18. * 23. + 1.), Some((79, 23)), "右下角那一格");
+        assert_eq!(at(9.5, 30.), None, "左边内边距");
+        assert_eq!(at(20., 19.5), None, "上面的余量");
+        assert_eq!(at(10. + 8. * 80., 30.), None, "网格右边");
+        assert_eq!(at(20., 20. + 18. * 24.), None, "网格下面");
     }
 
     #[test]

@@ -67,6 +67,13 @@ pub fn start(window: AnyWindowHandle, cx: &mut App) {
     .detach();
 }
 
+/// `mods cmd` 之后 ⌘ 一直按着：之后的 click / move 也带着它（测 ⌘ 悬停、⌘ 点击链接），`mods none` 松开。
+static CMD_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn held() -> Modifiers {
+    if CMD_HELD.load(std::sync::atomic::Ordering::Relaxed) { Modifiers::command() } else { Modifiers::none() }
+}
+
 fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String> {
     let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
     match command {
@@ -84,6 +91,7 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
                 "none" | "" => Modifiers::none(),
                 other => return Err(format!("mods {other}：只认 cmd / none")),
             };
+            CMD_HELD.store(modifiers.platform, std::sync::atomic::Ordering::Relaxed);
             window.dispatch_event(PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers, capslock: Default::default() }), cx);
             Ok(())
         }
@@ -109,8 +117,8 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             };
             let at = point(px(x), px(y));
             for i in 1..=count {
-                window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::none(), click_count: i, first_mouse: false }), cx);
-                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::none(), click_count: i }), cx);
+                window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: held(), click_count: i, first_mouse: false }), cx);
+                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: held(), click_count: i }), cx);
             }
             Ok(())
         }
@@ -159,7 +167,7 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
             let [x, y] = n.as_slice() else { return Err("move X Y".into()) };
             let position = point(px(*x), px(*y));
-            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::none() }), cx);
+            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: held() }), cx);
             Ok(())
         }
         // hover X Y PATH... ：拖着文件停在某处不松手（看「松开上传」提示）

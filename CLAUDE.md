@@ -66,6 +66,11 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   搜索条是终端的兄弟元素、不在 `Terminal` 上下文里：放进去的话在里面敲的字会被终端的 key_down 发给远端。
   libghostty 的匹配列表按文档是从新到旧、第 0 个最新，实际上宽终端（回滚历史和屏幕落在同一页）会把屏幕上的排到回滚历史后面
   ——还是一圈，只是起点不对；`frame::newest_index` 二分找出真正最新的，首次选中走到它、「第几个」从它算起。
+- **终端里的链接和字号**：按住 ⌘ 时鼠标下的网址画下划线、光标变手形，⌘ 点击打开（这次按下、拖动、松开都不交给选区，也不上报给程序）。
+  纯文本网址在界面线程按帧识别（`frame::link_at`：沿软换行 `Row::wrapped` 拼出整条逻辑行再找，折成几行的长链接是一个；
+  结尾的标点和没配对的右括号不算）；OSC 8 超链接不在帧里，只在点击时问终端线程（`Input::LinkAt`，查那一格的 `hyperlink_uri`），
+  所以悬停时只给纯文本网址画下划线。只开 http / https / ftp / mailto（`frame::openable`），file: / javascript: 之类一律不开。
+  ⌘+（⌘=）/ ⌘- / ⌘0 放大 / 缩小 / 回默认字号：改的是全局字号并存盘（`settings::update`，所有终端一起变）。
 - **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，
   core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
   （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。
@@ -159,7 +164,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   键盘 / 辅助功能「按下」（`on_a11y_action(Click)`）直接连。
 - **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
   且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
-  `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
+  `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标，之后的 `click` / `move` 也带着 ⌘，测 ⌘ 悬停 / 点击链接；
+  测试口开着时点链接只记日志 `open link: …`、不真的开浏览器），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
   `cargo build -p sshl --release --features devhook`；`scripts/bundle.sh` 的正式构建不带这个 feature。macOS 的套接字路径上限 104 字节。
 - **Rust 后端规则**：core 不依赖界面；新增界面需求优先在 app 里做，确实要改 core 的行为（SFTP、sudo、known_hosts）
   要带测试。core 的集成测试用 `tests/fixtures-sudo.Dockerfile` 起的容器。
