@@ -50,19 +50,16 @@
 
 ### 下载安装
 
-在终端里执行一行，安装和以后升级都是它（下载最新版、装到「应用程序」、清掉隔离标记）：
+从 [Releases](https://github.com/qfdk/sshl/releases) 下载 macOS 版本，解压后拖入「应用程序」。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/qfdk/sshl/main/scripts/install.sh | sh
-```
-
-连接局域网主机时 macOS 会请求「本地网络」权限，请允许；若报 `No route to host`，到 系统设置 → 隐私与安全性 → 本地网络 打开 SSHL。每次升级后系统会再问一次。
-
-也可以从 [Releases](https://github.com/qfdk/sshl/releases) 手动下载、解压后拖入「应用程序」。应用没有 Apple 公证，浏览器下载的会被系统拦住（提示「已损坏」），要先执行一次：
+应用未签名、未公证，首次使用前在终端执行一次（清除隔离标记并本地签名）：
 
 ```bash
 xattr -cr /Applications/SSHL.app
+codesign --force --deep -s - /Applications/SSHL.app
 ```
+
+连接局域网主机时 macOS 会请求「本地网络」权限，请允许；若报 `No route to host`，到 系统设置 → 隐私与安全性 → 本地网络 打开 SSHL。每次升级后重新执行上面两行。
 
 ### 手动构建
 
