@@ -122,6 +122,19 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             }
             Ok(())
         }
+        // press X Y / release X Y：左键按下、松开分两条命令发，中间会重绘一帧——真实点击就是这样；
+        // `click` 的按下 / 松开连着发、中间不重绘，「按下时就把被点的东西收掉了」这类毛病测不出来
+        "press" | "release" => {
+            let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+            let [x, y] = n.as_slice() else { return Err(format!("{command} X Y")) };
+            let position = point(px(*x), px(*y));
+            if command == "press" {
+                window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, modifiers: held(), click_count: 1, first_mouse: false }), cx);
+            } else {
+                window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, modifiers: held(), click_count: 1 }), cx);
+            }
+            Ok(())
+        }
         // rclick X Y：右键点击
         "rclick" => {
             let n: Vec<f32> = rest.split_whitespace().filter_map(|v| v.parse().ok()).collect();

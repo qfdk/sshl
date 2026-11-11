@@ -150,6 +150,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   名称以第一个词开头的排前面），↑↓ 选、↵ 连、Esc / 点外面关；已开着的带绿点、选了就切过去（`connect_to_saved`）。
   顺序同侧栏。侧栏收起时空页面提示 ⌘K。有对话框 / 提示框 / 正在连接时不弹。
 - **右键菜单**（`sidebar.rs` 的 `connection_menu_overlay`，`ConnectionMenu.on_tab` 区分）：侧栏连接项是 连接 / 编辑 / 断开 / 删除（连着时编辑、删除置灰）；
+  菜单背后有一层铺满窗口的遮罩，按下就关菜单；菜单面板外面要包 `occlude()`，否则按在菜单项上也会传到遮罩、菜单先没了，松开时点击落空。
+  标签改了名就只显示改的名字，不再带主机地址（`groups::tab_host`）。
   标签是 重命名 / 重新连接 / 复制主机地址 / 关闭其他标签 / 关闭（本机标签只有 重命名 / 关闭其他标签 / 关闭）。连接项上不放悬停按钮（和右键菜单、标签 × 重复）。
   标签的「重新连接」对还连着的会话先在后端断开旧会话（`reconnect_tab`；终端的 reconnect 只换 shell 通道，不关旧连接）。
 - **标签重命名**（`topbar.rs` 的 `start_rename` / `finish_rename`）：双击标签或右键「重命名」，名字原地换成输入框（预填、全选），
@@ -173,7 +175,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
   且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
   `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标，之后的 `click` / `move` 也带着 ⌘，测 ⌘ 悬停 / 点击链接；
-  测试口开着时点链接只记日志 `open link: …`、不真的开浏览器），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
+  测试口开着时点链接只记日志 `open link: …`、不真的开浏览器；`press X Y` / `release X Y` 把左键按下、松开分两条发，中间会重绘一帧，
+  和真实点击一样——`click` 是连着发的，「按下时就把被点的东西收掉」这类毛病它测不出来，菜单、弹层的点击要用 press / release 测），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
   `cargo build -p sshl --release --features devhook`；`scripts/bundle.sh` 的正式构建不带这个 feature。macOS 的套接字路径上限 104 字节。
 - **Rust 后端规则**：core 不依赖界面；新增界面需求优先在 app 里做，确实要改 core 的行为（SFTP、sudo、known_hosts）
   要带测试。core 的集成测试用 `tests/fixtures-sudo.Dockerfile` 起的容器。

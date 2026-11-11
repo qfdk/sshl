@@ -330,7 +330,7 @@ impl Workspace {
                 let id = session.connection_id.clone();
                 let active = self.active.as_deref() == Some(id.as_str());
                 let name = self.tab_name(session);
-                let host: SharedString = self.connection(&id).map(|c| groups::distinct_host(&name, &c.host).to_string()).unwrap_or_default().into();
+                let host: SharedString = self.connection(&id).map(|c| groups::tab_host(session.custom_title.as_deref(), &name, &c.host).to_string()).unwrap_or_default().into();
                 let mark = match &self.tab_drop {
                     Some((target, side)) if *target == id => Some(*side),
                     _ => None,

@@ -481,7 +481,9 @@ impl Workspace {
                     this.menu = None;
                     cx.notify();
                 }))
-                .child(deferred(anchored().position(position).snap_to_window().child(panel)))
+                // 面板自己挡住鼠标：按在菜单项上时不能传到背后这层去——它一按下就关菜单，
+                // 重绘之后松开时菜单项已经没了，点击落空（真实点击的按下、松开之间隔着好几帧）
+                .child(deferred(anchored().position(position).snap_to_window().child(div().occlude().child(panel))))
                 .into_any_element(),
         )
     }
