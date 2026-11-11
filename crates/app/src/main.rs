@@ -156,8 +156,9 @@ fn bind_keys(cx: &mut App) {
     ]);
     cx.bind_keys(terminal::view::key_bindings());
     workspace::bind_keys(cx);
-    // 晚于 gpui-base：同一节点上后绑的优先，面板里的上下 / 回车 / Esc 归片段列表，标签改名框里的回车 / Esc 归改名
+    // 晚于 gpui-base：同一节点上后绑的优先，面板里的上下 / 回车 / Esc 归片段列表，标签改名框里的回车 / Esc 归改名，分组框里的上下 / Esc 归分组下拉
     snippets::bind_keys(cx);
     quick_connect::bind_keys(cx);
     cx.bind_keys(topbar::key_bindings());
+    cx.bind_keys(connection_dialog::key_bindings());
 }

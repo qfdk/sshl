@@ -110,6 +110,10 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   自动（`auto_auth.rs`）依次试 none、SSH Agent、私钥文件，私钥和 Agent 按 `ssh -G` 解析的 `~/.ssh/config`
   （IdentityFile / IdentityAgent / IdentitiesOnly），解析不了退到 OpenSSH 的默认私钥；失败时说明试了哪些、哪把设了密码。
   密码方式没存密码时，连接前先弹框问（只用这一次）。预热池按 `user@host:port` 复用，不区分认证方式。
+- **新建 / 编辑连接里的分组**（`connection_dialog.rs` 的 `group_field`，逻辑在 `groups::group_choices` / `resolve_group`）：可以敲字的下拉。
+  聚焦 / 点进去列出已有分组（顺序同侧栏，空分组也在），敲字按包含过滤，↑↓ 选、↵ 选中（没选中某行时 ↵ 照旧提交表单）、Esc 先收下拉再关对话框；
+  敲的名字还没有就多一行「新建分组」，保存连接时分组自然建出来；只差大小写的归到已有分组。按在下拉上要 `prevent_default`，
+  否则对话框拿走焦点、输入框一失焦下拉就收了，点击落空。
 - **终端里的 Tab**：gpui-base 的 Root 把 tab / shift-tab 绑成切换焦点，终端上下文里用 `NoAction` 压掉（`terminal::view::key_bindings`），
   否则补全键会把焦点跳到搜索框。
 - **IPC 已不存在**：界面直接调 `sshl_core`。后端跑在独立 tokio 运行时（`backend.rs`），界面用 `backend::spawn` 在 GPUI 执行器里

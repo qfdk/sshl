@@ -4,15 +4,29 @@ use std::path::Path;
 
 use gpui::{
     AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, PathPromptOptions, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Window, div, prelude::FluentBuilder, px,
+    KeyBinding, KeyDownEvent, MouseButton, ParentElement, PathPromptOptions, Render, Role, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred, div, prelude::FluentBuilder, px,
 };
-use gpui_base::input::{InputEvent, InputState};
+use gpui_base::input::{InputEvent, InputState, Position};
 use sshl_core::config_store::{AuthKind, StoredConnection};
 
 use crate::assets::Icon;
+use crate::groups;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
+
+actions!(connection_dialog, [GroupNext, GroupPrev, GroupDismiss]);
+
+const GROUP_CONTEXT: &str = "ConnectionGroup";
+
+/// 要晚于 gpui-base 绑定（同一节点上后绑的优先）：分组框里的上下 / Esc 先给下拉。
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("down", GroupNext, Some("ConnectionGroup > Input")),
+        KeyBinding::new("up", GroupPrev, Some("ConnectionGroup > Input")),
+        KeyBinding::new("escape", GroupDismiss, Some("ConnectionGroup > Input")),
+    ]
+}
 
 /// 指定私钥文件时的默认值（同 OpenSSH）。
 const DEFAULT_KEY: &str = "~/.ssh/id_rsa";
@@ -56,6 +70,12 @@ enum Field {
 pub struct ConnectionDialog {
     editing: Option<StoredConnection>,
     inputs: Vec<(Field, Entity<InputState>)>,
+    /// 已有的分组（顺序同侧栏），分组框的下拉里选。
+    groups: Vec<String>,
+    group_open: bool,
+    /// 用户正在分组框里敲字：下拉只留匹配的；刚点开 / 刚选完时全部列出。
+    group_filtering: bool,
+    group_highlight: Option<usize>,
     auth: AuthKind,
     save_password: bool,
     focused: Option<Field>,
@@ -73,11 +93,11 @@ impl Focusable for ConnectionDialog {
 }
 
 impl ConnectionDialog {
-    pub fn new(editing: Option<StoredConnection>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(editing: Option<StoredConnection>, groups: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let value = |f: &dyn Fn(&StoredConnection) -> String| editing.as_ref().map(f).unwrap_or_default();
         let fields = [
             (Field::Name, value(&|c| c.name.clone()), "我的服务器", false),
-            (Field::Group, value(&|c| c.group.clone()), "例如：生产环境", false),
+            (Field::Group, value(&|c| c.group.clone()), "选择或输入新分组", false),
             (Field::Host, value(&|c| c.host.clone()), "example.com 或 192.168.1.1", false),
             (Field::Port, editing.as_ref().map_or("22".into(), |c| c.port.to_string()), "", false),
             (Field::Username, value(&|c| c.username.clone()), "root", false),
@@ -90,19 +110,36 @@ impl ConnectionDialog {
         for (field, initial, placeholder, masked) in fields {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).masked(masked).default_value(initial));
             subscriptions.push(cx.subscribe_in(&input, window, move |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.submit(window, cx),
+                // 分组下拉里用上下键选了一项：回车是选它，不是提交表单
+                InputEvent::PressEnter { .. } => match this.group_highlight.filter(|_| field == Field::Group && this.group_open) {
+                    Some(index) => this.pick_group(index, window, cx),
+                    None => this.submit(window, cx),
+                },
                 InputEvent::Focus => {
                     this.focused = Some(field);
+                    if field == Field::Group {
+                        this.open_groups(cx);
+                    } else {
+                        this.close_groups(cx);
+                    }
                     cx.notify();
                 }
                 InputEvent::Blur => {
                     if this.focused == Some(field) {
                         this.focused = None;
                     }
+                    if field == Field::Group {
+                        this.close_groups(cx);
+                    }
                     cx.notify();
                 }
                 InputEvent::Change => {
                     this.error = None;
+                    if field == Field::Group {
+                        this.group_open = true;
+                        this.group_filtering = true;
+                        this.group_highlight = None;
+                    }
                     cx.notify();
                 }
             }));
@@ -114,6 +151,10 @@ impl ConnectionDialog {
             save_password: editing.is_none(),
             editing,
             inputs,
+            groups,
+            group_open: false,
+            group_filtering: false,
+            group_highlight: None,
             auth,
             focused: None,
             error: None,
@@ -156,7 +197,7 @@ impl ConnectionDialog {
         }
         Ok(ConnectionForm {
             name,
-            group: self.text(Field::Group, cx),
+            group: groups::resolve_group(&self.groups, &self.text(Field::Group, cx)),
             host,
             port,
             username,
@@ -179,6 +220,67 @@ impl ConnectionDialog {
                 cx.notify();
             }
         }
+    }
+
+    fn group_choices(&self, cx: &gpui::App) -> groups::GroupChoices {
+        groups::group_choices(&self.groups, &self.text(Field::Group, cx), self.group_filtering)
+    }
+
+    /// 下拉里有几行（已有分组 + 可能的「新建分组」）。
+    fn group_rows(&self, cx: &gpui::App) -> usize {
+        let choices = self.group_choices(cx);
+        choices.existing.len() + usize::from(choices.create.is_some())
+    }
+
+    fn open_groups(&mut self, cx: &mut Context<Self>) {
+        if !self.group_open {
+            self.group_open = true;
+            self.group_filtering = false;
+            self.group_highlight = None;
+            cx.notify();
+        }
+    }
+
+    fn close_groups(&mut self, cx: &mut Context<Self>) {
+        if self.group_open {
+            self.group_open = false;
+            self.group_highlight = None;
+            cx.notify();
+        }
+    }
+
+    /// 选下拉里的第 `index` 行：已有分组就填进框里（光标放末尾）；「新建分组」那行名字已经在框里，收起下拉就行。
+    fn pick_group(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(name) = self.group_choices(cx).existing.get(index).cloned() {
+            self.input(Field::Group).clone().update(cx, |input, cx| {
+                let end = name.encode_utf16().count() as u32;
+                input.set_value(name, window, cx);
+                input.set_cursor_position(Position::new(0, end), window, cx);
+            });
+        }
+        self.group_filtering = false;
+        self.close_groups(cx);
+        cx.notify();
+    }
+
+    fn group_step(&mut self, down: bool, cx: &mut Context<Self>) {
+        let count = self.group_rows(cx);
+        if count == 0 {
+            cx.propagate();
+            return;
+        }
+        let last = count - 1;
+        // 收起着时按上下：先展开全部
+        if !self.group_open {
+            self.open_groups(cx);
+        }
+        self.group_highlight = Some(match (self.group_highlight, down) {
+            (Some(i), true) if i < last => i + 1,
+            (_, true) => 0,
+            (Some(i), false) if i > 0 => i - 1,
+            (_, false) => last,
+        });
+        cx.notify();
     }
 
     /// 认证方式只分密码 / 私钥；私钥里再选「自动」（免密）或具体的私钥文件。
@@ -249,6 +351,10 @@ impl ConnectionDialog {
     }
 
     fn field(&self, label: &'static str, hint: Option<&'static str>, field: Field) -> impl IntoElement {
+        self.labeled(label, hint, kit::text_field(self.input(field), self.focused == Some(field)))
+    }
+
+    fn labeled(&self, label: &'static str, hint: Option<&'static str>, control: impl IntoElement) -> gpui::Div {
         div()
             .flex()
             .flex_col()
@@ -263,7 +369,100 @@ impl ConnectionDialog {
                     .child(kit::field_label(label))
                     .when_some(hint, |d, hint| d.child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint))),
             )
-            .child(kit::text_field(self.input(field), self.focused == Some(field)))
+            .child(control)
+    }
+
+    /// 分组：可以敲字的下拉。点进去列出已有分组，敲字过滤；敲的名字还没有就在列表里提示会新建。
+    fn group_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let choices = if self.group_open { self.group_choices(cx) } else { groups::GroupChoices { existing: Vec::new(), create: None } };
+        let current = groups::resolve_group(&self.groups, &self.text(Field::Group, cx));
+        let highlight = self.group_highlight;
+        let row = |index: usize| {
+            div()
+                .id(("connection-group-option", index))
+                .role(Role::ListBoxOption)
+                .px_2()
+                .py(px(6.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(highlight == Some(index), |d| d.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND)))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && this.group_highlight != Some(index) {
+                        this.group_highlight = Some(index);
+                        cx.notify();
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| this.pick_group(index, window, cx)))
+        };
+        let mut rows = Vec::new();
+        for (index, name) in choices.existing.iter().enumerate() {
+            rows.push(
+                row(index)
+                    .aria_label(name.clone())
+                    .child(kit::icon_sized(Icon::Folder, 14.).text_color(theme::color(ui::PRIMARY)))
+                    .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                    .when(*name == current, |d| d.child(kit::icon_sized(Icon::Check, 14.))),
+            );
+        }
+        if let Some(name) = &choices.create {
+            let label = format!("新建分组「{name}」");
+            rows.push(
+                row(choices.existing.len())
+                    .aria_label(label.clone())
+                    .child(kit::icon_sized(Icon::FolderPlus, 14.).text_color(theme::color(ui::PRIMARY)))
+                    .child(div().flex_1().min_w_0().truncate().child(label)),
+            );
+        }
+        let list = (!rows.is_empty()).then(|| {
+            div()
+                .id("connection-group-list")
+                .role(Role::ListBox)
+                .aria_label("分组")
+                .absolute()
+                .left_0()
+                .right_0()
+                .top_full()
+                .mt_1()
+                .max_h(px(200.))
+                .overflow_y_scroll()
+                .p_1()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme::color(ui::BORDER))
+                .bg(theme::color(ui::CARD))
+                .shadow_md()
+                .text_sm()
+                .occlude()
+                // 按在下拉上不让对话框把焦点从分组框拿走：一失焦下拉就收了，松开时点击落空
+                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                .children(rows)
+        });
+        let control = div()
+            .id("connection-group")
+            .key_context(GROUP_CONTEXT)
+            .relative()
+            .on_action(cx.listener(|this, _: &GroupNext, _, cx| this.group_step(true, cx)))
+            .on_action(cx.listener(|this, _: &GroupPrev, _, cx| this.group_step(false, cx)))
+            .on_action(cx.listener(|this, _: &GroupDismiss, _, cx| {
+                // 下拉开着：Esc 只收下拉；收起着才轮到关对话框
+                if this.group_open && this.group_rows(cx) > 0 {
+                    this.close_groups(cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .child(
+                kit::text_field(self.input(Field::Group), self.focused == Some(Field::Group))
+                    // 已经有焦点时再点一下也展开（选完 / Esc 收起之后）
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.open_groups(cx)))
+                    .when(!self.groups.is_empty(), |f| f.child(kit::icon_sized(Icon::ChevronDown, 14.).text_color(theme::color(ui::MUTED_FOREGROUND)))),
+            )
+            // 延后到最上层画：不然被下面几行输入框压住
+            .when_some(list, |d, list| d.child(deferred(list).with_priority(1)));
+        self.labeled("分组", Some("（可选）"), control)
     }
 }
 
@@ -302,7 +501,7 @@ impl Render for ConnectionDialog {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(div().flex().gap_3().child(self.field("名称", None, Field::Name)).child(self.field("分组", Some("（可选）"), Field::Group)))
+                            .child(div().flex().gap_3().child(self.field("名称", None, Field::Name)).child(self.group_field(cx)))
                             .child(div().flex().gap_3().child(self.field("主机", None, Field::Host)).child(div().w(px(96.)).child(self.field("端口", None, Field::Port))))
                             .child(self.field("用户名", None, Field::Username))
                             .child(
@@ -402,6 +601,26 @@ impl Render for ConnectionDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrows_and_escape_reach_the_group_dropdown_before_the_input_box() {
+        use gpui::{KeyContext, Keymap, Keystroke};
+        gpui::actions!(test, [InputDown, InputEscape]);
+        // 同 gpui-base：输入框自己的键先绑（main.rs 里 gpui_base::init 在前）
+        let mut keymap = Keymap::new(vec![KeyBinding::new("down", InputDown, Some("Input")), KeyBinding::new("escape", InputEscape, Some("Input"))]);
+        keymap.add_bindings(key_bindings());
+        let first = |key: &'static str, stack: &[&str]| {
+            let stack: Vec<KeyContext> = stack.iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+            let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
+            bindings.first().map(|b| b.action().name().to_string())
+        };
+        let group = ["Root", "Workspace", GROUP_CONTEXT, "Input"];
+        assert_eq!(first("down", &group).as_deref(), Some("connection_dialog::GroupNext"));
+        assert_eq!(first("up", &group).as_deref(), Some("connection_dialog::GroupPrev"));
+        assert_eq!(first("escape", &group).as_deref(), Some("connection_dialog::GroupDismiss"));
+        // 对话框里别的输入框不受影响
+        assert_eq!(first("escape", &["Root", "Workspace", "Input"]).as_deref(), Some("test::InputEscape"));
+    }
 
     #[test]
     fn key_mode_defaults_to_automatic_unless_a_file_was_chosen() {

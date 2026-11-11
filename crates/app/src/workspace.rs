@@ -900,7 +900,8 @@ impl Workspace {
     // ---------- 对话框 ----------
 
     pub(crate) fn open_connection_dialog(&mut self, editing: Option<StoredConnection>, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = cx.new(|cx| ConnectionDialog::new(editing, window, cx));
+        let groups = groups::group_names(&self.connections, &self.group_order);
+        let dialog = cx.new(|cx| ConnectionDialog::new(editing, groups, window, cx));
         self._subscriptions.push(cx.subscribe_in(&dialog, window, Self::connection_dialog_event));
         self.connection_dialog = Some(dialog);
         cx.notify();

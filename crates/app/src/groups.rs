@@ -80,6 +80,36 @@ pub fn move_connection(
     ordered
 }
 
+/// 已有的分组名，顺序同侧栏（空分组也算）。
+pub fn group_names(connections: &[StoredConnection], order: &[String]) -> Vec<String> {
+    let refs: Vec<&StoredConnection> = connections.iter().collect();
+    group_connections(&refs, order).into_iter().map(|g| g.name).collect()
+}
+
+/// 新建 / 编辑连接里分组下拉的内容。
+#[derive(Debug, PartialEq, Eq)]
+pub struct GroupChoices {
+    /// 可选的已有分组。
+    pub existing: Vec<String>,
+    /// 敲的名字还没有这个分组：列表末尾给一行「新建分组」。
+    pub create: Option<String>,
+}
+
+/// `filtering` = 用户正在敲字：只留名字里包含它的（不分大小写）；否则（刚点开、刚选完）全部列出。
+pub fn group_choices(all: &[String], typed: &str, filtering: bool) -> GroupChoices {
+    let typed = normalize(typed);
+    let needle = typed.to_lowercase();
+    let existing = all.iter().filter(|g| !filtering || g.to_lowercase().contains(&needle)).cloned().collect();
+    let known = all.iter().any(|g| g.to_lowercase() == needle);
+    GroupChoices { existing, create: (!typed.is_empty() && !known).then(|| typed.to_string()) }
+}
+
+/// 表单里填的分组名：只是大小写不同的归到已有的那个，不另建一个近似重复的分组。
+pub fn resolve_group(all: &[String], typed: &str) -> String {
+    let typed = normalize(typed);
+    all.iter().find(|g| g.to_lowercase() == typed.to_lowercase()).cloned().unwrap_or_else(|| typed.to_string())
+}
+
 pub fn reorder_groups(groups: &[String], dragged: &str, target: &str, after: bool) -> Vec<String> {
     let (Some(from), Some(to)) = (groups.iter().position(|g| g == dragged), groups.iter().position(|g| g == target)) else {
         return groups.to_vec();
@@ -250,6 +280,34 @@ mod tests {
 
     fn ids(list: &[StoredConnection]) -> Vec<&str> {
         list.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[test]
+    fn group_dropdown_lists_existing_groups_and_offers_to_create_new_ones() {
+        let all = [conn("a", "prod"), conn("b", ""), conn("c", "dev")];
+        // 顺序同侧栏；只在顺序里、还没有连接的空分组也能选
+        let names = group_names(&all, &["staging".into(), "dev".into()]);
+        assert_eq!(names, ["staging", "dev", "prod"]);
+
+        // 刚点开：全部列出，哪怕框里已经有值
+        assert_eq!(group_choices(&names, "prod", false), GroupChoices { existing: names.clone(), create: None });
+        assert_eq!(group_choices(&names, "", true), GroupChoices { existing: names.clone(), create: None });
+        // 敲字：按包含过滤、不分大小写；没有同名的就给「新建」
+        assert_eq!(group_choices(&names, " PRO ", true), GroupChoices { existing: vec!["prod".into()], create: Some("PRO".into()) });
+        assert_eq!(group_choices(&names, "测试", true), GroupChoices { existing: vec![], create: Some("测试".into()) });
+        // 已有同名（只差大小写也算）：不给新建
+        assert_eq!(group_choices(&names, "Prod", true), GroupChoices { existing: vec!["prod".into()], create: None });
+        // 一个分组都没有时，敲了名字照样提示会新建
+        assert_eq!(group_choices(&[], "db", true), GroupChoices { existing: vec![], create: Some("db".into()) });
+    }
+
+    #[test]
+    fn typed_group_snaps_to_an_existing_one_that_differs_only_by_case() {
+        let names = ["prod".to_string(), "Dev".to_string()];
+        assert_eq!(resolve_group(&names, " PROD "), "prod");
+        assert_eq!(resolve_group(&names, "dev"), "Dev");
+        assert_eq!(resolve_group(&names, " 新分组 "), "新分组");
+        assert_eq!(resolve_group(&names, "  "), "");
     }
 
     #[test]
