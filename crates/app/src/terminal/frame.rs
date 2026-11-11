@@ -109,8 +109,6 @@ pub struct Cursor {
 pub struct EdgeExtension {
     /// 首行每格的底色（整行都有底色时）。
     pub top: Option<Vec<Rgb>>,
-    /// 末行每格的底色（整行都有底色时）。
-    pub bottom: Option<Vec<Rgb>>,
     /// 每行最左一格的底色（该行整行都有底色时）。
     pub left: Vec<Option<Rgb>>,
     /// 每行最右一格的底色（该行整行都有底色时）。
@@ -166,27 +164,66 @@ pub fn match_spans(start: Option<(u16, u32)>, end: Option<(u16, u32)>, cols: u16
     }
 }
 
-/// 「从新到旧」的列表被转了一圈时（后一段整体比前一段新），真正最新的那一项的下标；没转是 0。
-/// `position` 给出第 i 项的位置（越大越新），二分查找，只问 O(log n) 项。
-pub fn newest_index<K: Ord>(len: usize, position: impl Fn(usize) -> Option<K>) -> usize {
-    if len < 2 {
-        return 0;
+/// libghostty 的匹配列表按文档是从新到旧，实际上屏幕（活动区）跨几个内部页时，这几页的先后是反的：
+/// `[最旧那页 新→旧][…][最新那页 新→旧][更早的回滚历史 新→旧]`。这里把它切成几段（列表下标区间），
+/// 按真正从新到旧的顺序排好，连起来就是整张列表。
+///
+/// `position` 给出第 i 项的位置（越大越新）；`in_history` 对「肯定在活动区那几页之前」的位置返回 true——
+/// 页的交界只会出现在它之前，扫到这样的一项就不用再往后看（后面一路递减），所以只扫屏幕附近那一小段。
+#[allow(clippy::single_range_in_vec_init)] // 就是要「只有一段」的列表
+pub fn newest_first_segments<K: Ord + Copy>(
+    len: usize,
+    position: impl Fn(usize) -> Option<K>,
+    in_history: impl Fn(K) -> bool,
+) -> Vec<std::ops::Range<usize>> {
+    if len == 0 {
+        return Vec::new();
     }
-    let (Some(first), Some(last)) = (position(0), position(len - 1)) else { return 0 };
-    if first > last {
-        return 0;
+    // 每一页那一段的开头：位置比前一项新的地方
+    let mut starts = vec![0];
+    let mut previous = position(0);
+    for i in 1..len {
+        let Some(at) = position(i) else { break };
+        if previous.is_some_and(|previous| at > previous) {
+            starts.push(i);
+        } else if in_history(at) {
+            break;
+        }
+        previous = Some(at);
     }
-    // 最后一项比第一项新：找第一个比第一项新的
-    let (mut low, mut high) = (1, len - 1);
+    if starts.len() == 1 {
+        return vec![0..len];
+    }
+    // 最后一段是「最新那页 + 回滚历史」：回滚历史从第一个比最旧那页还旧的地方开始（这一段是递减的，二分）
+    let last = starts[starts.len() - 1];
+    let floor = position(starts[1] - 1);
+    let (mut low, mut high) = (last, len);
     while low < high {
         let middle = (low + high) / 2;
-        if position(middle).is_some_and(|at| at > first) {
-            high = middle;
-        } else {
+        if position(middle) >= floor {
             low = middle + 1;
+        } else {
+            high = middle;
         }
     }
-    low
+    let mut segments = vec![last..low];
+    segments.extend((0..starts.len() - 1).rev().map(|page| starts[page]..starts[page + 1]));
+    if low < len {
+        segments.push(low..len);
+    }
+    segments
+}
+
+/// 从新到旧第 `rank` 个在列表里的下标。
+pub fn segment_index(segments: &[std::ops::Range<usize>], rank: usize) -> Option<usize> {
+    let mut skipped = 0;
+    for segment in segments {
+        if rank < skipped + segment.len() {
+            return Some(segment.start + rank - skipped);
+        }
+        skipped += segment.len();
+    }
+    None
 }
 
 /// 一行里一段链接的格子（`start..end` 是格子列号，不含 end）。
@@ -386,7 +423,7 @@ pub fn pick_edge_bg(cols: usize, rows: usize, color_at: impl Fn(usize, usize) ->
 pub fn edge_extension(cols: usize, rows: usize, color_at: impl Fn(usize, usize) -> Option<Rgb>) -> EdgeExtension {
     let mut ext = EdgeExtension { left: Vec::with_capacity(rows), right: Vec::with_capacity(rows), ..Default::default() };
     for y in 0..rows {
-        let edge_row = y == 0 || y + 1 == rows;
+        let edge_row = y == 0;
         let mut colors: Vec<Rgb> = Vec::new();
         let mut first = None;
         let mut last = None;
@@ -409,10 +446,7 @@ pub fn edge_extension(cols: usize, rows: usize, color_at: impl Fn(usize, usize) 
         ext.left.push(if full { first } else { None });
         ext.right.push(if full { last } else { None });
         if full && y == 0 {
-            ext.top = Some(colors.clone());
-        }
-        if full && y + 1 == rows {
-            ext.bottom = Some(colors);
+            ext.top = Some(colors);
         }
     }
     ext
@@ -449,7 +483,6 @@ mod tests {
         ];
         let ext = edge_extension(6, 4, |x, y| rows[y][x]);
         assert_eq!(ext.top, Some(rows[0].iter().map(|v| v.unwrap()).collect()));
-        assert_eq!(ext.bottom, Some(rows[3].iter().map(|v| v.unwrap()).collect()));
         assert_eq!(ext.left, vec![c(0x222436), c(0x2f334d), c(0x222436), c(0x82aaff)]);
         assert_eq!(ext.right, vec![c(0x222436), c(0x2f334d), c(0x222436), c(0x82aaff)]);
     }
@@ -465,7 +498,6 @@ mod tests {
         ];
         let ext = edge_extension(4, 4, |x, y| rows[y][x]);
         assert_eq!(ext.top, None);
-        assert_eq!(ext.bottom, None);
         assert_eq!(ext.left, vec![None; 4]);
         assert_eq!(ext.right, vec![None; 4]);
     }
@@ -567,17 +599,39 @@ mod tests {
         assert_eq!(spans(Some((0, 9)), Some((3, 9)), false), []);
     }
 
+    /// 把列表按算出的段连起来，应当是严格从新到旧。
+    fn reordered(list: &[u32], history_below: u32) -> Vec<u32> {
+        let segments = newest_first_segments(list.len(), |i| Some(list[i]), |at| at < history_below);
+        let ranks: usize = segments.iter().map(|s| s.len()).sum();
+        assert_eq!(ranks, list.len(), "每一项都在且只在一段里：{segments:?}");
+        (0..list.len()).map(|rank| list[segment_index(&segments, rank).unwrap()]).collect()
+    }
+
     #[test]
-    fn the_newest_item_is_found_in_a_rotated_newest_first_list() {
-        let find = |list: &[u32]| newest_index(list.len(), |i| Some(list[i]));
-        assert_eq!(find(&[]), 0);
-        assert_eq!(find(&[7]), 0);
-        assert_eq!(find(&[9, 7, 5, 3]), 0, "没转");
-        assert_eq!(find(&[5, 3, 9, 7]), 2);
-        assert_eq!(find(&[3, 9, 7, 5]), 1);
-        assert_eq!(find(&[7, 5, 3, 9]), 3);
-        // libghostty 实际给出的顺序：回滚历史（211 … 11）在前，屏幕上的（301、300）在后
-        assert_eq!(find(&[211, 128, 127, 126, 125, 124, 123, 122, 121, 120, 119, 111, 11, 301, 300]), 13);
+    fn match_lists_are_put_back_in_newest_first_order() {
+        let sorted = |list: &[u32]| {
+            let mut v = list.to_vec();
+            v.sort_unstable_by(|a, b| b.cmp(a));
+            v
+        };
+        // 顺序本来就对（屏幕在一页里）
+        let fine = [90, 80, 70, 30, 20, 10];
+        assert_eq!(reordered(&fine, 50), fine);
+        // 屏幕跨两页、没有更早的历史：libghostty 实际给过 [211 … 11, 301, 300]
+        let two_pages = [211, 128, 127, 126, 125, 124, 123, 122, 121, 120, 119, 111, 11, 301, 300];
+        assert_eq!(reordered(&two_pages, 0), sorted(&two_pages));
+        // 跨两页、前面还有历史：[旧页][新页][历史]
+        let with_history = [529, 528, 400, 266, 540, 539, 531, 530, 264, 200, 100, 3];
+        assert_eq!(reordered(&with_history, 100), sorted(&with_history));
+        // 历史紧挨着活动区的页（还没到「肯定是历史」的线就开始了）也分得对
+        assert_eq!(reordered(&with_history, 0), sorted(&with_history));
+        // 跨三页（字号很小）
+        let three_pages = [30, 29, 21, 60, 55, 41, 90, 88, 61, 20, 10, 1];
+        assert_eq!(reordered(&three_pages, 15), sorted(&three_pages));
+        // 边界
+        assert_eq!(reordered(&[], 0), Vec::<u32>::new());
+        assert_eq!(reordered(&[7], 0), [7]);
+        assert_eq!(segment_index(&[2..4, 0..2], 4), None);
     }
 
     fn text_rows(lines: &[(&str, bool)]) -> Vec<Arc<Row>> {

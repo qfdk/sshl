@@ -14,7 +14,7 @@ use libghostty_vt::fmt::{Format, Formatter};
 use libghostty_vt::key;
 use libghostty_vt::mouse;
 use libghostty_vt::selection::gesture::{DragEvent, Gesture, Geometry, PressEvent, ReleaseEvent};
-use libghostty_vt::search::{MatchBuffer, Scroll as SearchScroll, Search, Status as SearchStatus};
+use libghostty_vt::search::{MatchBuffer, Search, Status as SearchStatus};
 use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
@@ -36,7 +36,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 /// 搜索回滚历史每轮最多占这么久，然后回头处理按键和输出。
 const SEARCH_SLICE: Duration = Duration::from_millis(4);
-/// 匹配不超过这么多时，每次刷新都精确算「第几个」（要取整张匹配列表）；再多就只在首次选中时算一次。
+/// 匹配不超过这么多时，每次刷新都重新核对选中项和「第几个」（要取整张匹配列表）；再多就只在选中、跳转时算。
 const NEWEST_EXACT_MAX: usize = 20_000;
 /// 回滚历史上限。
 const SCROLLBACK_BYTES: usize = 20 * 1024 * 1024;
@@ -179,6 +179,22 @@ struct SearchDriver {
     storage: MatchBuffer,
     /// 换了搜索词、还没选中任何一个：一有结果就选中最新的那个（同浏览器的查找）。
     autoselect: bool,
+    /// 当前选中的匹配：它第一格的位置（整个屏幕含回滚历史里的行、列）。选中由我们自己记，不用 libghostty 的
+    /// select_next / select_prev——它的列表顺序在屏幕跨内部页时是乱的（见 `frame::newest_first_segments`），而且只能一步步走。
+    selected: Option<(u32, u16)>,
+    /// 它是从新到旧第几个。
+    rank: Option<usize>,
+}
+
+/// 选中项怎么动。
+#[derive(Clone, Copy, PartialEq)]
+enum Select {
+    /// 不动，只核对位置和编号（内容变了、改了尺寸之后）。
+    Keep,
+    /// 最新的那个。
+    Newest,
+    /// 往更早 / 更新的走一个，到头绕回。
+    Step { older: bool },
 }
 
 struct Engine {
@@ -750,7 +766,7 @@ impl Engine {
         }
         if self.search.is_none() {
             match Search::new(&mut self.term) {
-                Ok(search) => self.search = Some(SearchDriver { search, storage: MatchBuffer::new(), autoselect: false }),
+                Ok(search) => self.search = Some(SearchDriver { search, storage: MatchBuffer::new(), autoselect: false, selected: None, rank: None }),
                 Err(error) => {
                     tracing::warn!("terminal search failed to start: {error}");
                     return;
@@ -758,18 +774,23 @@ impl Engine {
             }
         }
         let Some(driver) = self.search.as_mut() else { return };
+        // 和原来等价的词（只差大小写）结果和选中都留着，不用重选
+        let same = driver.search.needle().ok().flatten().is_some_and(|old| old.eq_ignore_ascii_case(needle.as_bytes()));
         if let Err(error) = driver.search.set_needle(&mut self.term, needle.as_bytes()) {
             tracing::warn!("terminal search: {error}");
         }
-        // 和原来等价的词（只差大小写）结果和选中都留着，不用重选
-        driver.autoselect = !matches!(driver.search.selected_index(), Ok(Some(_)));
+        if !same {
+            driver.selected = None;
+            driver.rank = None;
+        }
+        driver.autoselect = driver.selected.is_none();
     }
 
     fn search_step(&mut self, older: bool) {
         let Some(driver) = self.search.as_mut() else { return };
-        driver.autoselect = false;
-        let moved = if older { driver.search.select_next(&mut self.term) } else { driver.search.select_prev(&mut self.term) };
-        if let Err(error) = moved {
+        // 词刚敲完、还没来得及选中就按了 ↵：先落在最新的那个上，不从它再走一步
+        let select = if std::mem::take(&mut driver.autoselect) && driver.selected.is_none() { Select::Newest } else { Select::Step { older } };
+        if let Err(error) = driver.select(&mut self.term, self.size, select) {
             tracing::warn!("terminal search: {error}");
         }
     }
@@ -827,28 +848,19 @@ impl SearchDriver {
         let found = self.search.total_matches()?;
         if self.autoselect && found > 0 {
             self.autoselect = false;
-            let newest = self.newest_index(term)?;
-            let selected = self.select_newest(term, newest, found);
-            // 中途出错也把滚动策略改回来
-            self.search.set_scroll(SearchScroll::IfNeeded)?;
-            selected?;
+            self.select(term, size, Select::Newest)?;
+        } else if self.selected.is_some() && found > 0 && found <= NEWEST_EXACT_MAX {
+            // 内容变了（新输出里又有匹配、改了尺寸）：选中项和它的编号跟上。匹配太多时不值得每次都取整张列表，等下次跳转再算
+            self.select(term, size, Select::Keep)?;
         }
-        let index = self.search.selected_index()?;
         let mut spans = Vec::new();
-        let mut newest = 0;
         {
             let snapshot = self.search.snapshot(term)?;
             let term = snapshot.terminal();
-            // 「第几个」从真正最新的那个算起。要把整张列表取出来，匹配太多时不值得每次都做：那时编号差几个也看不出来
-            if index.is_some() && found <= NEWEST_EXACT_MAX {
-                let all: Vec<_> = snapshot.matches(&mut self.storage)?.collect();
-                let position = |i: usize| term.point_from_grid_ref(&all[i].start(), PointSpace::Screen).ok().flatten().map(|p| (p.y, p.x));
-                newest = frame::newest_index(all.len(), position);
-            }
             let at = |grid_ref| term.point_from_grid_ref(&grid_ref, PointSpace::Viewport).ok().flatten().map(|p| (p.x, p.y));
-            let current = snapshot.selected_match()?;
             for found in snapshot.viewport_matches(&mut self.storage)? {
-                let is_current = current.as_ref().is_some_and(|current| current.equals(term, &found).unwrap_or(false));
+                let start = term.point_from_grid_ref(&found.start(), PointSpace::Screen).ok().flatten().map(|p| (p.y, p.x));
+                let is_current = self.selected.is_some() && start == self.selected;
                 frame::match_spans(at(found.start()), at(found.end()), size.cols, size.rows, is_current, &mut spans);
             }
         }
@@ -857,45 +869,83 @@ impl SearchDriver {
         let searching = self.search.status()? != SearchStatus::Complete;
         let total = self.search.total_matches()?;
         if total == 0 && !searching {
+            // 确实一个都没有了。还在搜（改尺寸后 libghostty 从头重搜）时选中项先留着，结果回来再对上
             self.autoselect = false;
+            self.selected = None;
+            self.rank = None;
         }
-        let selected = index.filter(|_| total > 0).map(|index| (index + total - newest % total) % total);
+        let selected = self.rank.filter(|rank| *rank < total);
         // 有结果了但还没选中（刚 feed 出来的）：下一轮接着做
         Ok(frame::SearchInfo { total, selected, searching: searching || (self.autoselect && total > 0), spans })
     }
 }
 
 impl SearchDriver {
-    /// 真正最新（最靠下）的匹配在 libghostty 列表里的下标。按文档列表是从新到旧、第 0 个最新；实际上回滚历史和屏幕
-    /// 落在同一页时（宽终端常见），屏幕上的匹配被排在回滚历史的后面——还是从新到旧的一圈，只是起点不在 0。
-    fn newest_index(&mut self, term: &mut Terminal<'static, 'static>) -> libghostty_vt::error::Result<usize> {
-        let snapshot = self.search.snapshot(term)?;
-        let term = snapshot.terminal();
-        let found: Vec<_> = snapshot.matches(&mut self.storage)?.collect();
-        let position = |i: usize| term.point_from_grid_ref(&found[i].start(), PointSpace::Screen).ok().flatten().map(|p| (p.y, p.x));
-        Ok(frame::newest_index(found.len(), position))
-    }
-
-    /// 还没有选中任何一个时，选中最新的那个（列表里第 `newest` 个）。libghostty 只能一步步走：
-    /// 第一步落在第 0 个，再往近的方向走过去；中间几步不滚动，最后一步才按需要滚到它。
-    fn select_newest(&mut self, term: &mut Terminal<'static, 'static>, newest: usize, total: usize) -> libghostty_vt::error::Result<()> {
-        let (older, steps) = if newest <= total - newest { (true, newest) } else { (false, total - newest) };
-        if steps > 0 {
-            self.search.set_scroll(SearchScroll::None)?;
+    /// 定出选中项（位置和「第几个」）；选了新的就把视口滚到看得见它的地方。
+    fn select(&mut self, term: &mut Terminal<'static, 'static>, size: GridSize, select: Select) -> libghostty_vt::error::Result<()> {
+        let rows = usize::from(size.rows.max(1));
+        let active_top = term.total_rows()?.saturating_sub(rows) as u32;
+        // 一页大约能放 46000 / 列数 行（80 列约 570 行、180 列约 256 行）；比活动区顶上再早这么多行的肯定是回滚历史
+        let page_rows = 60_000 / u32::from(size.cols.max(1)) + 64;
+        {
+            let snapshot = self.search.snapshot(term)?;
+            let term = snapshot.terminal();
+            let all: Vec<_> = snapshot.matches(&mut self.storage)?.collect();
+            if all.is_empty() {
+                return Ok(());
+            }
+            let position = |i: usize| term.point_from_grid_ref(&all[i].start(), PointSpace::Screen).ok().flatten().map(|p| (p.y, p.x));
+            let segments = frame::newest_first_segments(all.len(), position, |(y, _)| y + page_rows < active_top);
+            let at = |rank: usize| frame::segment_index(&segments, rank).and_then(position);
+            // 选中项现在排第几：第一个不比它新的（它那里已经不是匹配了——被刷掉、改尺寸重排——就落在挨着的更早那个上）
+            let current = self.selected.map(|target| {
+                let (mut low, mut high) = (0, all.len());
+                while low < high {
+                    let middle = (low + high) / 2;
+                    if at(middle) > Some(target) {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                low.min(all.len() - 1)
+            });
+            let rank = match (select, current) {
+                (Select::Keep, None) => return Ok(()),
+                (Select::Keep, Some(rank)) => rank,
+                (Select::Newest, _) | (Select::Step { older: true }, None) => 0,
+                (Select::Step { older: false }, None) => all.len() - 1,
+                // 原来的位置上还是匹配才从它走一步；不是的话 current 已经是挨着的更早那个
+                (Select::Step { older: true }, Some(rank)) if at(rank) == self.selected => (rank + 1) % all.len(),
+                (Select::Step { older: true }, Some(rank)) => rank,
+                (Select::Step { older: false }, Some(rank)) => (rank + all.len() - 1) % all.len(),
+            };
+            self.selected = at(rank);
+            self.rank = Some(rank);
         }
-        self.search.select_next(term)?;
-        for step in 0..steps {
-            if step + 1 == steps {
-                self.search.set_scroll(SearchScroll::IfNeeded)?;
-            }
-            if older {
-                self.search.select_next(term)?;
-            } else {
-                self.search.select_prev(term)?;
-            }
+        if select != Select::Keep
+            && let Some((row, _)) = self.selected
+        {
+            scroll_into_view(term, row as usize, rows)?;
         }
         Ok(())
     }
+}
+
+/// 把回滚历史里的第 `row` 行滚到看得见的地方。已经看得见就不动；头两行算看不见——搜索条盖在右上角。
+/// 要滚的时候把它放在离顶三分之一处，上下都留点上下文。
+fn scroll_into_view(term: &mut Terminal<'static, 'static>, row: usize, rows: usize) -> libghostty_vt::error::Result<()> {
+    let corner = term.grid_ref(Point::Viewport(PointCoordinate { x: 0, y: 0 }))?;
+    let Some(top) = term.point_from_grid_ref(&corner, PointSpace::Screen)?.map(|p| p.y as usize) else { return Ok(()) };
+    let covered = 2.min(rows.saturating_sub(1));
+    if (top + covered..top + rows).contains(&row) {
+        return Ok(());
+    }
+    let bottom = term.total_rows()?.saturating_sub(rows);
+    let target = row.saturating_sub(rows / 3);
+    // 到底了用 Bottom：视口继续跟着新输出走
+    term.scroll_viewport(if target >= bottom { ScrollViewport::Bottom } else { ScrollViewport::Row(target) });
+    Ok(())
 }
 
 impl Painter {
@@ -1269,6 +1319,35 @@ mod tests {
         assert_eq!((info.selected, info2.selected), (Some(1), Some(0)));
         let info = searched(&mut engine, &shared, Input::SearchStep { older: false }).unwrap();
         assert_eq!(info.selected, Some(14), "从最新的再往新走，绕到最早的");
+    }
+
+    /// 不管回滚历史多长、屏幕跨不跨内部页：一搜选中最下面那个，↵ 一路往上（位置严格递减），不来回跳。
+    #[test]
+    fn search_steps_strictly_upward_whatever_the_history_length() {
+        let mut bad = Vec::new();
+        // 541、800、837、1096、1355 行是实际出过错的（屏幕跨两个内部页、前面还有回滚历史）
+        for lines in [60, 300, 541, 800, 837, 1096, 1355] {
+            let (mut engine, _shared) = engine();
+            engine.handle(Input::Resize(GridSize { cols: 180, rows: 47, cell_width: 8, cell_height: 16 }));
+            for i in 1..=lines {
+                engine.write_output(format!("row {i}\r\n").as_bytes());
+            }
+            engine.handle(Input::Search("row".into()));
+            while engine.refresh_search().1 {}
+            let at = |engine: &mut Engine| engine.search.as_ref().unwrap().selected.unwrap().0;
+            let mut seen = vec![at(&mut engine)];
+            for _ in 0..(lines.min(120) - 1) {
+                engine.handle(Input::SearchStep { older: true });
+                seen.push(at(&mut engine));
+            }
+            let first_ok = seen[0] as usize == lines - 1;
+            let descending = seen.windows(2).all(|w| w[1] + 1 == w[0]);
+            if !first_ok || !descending {
+                let jump = seen.windows(2).position(|w| w[1] + 1 != w[0]);
+                bad.push((lines, seen[0], jump.map(|j| (j, seen[j], seen[j + 1]))));
+            }
+        }
+        assert!(bad.is_empty(), "（行数, 首次选中的行, 第一次乱跳的位置）：{bad:?}");
     }
 
     /// 搜索开着时新输出里的匹配跟着算进来；没有结果时是 0；关掉（空串）后帧里不再带搜索状态。

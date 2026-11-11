@@ -1,5 +1,5 @@
-//! 终端视图：铺满内容区的深色直角卡片。左、右、上 4px 内边距，底边不留（最后一行贴着底边）；
-//! 内边距用边缘格子的底色延伸（全屏 TUI 的 cursorline 贴到卡片边）。
+//! 终端视图：铺满内容区的深色直角卡片，四边 4px 内边距。左、右、上的内边距用边缘格子的底色延伸
+//! （全屏 TUI 的 cursorline 贴到卡片边）；底边那 4px 不延伸，是卡片的底色。
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -94,10 +94,10 @@ impl Metrics {
         Self { font_size: size, cell_width: snap(advance), line_height: snap(height), scale }
     }
 
-    /// 在 `available` 大小的区域里能排下的网格（左、右、上扣掉内边距；底边不留，最后一行贴着底边）。
+    /// 在 `available` 大小的区域里能排下的网格（四边扣掉内边距）。
     pub fn grid(&self, available: gpui::Size<Pixels>) -> GridSize {
-        let pad = px(TERMINAL_PADDING);
-        let cols = ((available.width - pad * 2.) / self.cell_width).floor().max(1.0) as u16;
+        let pad = px(TERMINAL_PADDING) * 2.;
+        let cols = ((available.width - pad) / self.cell_width).floor().max(1.0) as u16;
         let rows = ((available.height - pad) / self.line_height).floor().max(1.0) as u16;
         GridSize {
             cols,
@@ -259,8 +259,8 @@ pub struct TerminalView {
     pointer: Option<Point<Pixels>>,
     /// ⌘ 按着。
     cmd_down: bool,
-    /// 这次左键按下是 ⌘ 点链接：之后的拖动和松开都不交给选区、也不上报给程序。
-    link_press: bool,
+    /// 这次左键按下是 ⌘ 点链接（按下的位置）：之后的拖动和松开都不交给选区、也不上报给程序，松开时打开。
+    link_press: Option<Point<Pixels>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -388,7 +388,7 @@ impl TerminalView {
         let activation = cx.observe_window_activation(window, |view, window, cx| {
             if !window.is_window_active() {
                 view.cmd_down = false;
-                view.link_press = false;
+                view.link_press = None;
                 view.update_hover_link(cx);
             }
         });
@@ -419,7 +419,7 @@ impl TerminalView {
             hover_link: None,
             pointer: None,
             cmd_down: false,
-            link_press: false,
+            link_press: None,
             _tasks: vec![events_task, blink_task],
         };
         (view, shell_rx)
@@ -684,18 +684,16 @@ impl TerminalView {
         }
     }
 
-    /// ⌘ 点击：那里有纯文本网址就打开；没有就问终端线程那一格有没有 OSC 8 超链接。只开 http / https / ftp / mailto。
+    /// ⌘ 点击：先问终端线程那一格有没有 OSC 8 超链接（程序明说的目标，显示的字可能是截断的或另一个网址），
+    /// 没有再用那里的纯文本网址。只开 http / https / ftp / mailto。
     fn open_link_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let Some((x, y)) = self.cell_at(position) else { return };
-        if let Some(link) = link_at(&self.frame.rows, x, y) {
-            open_link(&link.url, cx);
-            return;
-        }
+        let plain = link_at(&self.frame.rows, x, y).map(|link| link.url);
         let (x, y) = self.mouse_position(position);
         let (reply, answer) = oneshot::channel();
         self.handle.send(Input::LinkAt { x, y, reply });
         cx.spawn(async move |_, cx| {
-            if let Ok(Some(url)) = answer.await {
+            if let Some(url) = answer.await.ok().flatten().or(plain) {
                 cx.update(|cx| open_link(&url, cx));
             }
         })
@@ -795,9 +793,8 @@ impl TerminalView {
         // ⌘ 点击开链接：这次按下不做选区、也不上报给程序。每次左键按下都重设标记：
         // 上一次在终端外松开（收不到 mouse_up）时不会卡住，把之后正常的松开也吞掉
         if event.button == MouseButton::Left {
-            self.link_press = event.modifiers.platform;
-            if self.link_press {
-                self.open_link_at(event.position, cx);
+            self.link_press = event.modifiers.platform.then_some(event.position);
+            if self.link_press.is_some() {
                 return;
             }
         }
@@ -816,8 +813,15 @@ impl TerminalView {
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // ⌘ 点链接那次的松开：不交给选区 / 程序，也不「选中即复制」
-        if event.button == MouseButton::Left && std::mem::take(&mut self.link_press) {
+        // ⌘ 点链接那次的松开：不交给选区 / 程序，也不「选中即复制」。松开时才打开（按下就开的话浏览器抢走前台，
+        // 这次松开收不到）；按下后拖开了不算点击
+        if event.button == MouseButton::Left
+            && let Some(pressed) = self.link_press.take()
+        {
+            let moved = event.position - pressed;
+            if moved.x.abs() <= px(4.) && moved.y.abs() <= px(4.) {
+                self.open_link_at(event.position, cx);
+            }
             return;
         }
         if event.button != MouseButton::Left && !self.reports_mouse(&event.modifiers) {
@@ -842,7 +846,7 @@ impl TerminalView {
             self.drop_hover = false;
             cx.notify();
         }
-        if self.link_press {
+        if self.link_press.is_some() {
             return;
         }
         if !self.reports_mouse(&event.modifiers) && event.pressed_button != Some(MouseButton::Left) {
@@ -1047,9 +1051,9 @@ fn highlighted(spans: &[MatchSpan], x: usize) -> bool {
 }
 
 /// 网格离卡片左 / 上边的距离（逻辑像素）：固定内边距 + 排不下整格的余量里放在这一边的份额（`share`，0–1），
-/// 按设备像素取整（不足一个设备像素的留在另一边）。`pad_after` 是另一边的内边距（底边不留，是 0）。
-fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32, pad_after: f32) -> f32 {
-    let leftover = (available - TERMINAL_PADDING - pad_after - cell * f32::from(cells)).max(0.);
+/// 按设备像素取整（不足一个设备像素的留在另一边）。
+fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32) -> f32 {
+    let leftover = (available - TERMINAL_PADDING * 2. - cell * f32::from(cells)).max(0.);
     TERMINAL_PADDING + (leftover * share * scale).floor() / scale
 }
 
@@ -1136,13 +1140,13 @@ impl Element for TerminalElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut Window, cx: &mut App) -> (Bounds<Pixels>, Point<Pixels>) {
         let grid = self.metrics.grid(bounds.size);
         let m = &self.metrics;
-        // 卡片铺满（同 Ghostty）。底边不留内边距，排不下一整行的余量也全放在上面：最后一行（nvim 状态栏）正好贴着底边。
-        // 底下留 4px 的话，不是状态栏下面多一条深色边，就是它的颜色铺下去、状态栏比别的行高出一截。上面那条是终端底色，
-        // 和第一行连成一片看不出来。左右的余量平分（行的底色左右本来就铺到边）
+        // 卡片铺满（同 Ghostty），四边 4px 内边距。排不下一整行的余量全放在上面：最后一行（nvim 状态栏）下面正好只有 4px。
+        // 余量放底下的话状态栏下面那条边时宽时窄；上面那条是终端底色，和第一行连成一片看不出来。
+        // 左右的余量平分（行的底色左右本来就铺到边）
         let origin = bounds.origin
             + point(
-                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5, TERMINAL_PADDING)),
-                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1., 0.)),
+                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5)),
+                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1.)),
             );
         self.view.update(cx, |view, _| view.resize(grid, origin));
         (bounds, origin)
@@ -1165,12 +1169,12 @@ impl Element for TerminalElement {
         let cell_y = |y: usize| origin.y + m.line_height * y as f32;
 
         // 内边距延伸：边缘整行有底色时铺进内边距。上边只铺固定的内边距那么高（再往上是余量，用卡片底色，
-        // 整行往上拉长看着像多了一行）；下边没有内边距，只剩不到一个设备像素的取整余量，铺到底；左右照旧铺到边（cursorline 之类贴边才自然）
+        // 整行往上拉长看着像多了一行）；左右照旧铺到边（cursorline 之类贴边才自然）。下边那 4px 不铺最后一行的颜色，
+        // 留卡片的底色：铺下去的话 nvim 的状态栏比别的行高出一截（用户嫌多出 4px），不留又贴着窗口底边太挤
         let ext = &frame.extension;
-        let strip = |window: &mut Window, colors: &[Rgb], top: Pixels, height: Pixels, round_top: bool| {
-            if colors.is_empty() {
-                return;
-            }
+        if let Some(colors) = ext.top.as_deref().filter(|colors| !colors.is_empty()) {
+            // 同色的相邻格子合成一段；两头的铺到卡片边
+            let top = origin.y - pad;
             let mut start = 0;
             for x in 1..=colors.len() {
                 if x < colors.len() && colors[x] == colors[start] {
@@ -1178,23 +1182,9 @@ impl Element for TerminalElement {
                 }
                 let left = if start == 0 { card.origin.x } else { cell_x(start) };
                 let right = if x == colors.len() { card.right() } else { cell_x(x) };
-                let mut corners = Corners::all(px(0.));
-                if start == 0 {
-                    if round_top { corners.top_left = radius.top_left } else { corners.bottom_left = radius.bottom_left }
-                }
-                if x == colors.len() {
-                    if round_top { corners.top_right = radius.top_right } else { corners.bottom_right = radius.bottom_right }
-                }
-                let b = Bounds::from_corners(point(left, top), point(right, top + height));
-                window.paint_quad(quad(b, corners, hsla(colors[start]), px(0.), gpui::transparent_black(), BorderStyle::default()));
+                window.paint_quad(fill(Bounds::from_corners(point(left, top), point(right, top + pad)), hsla(colors[start])));
                 start = x;
             }
-        };
-        if let Some(top) = &ext.top {
-            strip(window, top, origin.y - pad, pad, true);
-        }
-        if let Some(bottom) = &ext.bottom {
-            strip(window, bottom, grid.bottom(), card.bottom() - grid.bottom(), false);
         }
         for y in 0..frame.rows.len() {
             let row = Bounds::from_corners(point(card.origin.x, cell_y(y)), point(origin.x, cell_y(y + 1)));
@@ -1534,24 +1524,24 @@ mod tests {
 
     #[test]
     fn leftover_rows_go_on_top_and_leftover_columns_are_split() {
-        // 高 500、行高 18：底边不留内边距，27 行占 486，剩下 14px 全在上面，最后一行贴着底边
-        assert_eq!(grid_offset(500., 27, 18., 2., 1., 0.), 14.);
+        // 高 500、行高 18：(500 - 8) / 18 = 27 行，余 6px 全放上面：最后一行下面正好是 4px 内边距
+        assert_eq!(grid_offset(500., 27, 18., 2., 1.), 10.);
         // 左右平分；余 7px 时 2 倍屏上能放 3.5px，1 倍屏按整像素取 3px（多的 1px 留在另一边）
-        assert_eq!(grid_offset(501., 27, 18., 2., 0.5, TERMINAL_PADDING), 7.5);
-        assert_eq!(grid_offset(501., 27, 18., 1., 0.5, TERMINAL_PADDING), 7.);
+        assert_eq!(grid_offset(501., 27, 18., 2., 0.5), 7.5);
+        assert_eq!(grid_offset(501., 27, 18., 1., 0.5), 7.);
         // 正好排满：只有内边距
-        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1., TERMINAL_PADDING), 4.);
-        assert_eq!(grid_offset(4. + 18. * 10., 10, 18., 2., 1., 0.), 4.);
+        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1.), 4.);
     }
 
-    /// nvim 状态栏下面不留那 4px：行数只扣上边的内边距，最后一行正好落在底边上。
+    /// 四边都是 4px 内边距，底边也留：最后一行下面不多不少正好 4px（贴着窗口底边看着怪）。
     #[test]
-    fn the_last_row_sits_on_the_bottom_edge() {
+    fn the_last_row_keeps_the_padding_below_it() {
         let m = Metrics { font_size: px(13.), cell_width: px(8.), line_height: px(18.), scale: 2. };
-        // 高 4 + 18 × 10：正好 10 行（上下各扣 4px 的话只排得下 9 行）
-        let grid = m.grid(size(px(8. + 8. * 80.), px(4. + 18. * 10.)));
-        assert_eq!((grid.cols, grid.rows), (80, 10));
-        let top = grid_offset(4. + 18. * 10., grid.rows, 18., 2., 1., 0.);
-        assert_eq!(top + 18. * f32::from(grid.rows), 4. + 18. * 10.);
+        for height in [8. + 18. * 10., 8. + 18. * 10. + 7., 500.] {
+            let grid = m.grid(size(px(8. + 8. * 80.), px(height)));
+            let top = grid_offset(height, grid.rows, 18., 2., 1.);
+            assert_eq!(height - (top + 18. * f32::from(grid.rows)), TERMINAL_PADDING, "高 {height}");
+        }
+        assert_eq!(m.grid(size(px(8. + 8. * 80.), px(4. + 18. * 10.))).rows, 9, "上下各扣 4px：差 4px 排不下第 10 行");
     }
 }

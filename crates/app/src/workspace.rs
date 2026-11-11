@@ -207,6 +207,16 @@ impl Workspace {
         let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
         let quick_connect = cx.new(|cx| QuickConnect::new(window, cx));
         let subscriptions = vec![
+            // 窗口退到后台（⌘ 点链接后浏览器抢了前台）：之后松开 ⌘ 我们收不到，角标不能一直挂着
+            cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    this.hint_task = None;
+                    if this.hint_visible {
+                        this.hint_visible = false;
+                        cx.notify();
+                    }
+                }
+            }),
             cx.subscribe_in(&snippet_panel, window, Self::snippet_panel_event),
             cx.subscribe_in(&quick_connect, window, Self::quick_connect_event),
             // 系统页：没权限时的 sudo 命令、看服务日志，都发到终端
@@ -1193,6 +1203,9 @@ impl Workspace {
     // ---------- 快捷键 ----------
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        // 正在改名：先收掉。不然断开的确认框会记着「关掉后把焦点还给改名输入框」，取消时输入框已经没了，
+        // 焦点落空，键盘什么都按不动
+        self.finish_rename(true, window, cx);
         match self.active.clone() {
             Some(id) => self.disconnect(&id, window, cx),
             None => cx.hide(),
@@ -1226,7 +1239,8 @@ impl Workspace {
     fn modifiers_changed(&mut self, event: &ModifiersChangedEvent, window: &mut Window, cx: &mut Context<Self>) {
         let m = &event.modifiers;
         let only_cmd = m.platform && !m.shift && !m.alt && !m.control;
-        if only_cmd && self.active.is_some() {
+        // 有对话框 / 提示框时不浮角标：那些快捷键这时不管用，角标还会盖在遮罩上
+        if only_cmd && self.active.is_some() && !self.modal_open(cx) {
             if !self.hint_visible && self.hint_task.is_none() {
                 self.hint_task = Some(cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(HINT_DELAY).await;
