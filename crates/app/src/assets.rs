@@ -36,6 +36,7 @@ icons! {
     Check => "check",
     ChevronDown => "chevron-down",
     ChevronRight => "chevron-right",
+    ChevronUp => "chevron-up",
     Clock => "clock",
     CodeXml => "code-xml",
     Download => "download",

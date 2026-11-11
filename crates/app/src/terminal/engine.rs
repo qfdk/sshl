@@ -14,7 +14,8 @@ use libghostty_vt::fmt::{Format, Formatter};
 use libghostty_vt::key;
 use libghostty_vt::mouse;
 use libghostty_vt::selection::gesture::{DragEvent, Gesture, Geometry, PressEvent, ReleaseEvent};
-use libghostty_vt::terminal::{Point, PointCoordinate};
+use libghostty_vt::search::{MatchBuffer, Scroll as SearchScroll, Search, Status as SearchStatus};
+use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::style::{PaletteIndex, RgbColor, StyleColor, Underline};
@@ -33,6 +34,8 @@ const OUTPUT_SLICE: usize = 64 * 1024;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// 同步输出（DEC 2026）最多压住画面这么久：程序崩了 / 忘了结束时不至于一直卡在旧画面（同 Ghostty）。
 const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
+/// 搜索回滚历史每轮最多占这么久，然后回头处理按键和输出。
+const SEARCH_SLICE: Duration = Duration::from_millis(4);
 /// 回滚历史上限。
 const SCROLLBACK_BYTES: usize = 20 * 1024 * 1024;
 
@@ -84,6 +87,10 @@ pub enum Input {
     /// 复制选区（纯文本）；没有选区时回 None。
     Copy(futures::channel::oneshot::Sender<Option<String>>),
     SelectAll,
+    /// 搜索（⌘F）：在回滚历史和屏幕里找这个词（ASCII 字母不分大小写）；空串 = 关掉搜索、去掉高亮。
+    Search(String),
+    /// 选中下一个匹配并滚到它：`older` 往更早的（上面），否则往更新的；到头绕回。
+    SearchStep { older: bool },
     /// 断线重连：之后的输入、终端应答、改尺寸、流控确认都写到新的 shell 通道。屏幕和回滚历史不动。
     Rebind(ShellHandle),
     Shutdown,
@@ -162,7 +169,17 @@ fn ghostty(c: Rgb) -> RgbColor {
     RgbColor { r: c.r, g: c.g, b: c.b }
 }
 
+/// 进行中的搜索。libghostty 自己跟着屏幕变化、换屏、改尺寸更新结果，这里只负责分片推进和取结果。
+struct SearchDriver {
+    search: Search<'static, 'static>,
+    storage: MatchBuffer,
+    /// 换了搜索词、还没选中任何一个：一有结果就选中最新的那个（同浏览器的查找）。
+    autoselect: bool,
+}
+
 struct Engine {
+    /// 写在 term 前面：先于终端释放。
+    search: Option<SearchDriver>,
     term: Terminal<'static, 'static>,
     /// 整理帧的那部分。同步输出开始时 libghostty 的回调要在 vt_write 中途拼帧，所以单独拿出来共用。
     painter: Rc<RefCell<Painter>>,
@@ -201,6 +218,8 @@ struct Painter {
     unsent: bool,
     /// 当前 hold 开始的时刻；None = 没有 hold。
     held_since: Option<Instant>,
+    /// 搜索状态（终端线程每轮算好放这儿），拼帧时带上。
+    search: Option<Arc<frame::SearchInfo>>,
     shared: Arc<Shared>,
     notify: Rc<dyn Fn(Event) + Send>,
 }
@@ -295,6 +314,7 @@ impl Engine {
             built: Arc::new(Frame::default()),
             unsent: false,
             held_since: None,
+            search: None,
             shared,
             notify: notify.clone(),
         }));
@@ -313,6 +333,7 @@ impl Engine {
         })?;
 
         Ok(Self {
+            search: None,
             term,
             painter,
             key_encoder: key::Encoder::new()?,
@@ -345,11 +366,13 @@ impl Engine {
         let mut backlog: VecDeque<Vec<u8>> = VecDeque::new();
         let mut offset = 0usize;
         let mut dirty = false;
+        // 回滚历史还没搜完：不阻塞等消息，每轮接着搜一片
+        let mut searching = false;
         let mut bell = false;
         let mut last_frame = Instant::now() - FRAME_INTERVAL;
         loop {
             // 有积压就不阻塞；否则等消息。有待发的 PTY 尺寸、或画面改了但还没到出帧时刻时，最多等到那一刻
-            let wait = if backlog.is_empty() {
+            let wait = if backlog.is_empty() && !searching {
                 // hold 期间画面改了也不出帧（只等 hold 结束或超时）；hold 开始时留下的那一帧照常按时交出去
                 let (unsent, held_since) = {
                     let painter = self.painter.borrow();
@@ -407,6 +430,13 @@ impl Engine {
                 self.shell.lock().unwrap().ack(std::mem::take(&mut self.unacked));
             }
             self.flush_pty_size();
+            if self.search.is_some() && (dirty || searching) {
+                let (changed, pending) = self.refresh_search();
+                dirty |= changed;
+                searching = pending;
+            } else {
+                searching = false;
+            }
             // 出帧：两帧至少隔 FRAME_INTERVAL（屏幕刷新一次）。原来积压一清空就立刻出帧，刷屏时数据一小块一小块地到、
             // 每块都清空积压，一秒出上千帧（屏幕只显示 60 帧），多出来的都白算。打字时两次按键间隔远大于它，回显照样立刻出帧
             self.expire_hold(Instant::now());
@@ -451,6 +481,8 @@ impl Engine {
             Input::Copy(reply) => {
                 let _ = reply.send(self.selection_text());
             }
+            Input::Search(needle) => self.set_search(&needle),
+            Input::SearchStep { older } => self.search_step(older),
             Input::Rebind(shell) => {
                 *self.shell.lock().unwrap() = shell;
                 // 旧通道没确认完的字节不能记到新通道头上
@@ -668,6 +700,58 @@ impl Engine {
         }
     }
 
+    fn set_search(&mut self, needle: &str) {
+        if needle.is_empty() {
+            self.search = None;
+            self.painter.borrow_mut().search = None;
+            return;
+        }
+        if self.search.is_none() {
+            match Search::new(&mut self.term) {
+                Ok(search) => self.search = Some(SearchDriver { search, storage: MatchBuffer::new(), autoselect: false }),
+                Err(error) => {
+                    tracing::warn!("terminal search failed to start: {error}");
+                    return;
+                }
+            }
+        }
+        let Some(driver) = self.search.as_mut() else { return };
+        if let Err(error) = driver.search.set_needle(&mut self.term, needle.as_bytes()) {
+            tracing::warn!("terminal search: {error}");
+        }
+        // 和原来等价的词（只差大小写）结果和选中都留着，不用重选
+        driver.autoselect = !matches!(driver.search.selected_index(), Ok(Some(_)));
+    }
+
+    fn search_step(&mut self, older: bool) {
+        let Some(driver) = self.search.as_mut() else { return };
+        driver.autoselect = false;
+        let moved = if older { driver.search.select_next(&mut self.term) } else { driver.search.select_prev(&mut self.term) };
+        if let Err(error) = moved {
+            tracing::warn!("terminal search: {error}");
+        }
+    }
+
+    /// 推进搜索一片（最多 [`SEARCH_SLICE`]）并把结果放进 painter。返回（结果变了，还没搜完）。
+    fn refresh_search(&mut self) -> (bool, bool) {
+        let Some(driver) = self.search.as_mut() else { return (false, false) };
+        match driver.refresh(&mut self.term, self.size) {
+            Ok(info) => {
+                let searching = info.searching;
+                let mut painter = self.painter.borrow_mut();
+                let changed = painter.search.as_deref() != Some(&info);
+                if changed {
+                    painter.search = Some(Arc::new(info));
+                }
+                (changed, searching)
+            }
+            Err(error) => {
+                tracing::warn!("terminal search: {error}");
+                (false, false)
+            }
+        }
+    }
+
     /// 把屏幕整理成帧交给界面：只重建脏行，没变的行沿用上一帧的 Arc。
     /// 出帧：没有 hold 时按终端此刻的样子拼；hold 里只交 hold 开始时留下的那一帧（还没交的话）。
     fn paint(&mut self) -> libghostty_vt::error::Result<()> {
@@ -686,6 +770,85 @@ impl Engine {
             let _ = self.term.set_mode(Mode::SYNC_OUTPUT, false);
             self.painter.borrow_mut().held_since = None;
         }
+    }
+}
+
+impl SearchDriver {
+    fn refresh(&mut self, term: &mut Terminal<'static, 'static>, size: GridSize) -> libghostty_vt::error::Result<frame::SearchInfo> {
+        // feed 让搜索看到终端的新内容并取下一段回滚历史，tick 在已取的数据里找
+        let started = Instant::now();
+        let mut status;
+        loop {
+            self.search.feed(term)?;
+            status = self.search.status()?;
+            while status == SearchStatus::Running && started.elapsed() < SEARCH_SLICE {
+                status = self.search.tick()?;
+            }
+            if status == SearchStatus::Complete || started.elapsed() >= SEARCH_SLICE {
+                break;
+            }
+        }
+        let searching = status != SearchStatus::Complete;
+        let total = self.search.total_matches()?;
+        if self.autoselect && total > 0 {
+            self.autoselect = false;
+            let newest = self.newest_index(term)?;
+            let selected = self.select_newest(term, newest, total);
+            // 中途出错也把滚动策略改回来
+            self.search.set_scroll(SearchScroll::IfNeeded)?;
+            selected?;
+        } else if !searching {
+            self.autoselect = false;
+        }
+        // 界面上的「第几个」从真正最新的那个算起
+        let selected = match self.search.selected_index()? {
+            Some(index) if total > 0 => Some((index + total - self.newest_index(term)? % total) % total),
+            _ => None,
+        };
+        let mut spans = Vec::new();
+        let snapshot = self.search.snapshot(term)?;
+        let term = snapshot.terminal();
+        let at = |grid_ref| term.point_from_grid_ref(&grid_ref, PointSpace::Viewport).ok().flatten().map(|p| (p.x, p.y));
+        let current = snapshot.selected_match()?;
+        for found in snapshot.viewport_matches(&mut self.storage)? {
+            let is_current = current.as_ref().is_some_and(|current| current.equals(term, &found).unwrap_or(false));
+            frame::match_spans(at(found.start()), at(found.end()), size.cols, size.rows, is_current, &mut spans);
+        }
+        spans.sort_by_key(|span| (span.y, span.start));
+        Ok(frame::SearchInfo { total, selected, searching, spans })
+    }
+}
+
+impl SearchDriver {
+    /// 真正最新（最靠下）的匹配在 libghostty 列表里的下标。按文档列表是从新到旧、第 0 个最新；实际上回滚历史和屏幕
+    /// 落在同一页时（宽终端常见），屏幕上的匹配被排在回滚历史的后面——还是从新到旧的一圈，只是起点不在 0。
+    fn newest_index(&mut self, term: &mut Terminal<'static, 'static>) -> libghostty_vt::error::Result<usize> {
+        let snapshot = self.search.snapshot(term)?;
+        let term = snapshot.terminal();
+        let found: Vec<_> = snapshot.matches(&mut self.storage)?.collect();
+        let position = |i: usize| term.point_from_grid_ref(&found[i].start(), PointSpace::Screen).ok().flatten().map(|p| (p.y, p.x));
+        Ok(frame::newest_index(found.len(), position))
+    }
+
+    /// 还没有选中任何一个时，选中最新的那个（列表里第 `newest` 个）。libghostty 只能一步步走：
+    /// 第一步落在第 0 个，再往近的方向走过去；中间几步不滚动，最后一步才按需要滚到它。
+    fn select_newest(&mut self, term: &mut Terminal<'static, 'static>, newest: usize, total: usize) -> libghostty_vt::error::Result<()> {
+        let (older, steps) = if newest <= total - newest { (true, newest) } else { (false, total - newest) };
+        if steps > 0 {
+            self.search.set_scroll(SearchScroll::None)?;
+        }
+        self.search.select_next(term)?;
+        for step in 0..steps {
+            if step + 1 == steps {
+                self.search.set_scroll(SearchScroll::IfNeeded)?;
+            }
+            if older {
+                self.search.select_next(term)?;
+            } else {
+                self.search.select_prev(term)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -813,7 +976,7 @@ impl Painter {
         let alternate_screen = term.active_screen().is_ok_and(|s| s == Screen::Alternate);
         if clean {
             let last = &self.built;
-            if last.cursor == cursor && last.mouse_tracking == mouse_tracking && last.alternate_screen == alternate_screen {
+            if last.cursor == cursor && last.mouse_tracking == mouse_tracking && last.alternate_screen == alternate_screen && last.search == self.search {
                 return Ok(());
             }
         }
@@ -840,6 +1003,7 @@ impl Painter {
             password_prompt,
             mouse_tracking,
             alternate_screen,
+            search: self.search.clone(),
         };
         self.built = Arc::new(frame);
         self.unsent = true;
@@ -966,6 +1130,114 @@ mod tests {
         engine.paint().unwrap();
         assert_eq!(first_row(&shared), "stuck");
         assert!(!engine.term.mode(Mode::SYNC_OUTPUT).unwrap());
+    }
+
+    fn search(shared: &Shared) -> Arc<frame::SearchInfo> {
+        shared.frame.lock().unwrap().search.clone().expect("帧里有搜索状态")
+    }
+
+    /// 搜到底（测试里不分片）并出帧。
+    fn searched(engine: &mut Engine, shared: &Shared, input: Input) -> Option<Arc<frame::SearchInfo>> {
+        engine.handle(input);
+        while engine.refresh_search().1 {}
+        engine.paint().unwrap();
+        shared.frame.lock().unwrap().search.clone()
+    }
+
+    /// ⌘F：回滚历史里的也找得到，不分大小写；一搜就选中最新的那个，屏幕上看得见的匹配带高亮。
+    #[test]
+    fn search_finds_matches_in_scrollback_and_highlights_the_visible_ones() {
+        let (mut engine, shared) = engine();
+        engine.write_output(b"Needle one\r\n");
+        for i in 0..100 {
+            engine.write_output(format!("filler {i}\r\n").as_bytes());
+        }
+        engine.write_output(b"second NEEDLE here");
+        let info = searched(&mut engine, &shared, Input::Search("needle".into())).unwrap();
+        assert_eq!((info.total, info.selected, info.searching), (2, Some(0), false));
+        // 最新的那个在最后一行（第 23 行）第 7–12 列，是选中的
+        assert_eq!(info.spans, [frame::MatchSpan { y: 23, start: 7, end: 13, selected: true }]);
+    }
+
+    /// ↵ 往更早的走（滚到回滚历史里那一个），⇧↵ 往回；到头绕回。
+    #[test]
+    fn search_steps_through_matches_and_scrolls_to_them() {
+        let (mut engine, shared) = engine();
+        engine.write_output(b"needle one\r\n");
+        for i in 0..100 {
+            engine.write_output(format!("filler {i}\r\n").as_bytes());
+        }
+        engine.write_output(b"second needle here");
+        searched(&mut engine, &shared, Input::Search("needle".into()));
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: true }).unwrap();
+        assert_eq!(info.selected, Some(1));
+        assert!(!engine.term.viewport_active().unwrap(), "滚到回滚历史里去了");
+        assert_eq!(info.spans.len(), 1);
+        assert!(info.spans[0].selected && (info.spans[0].start, info.spans[0].end) == (0, 6));
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: true }).unwrap();
+        assert_eq!(info.selected, Some(0), "过了最早的绕回最新的");
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: false }).unwrap();
+        assert_eq!(info.selected, Some(1));
+    }
+
+    /// 逐字敲搜索词（先「1」再「12」）：每次都选中最新的那个，它本来就在屏幕上，视口不该动。
+    #[test]
+    fn typing_the_needle_letter_by_letter_keeps_the_viewport_at_the_bottom() {
+        let (mut engine, shared) = engine();
+        for i in 1..=300 {
+            engine.write_output(format!("{i}\r\n").as_bytes());
+        }
+        engine.write_output(b"needle 12 NEEDLE\r\n$ ");
+        let info = searched(&mut engine, &shared, Input::Search("1".into())).unwrap();
+        assert_eq!(info.selected, Some(0));
+        assert!(engine.term.viewport_active().unwrap(), "搜「1」之后还在底部");
+        let info = searched(&mut engine, &shared, Input::Search("12".into())).unwrap();
+        assert_eq!((info.total, info.selected), (14, Some(0)));
+        assert!(engine.term.viewport_active().unwrap(), "搜「12」之后还在底部");
+        assert!(info.spans.iter().any(|span| span.selected && span.y == 22), "选中的是倒数第二行那个：{:?}", info.spans);
+    }
+
+    /// 宽终端（回滚历史和屏幕落在同一页）上，libghostty 把屏幕上的匹配排在回滚历史的后面。
+    /// 不管它怎么排：一搜选中的是最新（最靠下）的那个、视口不动、编号从它算起，↵ 再一个个往上走。
+    #[test]
+    fn the_newest_match_is_selected_first_on_a_wide_terminal() {
+        let (mut engine, shared) = engine();
+        engine.handle(Input::Resize(GridSize { cols: 180, rows: 47, cell_width: 8, cell_height: 16 }));
+        for i in 1..=300 {
+            engine.write_output(format!("{i}\r\n").as_bytes());
+        }
+        engine.write_output(b"% echo needle 12 NEEDLE\r\nneedle 12 NEEDLE\r\n% ");
+        let selected_row = |info: &frame::SearchInfo| info.spans.iter().find(|span| span.selected).map(|span| span.y);
+        let info = searched(&mut engine, &shared, Input::Search("12".into())).unwrap();
+        assert_eq!((info.total, info.selected), (15, Some(0)));
+        assert!(engine.term.viewport_active().unwrap(), "最新的匹配就在屏幕上，视口不动");
+        assert_eq!(selected_row(&info), Some(45), "选中的是输出那一行（倒数第二行）");
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: true }).unwrap();
+        assert_eq!((info.selected, selected_row(&info)), (Some(1), Some(44)), "再往上是命令那一行");
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: true }).unwrap();
+        assert_eq!(info.selected, Some(2));
+        assert!(!engine.term.viewport_active().unwrap(), "第三个（212）在回滚历史里，滚过去");
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: false }).unwrap();
+        let info2 = searched(&mut engine, &shared, Input::SearchStep { older: false }).unwrap();
+        assert_eq!((info.selected, info2.selected), (Some(1), Some(0)));
+        let info = searched(&mut engine, &shared, Input::SearchStep { older: false }).unwrap();
+        assert_eq!(info.selected, Some(14), "从最新的再往新走，绕到最早的");
+    }
+
+    /// 搜索开着时新输出里的匹配跟着算进来；没有结果时是 0；关掉（空串）后帧里不再带搜索状态。
+    #[test]
+    fn search_follows_new_output_and_goes_away_when_closed() {
+        let (mut engine, shared) = engine();
+        engine.write_output(b"alpha\r\n");
+        let info = searched(&mut engine, &shared, Input::Search("beta".into())).unwrap();
+        assert_eq!((info.total, info.selected), (0, None));
+        engine.write_output(b"beta\r\nBETA\r\n");
+        while engine.refresh_search().1 {}
+        engine.paint().unwrap();
+        let info = search(&shared);
+        assert_eq!(info.total, 2);
+        assert_eq!(info.spans.len(), 2);
+        assert!(searched(&mut engine, &shared, Input::Search(String::new())).is_none());
     }
 
     /// Claude Code 先用 DECRQM 问支不支持 2026，答了「支持」才发同步输出（它不认识 TERM_PROGRAM=SSHL）。

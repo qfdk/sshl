@@ -10,13 +10,14 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
-    App, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
+    App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
     Hsla, InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
-    StrikethroughStyle, Style, Styled, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    Role, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
     fill, font, point, prelude::FluentBuilder, px, quad, relative, size,
 };
+use gpui_base::input::{Input as TextInput, InputEvent, InputState};
 use libghostty_vt::{key, mouse};
 use sshl_core::error::AppError;
 use sshl_core::known_hosts::{HostKeyCheck, HostKeyPrompt, HostKeyQuestion};
@@ -24,15 +25,19 @@ use sshl_core::local_shell::{self, LocalOptions, LocalShell};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
-use super::frame::{Frame, Rgb, flags};
+use super::frame::{Frame, MatchSpan, Rgb, SearchInfo, flags};
 use super::keys;
+use crate::assets::Icon;
 use crate::backend;
 use crate::prompts::{self, Options};
 use crate::theme::{self, TERMINAL_PADDING};
+use crate::ui as kit;
 
-actions!(terminal, [Copy, Paste, SelectAll]);
+actions!(terminal, [Copy, Paste, SelectAll, Find, FindNext, FindPrev, FindClose]);
 
 const CONTEXT: &str = "Terminal";
+/// 搜索条（⌘F）。它和终端是并排的兄弟，不在终端的上下文里：在里面敲的字不会被终端的按键处理发给远端。
+const SEARCH_CONTEXT: &str = "TerminalSearch";
 
 /// 终端里的按键绑定。Tab / Shift-Tab 被 gpui-base 的 Root 绑去切换焦点，在终端里压掉，
 /// 让它们落到 key_down 编码给远端（补全、反向补全）。
@@ -41,6 +46,16 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
         KeyBinding::new("cmd-v", Paste, Some(CONTEXT)),
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("cmd-f", Find, Some(CONTEXT)),
+        KeyBinding::new("cmd-g", FindNext, Some(CONTEXT)),
+        KeyBinding::new("cmd-shift-g", FindPrev, Some(CONTEXT)),
+        KeyBinding::new("cmd-f", Find, Some(SEARCH_CONTEXT)),
+        KeyBinding::new("cmd-g", FindNext, Some(SEARCH_CONTEXT)),
+        KeyBinding::new("cmd-shift-g", FindPrev, Some(SEARCH_CONTEXT)),
+        // 绑在比 gpui-base 输入框更深的上下文里，压过它自己的回车 / Esc
+        KeyBinding::new("enter", FindNext, Some("TerminalSearch > Input")),
+        KeyBinding::new("shift-enter", FindPrev, Some("TerminalSearch > Input")),
+        KeyBinding::new("escape", FindClose, Some("TerminalSearch > Input")),
         KeyBinding::new("tab", NoAction, Some(CONTEXT)),
         KeyBinding::new("shift-tab", NoAction, Some(CONTEXT)),
     ]
@@ -229,6 +244,10 @@ pub struct TerminalView {
     /// 正从 Finder 拖文件到终端上方（画「松开上传」的提示）。
     drop_hover: bool,
     scroll_remainder: f32,
+    /// 搜索条（⌘F）的输入框；`search_open` 时显示在右上角。
+    search: Entity<InputState>,
+    search_open: bool,
+    _search_subscription: Subscription,
     _tasks: Vec<Task<()>>,
 }
 
@@ -341,6 +360,13 @@ impl TerminalView {
         })
         .detach();
 
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("查找"));
+        let search_subscription = cx.subscribe(&search, |view, search, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) && view.search_open {
+                view.handle.send(Input::Search(search.read(cx).value().to_string()));
+            }
+        });
+
         let view = Self {
             handle,
             shell,
@@ -361,6 +387,9 @@ impl TerminalView {
             password_prompt: false,
             drop_hover: false,
             scroll_remainder: 0.0,
+            search,
+            search_open: false,
+            _search_subscription: search_subscription,
             _tasks: vec![events_task, blink_task],
         };
         (view, shell_rx)
@@ -552,6 +581,92 @@ impl TerminalView {
         self.handle.send(Input::SelectAll);
     }
 
+    /// ⌘F：打开搜索条（已经开着就回到输入框），上次搜的词留着并全选，直接敲新词就替换。
+    fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = true;
+        let needle = self.search.read(cx).value().to_string();
+        self.handle.send(Input::Search(needle));
+        self.search.update(cx, |search, cx| {
+            search.focus(window, cx);
+            search.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn find_next(&mut self, _: &FindNext, _: &mut Window, _: &mut Context<Self>) {
+        self.find_step(true);
+    }
+
+    fn find_prev(&mut self, _: &FindPrev, _: &mut Window, _: &mut Context<Self>) {
+        self.find_step(false);
+    }
+
+    fn find_step(&mut self, older: bool) {
+        if self.search_open {
+            self.handle.send(Input::SearchStep { older });
+        }
+    }
+
+    /// 关掉搜索条：高亮去掉，焦点回终端（屏幕停在找到的地方，敲键才回到底部）。
+    fn find_close(&mut self, _: &FindClose, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.handle.send(Input::Search(String::new()));
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let label = search_label(&self.search.read(cx).value(), self.frame.search.as_deref());
+        div()
+            .id("terminal-search")
+            .key_context(SEARCH_CONTEXT)
+            .role(Role::Search)
+            .aria_label("在终端里查找")
+            .absolute()
+            .top(px(8.))
+            .right(px(12.))
+            .occlude()
+            .h(px(34.))
+            .pl(px(10.))
+            .pr(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(theme::color(theme::ui::BORDER))
+            .bg(theme::color(theme::ui::CARD))
+            .text_color(theme::color(theme::ui::FOREGROUND))
+            .text_size(px(13.))
+            .shadow_md()
+            .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_prev))
+            .on_action(cx.listener(Self::find_close))
+            .child(div().w(px(170.)).child(TextInput::new(&self.search)))
+            .child(
+                div()
+                    .min_w(px(44.))
+                    .px(px(6.))
+                    .flex_shrink_0()
+                    .text_size(px(12.))
+                    .text_color(theme::color(theme::ui::MUTED_FOREGROUND))
+                    .child(label),
+            )
+            .child(
+                kit::mini_button("terminal-search-prev", Icon::ChevronUp, "上一个（↵）", theme::ui::MUTED_FOREGROUND)
+                    .on_click(cx.listener(|this, _, _, _| this.find_step(true))),
+            )
+            .child(
+                kit::mini_button("terminal-search-next", Icon::ChevronDown, "下一个（⇧↵）", theme::ui::MUTED_FOREGROUND)
+                    .on_click(cx.listener(|this, _, _, _| this.find_step(false))),
+            )
+            .child(
+                kit::mini_button("terminal-search-close", Icon::X, "关闭（Esc）", theme::ui::MUTED_FOREGROUND)
+                    .on_click(cx.listener(|this, _, window, cx| this.find_close(&FindClose, window, cx))),
+            )
+    }
+
     fn mouse_position(&self, position: Point<Pixels>) -> (f32, f32) {
         let scale = self.metrics.as_ref().map_or(2.0, |m| m.scale);
         (
@@ -683,7 +798,7 @@ impl Render for TerminalView {
         self.focused = focused;
         let connected = matches!(self.status, Status::Connected { .. });
         let local = self.status == Status::Local;
-        div()
+        let terminal = div()
             .id("terminal")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
@@ -691,6 +806,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_prev))
             .map(|d| {
                 #[cfg(any(debug_assertions, feature = "devhook"))]
                 let d = d.on_action(cx.listener(Self::log_selection));
@@ -736,7 +854,8 @@ impl Render for TerminalView {
                 cursor_on: self.blink_on || !focused,
                 marked: self.marked.clone(),
             })
-            .when(self.drop_hover, |d| d.child(drop_hint()))
+            .when(self.drop_hover, |d| d.child(drop_hint()));
+        div().relative().size_full().child(terminal).when(self.search_open, |d| d.child(self.search_bar(cx)))
     }
 }
 
@@ -790,6 +909,22 @@ impl EntityInputHandler for TerminalView {
     fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         None
     }
+}
+
+/// 搜索条里输入框右边那句：没敲词不显示；「第几个/共几个」（1 是最新的）；还没找到时区分在搜和没有。
+fn search_label(needle: &str, info: Option<&SearchInfo>) -> String {
+    let Some(info) = info.filter(|_| !needle.is_empty()) else { return String::new() };
+    match (info.total, info.selected) {
+        (0, _) if info.searching => "查找中…".into(),
+        (0, _) => "无结果".into(),
+        (total, Some(index)) => format!("{}/{total}", index + 1),
+        (total, None) => format!("{total} 个"),
+    }
+}
+
+/// 这一格在不在搜索匹配里（`spans` 是这一行的，按列排好）。
+fn highlighted(spans: &[MatchSpan], x: usize) -> bool {
+    spans.iter().any(|span| usize::from(span.start) <= x && x < usize::from(span.end))
 }
 
 /// 网格离卡片左 / 上边的距离（逻辑像素）：固定内边距 + 排不下整格的余量里放在这一边的份额（`share`，0–1），
@@ -946,9 +1081,25 @@ impl Element for TerminalElement {
             }
         }
 
+        // 搜索匹配：盖在格子底色上面，字改成黑的
+        let spans: &[MatchSpan] = frame.search.as_ref().map_or(&[], |search| &search.spans);
+        for span in spans {
+            let y = usize::from(span.y);
+            let b = Bounds::from_corners(point(cell_x(span.start.into()), cell_y(y)), point(cell_x(span.end.into()), cell_y(y + 1)));
+            let color = if span.selected { theme::term::SEARCH_SELECTED_BG } else { theme::term::SEARCH_BG };
+            window.paint_quad(fill(b, hsla(color)));
+        }
+
         // 文字：同样式的相邻格子合成一段，按格宽强制排版，回退字体也对齐网格
         let fonts = Fonts::new(&crate::settings::get(cx).font_family);
+        let mut span_at = 0;
         for (y, row) in frame.rows.iter().enumerate() {
+            // 这一行的匹配（spans 按行、列排好）
+            let from = span_at;
+            while span_at < spans.len() && usize::from(spans[span_at].y) <= y {
+                span_at += 1;
+            }
+            let row_spans = &spans[from..span_at];
             let cells = &row.cells;
             let mut x = 0;
             while x < cells.len() {
@@ -959,6 +1110,7 @@ impl Element for TerminalElement {
                     continue;
                 }
                 let start = x;
+                let matched = highlighted(row_spans, start);
                 let mut text = String::new();
                 let force_width;
                 if cell.has(flags::WIDE) || cell.extra.is_some() {
@@ -971,7 +1123,11 @@ impl Element for TerminalElement {
                 } else {
                     while x < cells.len() {
                         let next = &cells[x];
-                        if next.flags & (flags::WIDE | flags::SPACER | flags::INVISIBLE) != 0 || next.extra.is_some() || !same_style(cell, next) {
+                        if next.flags & (flags::WIDE | flags::SPACER | flags::INVISIBLE) != 0
+                            || next.extra.is_some()
+                            || !same_style(cell, next)
+                            || highlighted(row_spans, x) != matched
+                        {
                             break;
                         }
                         text.push(next.ch);
@@ -979,7 +1135,10 @@ impl Element for TerminalElement {
                     }
                     force_width = m.cell_width;
                 }
-                let run = text_run(cell, text.len(), &fonts);
+                let mut run = text_run(cell, text.len(), &fonts);
+                if matched {
+                    run.color = hsla(theme::term::SEARCH_FG);
+                }
                 let line = window.text_system().shape_line(SharedString::from(text), m.font_size, &[run], Some(force_width));
                 let _ = line.paint(point(cell_x(start), cell_y(y)), m.line_height, TextAlign::Left, None, window, cx);
             }
@@ -1152,6 +1311,39 @@ mod tests {
         assert_eq!(shell_escape("/Users/me/My File (1).txt"), r"/Users/me/My\ File\ \(1\).txt");
         assert_eq!(shell_escape("/tmp/a'b\"$c&d"), r#"/tmp/a\'b\"\$c\&d"#);
         assert_eq!(shell_escape("/Users/me/下载/报告-v2.pdf"), "/Users/me/下载/报告-v2.pdf");
+    }
+
+    #[test]
+    fn search_label_says_which_match_of_how_many() {
+        let info = |total, selected, searching| SearchInfo { total, selected, searching, spans: Vec::new() };
+        assert_eq!(search_label("", Some(&info(3, Some(0), false))), "", "没敲词不显示");
+        assert_eq!(search_label("x", None), "");
+        assert_eq!(search_label("x", Some(&info(17, Some(0), false))), "1/17");
+        assert_eq!(search_label("x", Some(&info(17, Some(16), true))), "17/17");
+        assert_eq!(search_label("x", Some(&info(0, None, true))), "查找中…");
+        assert_eq!(search_label("x", Some(&info(0, None, false))), "无结果");
+    }
+
+    #[test]
+    fn search_keys_reach_the_search_bar_before_the_input_box() {
+        gpui::actions!(test, [InputEnter, InputEscape]);
+        let mut keymap = Keymap::new(vec![
+            KeyBinding::new("enter", InputEnter, Some("Input")),
+            KeyBinding::new("escape", InputEscape, Some("Input")),
+        ]);
+        keymap.add_bindings(key_bindings());
+        let stack: Vec<KeyContext> = ["Root", "Workspace", SEARCH_CONTEXT, "Input"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let first = |key: &'static str| {
+            let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
+            bindings.first().map(|b| b.action().name().to_string())
+        };
+        assert_eq!(first("enter").as_deref(), Some("terminal::FindNext"));
+        assert_eq!(first("shift-enter").as_deref(), Some("terminal::FindPrev"));
+        assert_eq!(first("escape").as_deref(), Some("terminal::FindClose"));
+        assert_eq!(first("cmd-g").as_deref(), Some("terminal::FindNext"));
+        // 终端里 Esc 照旧发给程序（vim），不关搜索条
+        assert_eq!(resolve(&keymap, "escape"), 0);
+        assert_eq!(resolve(&keymap, "cmd-f"), 1);
     }
 
     #[test]

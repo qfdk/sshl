@@ -60,6 +60,12 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   结束后按最新的出帧，最长 1s 超时。不认的话擦掉重写的中间状态会被画出来，整块闪。
   键盘 / 鼠标 / 粘贴 / 焦点的编码都交给 libghostty（应用光标键、Kitty 键盘协议、括号粘贴）；
   普通字符走 GPUI 的输入法通道（`EntityInputHandler`），中文输入法组字画在光标处。
+- **终端里查找**（⌘F，`terminal/view.rs` 的搜索条 + `engine.rs` 的 `SearchDriver`）：用 libghostty 的 `Search`，搜回滚历史和屏幕（ASCII 字母不分大小写）。
+  终端线程每轮最多搜 4ms（`SEARCH_SLICE`），结果（总数、第几个、屏幕上看得见的匹配按行切好的 `MatchSpan`）放进帧的 `search`；
+  界面画淡黄底黑字、当前选中的橙底。一敲词就选中最新（最靠下）的那个，↵ / ⌘G 往更早的、⇧↵ / ⌘⇧G 往回，Esc 关（屏幕停在找到的地方）。
+  搜索条是终端的兄弟元素、不在 `Terminal` 上下文里：放进去的话在里面敲的字会被终端的 key_down 发给远端。
+  libghostty 的匹配列表按文档是从新到旧、第 0 个最新，实际上宽终端（回滚历史和屏幕落在同一页）会把屏幕上的排到回滚历史后面
+  ——还是一圈，只是起点不对；`frame::newest_index` 二分找出真正最新的，首次选中走到它、「第几个」从它算起。
 - **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，
   core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
   （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。

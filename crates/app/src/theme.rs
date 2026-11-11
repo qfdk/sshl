@@ -47,6 +47,10 @@ pub mod term {
     pub const CURSOR: Rgb = Rgb::hex(0xf2f4f8);
     pub const SELECTION_BG: Rgb = Rgb::hex(0x2a2a2a);
     pub const SELECTION_FG: Rgb = Rgb::hex(0xf2f4f8);
+    /// 搜索（⌘F）高亮：匹配是淡黄底黑字，当前选中的那个是橙底（同 Ghostty 默认）。
+    pub const SEARCH_BG: Rgb = Rgb::hex(0xffe082);
+    pub const SEARCH_SELECTED_BG: Rgb = Rgb::hex(0xf2a57e);
+    pub const SEARCH_FG: Rgb = Rgb::hex(0x000000);
     pub const ANSI: [Rgb; 16] = [
         Rgb::hex(0x282828),
         Rgb::hex(0xee5396),

@@ -115,6 +115,78 @@ pub struct EdgeExtension {
     pub right: Vec<Option<Rgb>>,
 }
 
+/// 一行里一段搜索匹配（`start..end` 是格子列号，不含 end）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatchSpan {
+    pub y: u16,
+    pub start: u16,
+    pub end: u16,
+    /// 是不是当前选中的那一个（↵ / ⇧↵ 走到的）。
+    pub selected: bool,
+}
+
+/// 回滚搜索（⌘F）此刻的状态。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SearchInfo {
+    /// 找到的总数（还在搜时是目前为止的）。
+    pub total: usize,
+    /// 当前选中第几个：0 是最新（最靠下）的那个。
+    pub selected: Option<usize>,
+    /// 回滚历史还没搜完。
+    pub searching: bool,
+    /// 屏幕上看得见的匹配，按行切好。
+    pub spans: Vec<MatchSpan>,
+}
+
+/// 把一个匹配（首尾格子都算在内，视口坐标 `(列, 行)`）按行切成高亮段。
+/// 端点不在视口里时是 None：只有头在外面 = 从上面延续下来，只有尾在外面 = 一直延续到视口下面，两头都不在就不画。
+pub fn match_spans(start: Option<(u16, u32)>, end: Option<(u16, u32)>, cols: u16, rows: u16, selected: bool, out: &mut Vec<MatchSpan>) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let last = (cols - 1, u32::from(rows) - 1);
+    let (start, end) = match (start, end) {
+        (None, None) => return,
+        (start, end) => (start.unwrap_or((0, 0)), end.unwrap_or(last)),
+    };
+    // 端点可能是反着的（选区保留方向）
+    let (start, end) = if (start.1, start.0) <= (end.1, end.0) { (start, end) } else { (end, start) };
+    if start.1 > last.1 {
+        return;
+    }
+    let end = if end.1 > last.1 { last } else { end };
+    for y in start.1..=end.1 {
+        let from = if y == start.1 { start.0.min(cols - 1) } else { 0 };
+        let to = if y == end.1 { end.0.min(cols - 1) + 1 } else { cols };
+        if from < to {
+            out.push(MatchSpan { y: y as u16, start: from, end: to, selected });
+        }
+    }
+}
+
+/// 「从新到旧」的列表被转了一圈时（后一段整体比前一段新），真正最新的那一项的下标；没转是 0。
+/// `position` 给出第 i 项的位置（越大越新），二分查找，只问 O(log n) 项。
+pub fn newest_index<K: Ord>(len: usize, position: impl Fn(usize) -> Option<K>) -> usize {
+    if len < 2 {
+        return 0;
+    }
+    let (Some(first), Some(last)) = (position(0), position(len - 1)) else { return 0 };
+    if first > last {
+        return 0;
+    }
+    // 最后一项比第一项新：找第一个比第一项新的
+    let (mut low, mut high) = (1, len - 1);
+    while low < high {
+        let middle = (low + high) / 2;
+        if position(middle).is_some_and(|at| at > first) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
     pub cols: u16,
@@ -131,6 +203,8 @@ pub struct Frame {
     pub mouse_tracking: bool,
     /// 在备用屏（全屏程序）上：没有回滚历史。
     pub alternate_screen: bool,
+    /// 正在搜索（⌘F）时的状态和高亮；没在搜是 None。
+    pub search: Option<Arc<SearchInfo>>,
 }
 
 fn majority(colors: &[Option<Rgb>], strict: bool) -> Option<Rgb> {
@@ -341,6 +415,46 @@ mod tests {
         assert!(!is_password_prompt("alice@host:~$ "));
         assert!(!is_password_prompt("echo password"));
         assert!(!is_password_prompt("password changed successfully."));
+    }
+
+    fn spans(start: Option<(u16, u32)>, end: Option<(u16, u32)>, selected: bool) -> Vec<(u16, u16, u16, bool)> {
+        let mut out = Vec::new();
+        match_spans(start, end, 10, 4, selected, &mut out);
+        out.into_iter().map(|s| (s.y, s.start, s.end, s.selected)).collect()
+    }
+
+    #[test]
+    fn a_match_becomes_one_highlight_span_per_row() {
+        // 一行之内：首尾格子都算
+        assert_eq!(spans(Some((2, 1)), Some((4, 1)), false), [(1, 2, 5, false)]);
+        // 折行的匹配：第一行到行尾，下一行从行首
+        assert_eq!(spans(Some((8, 0)), Some((1, 1)), true), [(0, 8, 10, true), (1, 0, 2, true)]);
+        // 端点反着给也一样
+        assert_eq!(spans(Some((1, 1)), Some((8, 0)), false), [(0, 8, 10, false), (1, 0, 2, false)]);
+    }
+
+    #[test]
+    fn matches_partly_outside_the_viewport_are_clipped() {
+        // 头在视口上面：从第一行行首画到尾
+        assert_eq!(spans(None, Some((2, 0)), false), [(0, 0, 3, false)]);
+        // 尾在视口下面：画到最后一行行尾
+        assert_eq!(spans(Some((7, 3)), None, false), [(3, 7, 10, false)]);
+        // 两头都不在视口里、或整个在视口下面：不画
+        assert_eq!(spans(None, None, false), []);
+        assert_eq!(spans(Some((0, 9)), Some((3, 9)), false), []);
+    }
+
+    #[test]
+    fn the_newest_item_is_found_in_a_rotated_newest_first_list() {
+        let find = |list: &[u32]| newest_index(list.len(), |i| Some(list[i]));
+        assert_eq!(find(&[]), 0);
+        assert_eq!(find(&[7]), 0);
+        assert_eq!(find(&[9, 7, 5, 3]), 0, "没转");
+        assert_eq!(find(&[5, 3, 9, 7]), 2);
+        assert_eq!(find(&[3, 9, 7, 5]), 1);
+        assert_eq!(find(&[7, 5, 3, 9]), 3);
+        // libghostty 实际给出的顺序：回滚历史（211 … 11）在前，屏幕上的（301、300）在后
+        assert_eq!(find(&[211, 128, 127, 126, 125, 124, 123, 122, 121, 120, 119, 111, 11, 301, 300]), 13);
     }
 
     #[test]
