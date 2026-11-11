@@ -792,10 +792,11 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
-/// 网格离卡片边的距离（逻辑像素）：固定内边距 + 排不下整格的余量的一半，按设备像素取整。
-fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32) -> f32 {
+/// 网格离卡片左 / 上边的距离（逻辑像素）：固定内边距 + 排不下整格的余量里放在这一边的份额（`share`，0–1），
+/// 按设备像素取整（不足一个设备像素的留在另一边）。
+fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32) -> f32 {
     let leftover = (available - TERMINAL_PADDING * 2. - cell * f32::from(cells)).max(0.);
-    TERMINAL_PADDING + (leftover / 2. * scale).floor() / scale
+    TERMINAL_PADDING + (leftover * share * scale).floor() / scale
 }
 
 /// 拖进本机终端的路径：shell 特殊字符前加反斜杠（中文等非 ASCII 原样保留）。
@@ -854,12 +855,13 @@ impl Element for TerminalElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut Window, cx: &mut App) -> (Bounds<Pixels>, Point<Pixels>) {
         let grid = self.metrics.grid(bounds.size);
         let m = &self.metrics;
-        // 卡片铺满（同 Ghostty）：排不下一整行 / 一整列的余量上下、左右平分（Ghostty 的 window-padding-balance），
-        // 每边最多多出半行，不会全堆在底下、看着像多了一行
+        // 卡片铺满（同 Ghostty）。排不下一整行的余量全放在上面：最后一行（nvim 状态栏）贴着底边，下面只有 4px 内边距、
+        // 铺它自己的颜色；放在底下的话状态栏下面不是多一条深色边，就是颜色铺下去像多了一行。上面那条是终端底色，
+        // 和第一行连成一片看不出来。左右的余量平分（行的底色左右本来就铺到边）
         let origin = bounds.origin
             + point(
-                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale)),
-                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale)),
+                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5)),
+                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1.)),
             );
         self.view.update(cx, |view, _| view.resize(grid, origin));
         (bounds, origin)
@@ -881,8 +883,8 @@ impl Element for TerminalElement {
         let cell_x = |x: usize| origin.x + m.cell_width * x as f32;
         let cell_y = |y: usize| origin.y + m.line_height * y as f32;
 
-        // 内边距延伸：边缘整行有底色时铺进内边距。上下只铺固定的内边距那么高（再往外是平分的余量，用卡片底色）：
-        // 整行往下拉长看着像多了一行（nvim 的状态栏）；左右照旧铺到边（cursorline 之类贴边才自然）
+        // 内边距延伸：边缘整行有底色时铺进内边距。上边只铺固定的内边距那么高（再往上是余量，用卡片底色，
+        // 整行往上拉长看着像多了一行）；下边余量不到一个设备像素，铺到底；左右照旧铺到边（cursorline 之类贴边才自然）
         let ext = &frame.extension;
         let strip = |window: &mut Window, colors: &[Rgb], top: Pixels, height: Pixels, round_top: bool| {
             if colors.is_empty() {
@@ -911,7 +913,7 @@ impl Element for TerminalElement {
             strip(window, top, origin.y - pad, pad, true);
         }
         if let Some(bottom) = &ext.bottom {
-            strip(window, bottom, grid.bottom(), pad, false);
+            strip(window, bottom, grid.bottom(), card.bottom() - grid.bottom(), false);
         }
         for y in 0..frame.rows.len() {
             let row = Bounds::from_corners(point(card.origin.x, cell_y(y)), point(origin.x, cell_y(y + 1)));
@@ -1153,13 +1155,13 @@ mod tests {
     }
 
     #[test]
-    fn leftover_space_is_split_between_both_sides() {
-        // 高 500、行高 18：(500 - 8) / 18 = 27 行，余 6px → 上下各 3px，加 4px 内边距
-        assert_eq!(grid_offset(500., 27, 18., 2.), 7.);
-        // 余 7px：2 倍屏上能放 3.5px；1 倍屏按整像素取 3px（多的 1px 留在下边）
-        assert_eq!(grid_offset(501., 27, 18., 2.), 7.5);
-        assert_eq!(grid_offset(501., 27, 18., 1.), 7.);
+    fn leftover_rows_go_on_top_and_leftover_columns_are_split() {
+        // 高 500、行高 18：(500 - 8) / 18 = 27 行，余 6px 全放上面：最后一行离底边只有 4px 内边距
+        assert_eq!(grid_offset(500., 27, 18., 2., 1.), 10.);
+        // 左右平分；余 7px 时 2 倍屏上能放 3.5px，1 倍屏按整像素取 3px（多的 1px 留在另一边）
+        assert_eq!(grid_offset(501., 27, 18., 2., 0.5), 7.5);
+        assert_eq!(grid_offset(501., 27, 18., 1., 0.5), 7.);
         // 正好排满：只有内边距
-        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2.), 4.);
+        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1.), 4.);
     }
 }
