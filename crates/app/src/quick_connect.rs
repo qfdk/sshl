@@ -41,8 +41,6 @@ pub fn sidebar_order(connections: &[StoredConnection], group_order: &[String]) -
     ordered
 }
 
-/// 按搜索词筛选：空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里（不分大小写）；
-/// 名称以第一个词开头的排前面（敲开头几个字母就能回车），其余保持原顺序。返回下标。
 /// 面板最高时的高度：搜索行 + 分隔线 + 列表上限 380 + 内边距。
 const PANEL_MAX_HEIGHT: f32 = 440.;
 
@@ -53,6 +51,8 @@ pub fn top_offset(window_height: f32) -> f32 {
     (window_height * 0.3).min(window_height - PANEL_MAX_HEIGHT - 24.).max(72.).round()
 }
 
+/// 按搜索词筛选：空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里（不分大小写）；
+/// 名称以第一个词开头的排前面（敲开头几个字母就能回车），其余保持原顺序。返回下标。
 pub fn filter_connections(connections: &[StoredConnection], query: &str) -> Vec<usize> {
     let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut matched: Vec<usize> = connections
