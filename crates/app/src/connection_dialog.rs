@@ -96,7 +96,7 @@ impl ConnectionDialog {
     pub fn new(editing: Option<StoredConnection>, groups: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let value = |f: &dyn Fn(&StoredConnection) -> String| editing.as_ref().map(f).unwrap_or_default();
         let fields = [
-            (Field::Name, value(&|c| c.name.clone()), "我的服务器", false),
+            (Field::Name, value(&|c| c.name.clone()), "不填就用主机地址", false),
             (Field::Group, value(&|c| c.group.clone()), "选择或输入新分组", false),
             (Field::Host, value(&|c| c.host.clone()), "example.com 或 192.168.1.1", false),
             (Field::Port, editing.as_ref().map_or("22".into(), |c| c.port.to_string()), "", false),
@@ -175,12 +175,9 @@ impl ConnectionDialog {
     }
 
     fn form(&self, cx: &gpui::App) -> Result<ConnectionForm, SharedString> {
-        let name = self.text(Field::Name, cx);
         let host = self.text(Field::Host, cx);
+        let name = connection_name(&self.text(Field::Name, cx), &host);
         let username = self.text(Field::Username, cx);
-        if name.trim().is_empty() {
-            return Err("请填写名称".into());
-        }
         if host.trim().is_empty() {
             return Err("请填写主机".into());
         }
@@ -466,6 +463,12 @@ impl ConnectionDialog {
     }
 }
 
+/// 连接的名称：可以不填，不填就用主机地址（主机必填）。
+fn connection_name(name: &str, host: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() { host.trim().to_string() } else { name.to_string() }
+}
+
 /// 在「密码 / 私钥」之间切换后的认证方式。切到私钥时还没填过私钥路径就用自动（免密：按 ~/.ssh/config、
 /// SSH Agent、默认私钥依次试），填过就用那个文件；已经在私钥里（自动或文件）就不变。
 fn switch_auth(current: AuthKind, use_key: bool, has_key_path: bool) -> AuthKind {
@@ -501,7 +504,7 @@ impl Render for ConnectionDialog {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(div().flex().gap_3().child(self.field("名称", None, Field::Name)).child(self.group_field(cx)))
+                            .child(div().flex().gap_3().child(self.field("名称", Some("（可选）"), Field::Name)).child(self.group_field(cx)))
                             .child(div().flex().gap_3().child(self.field("主机", None, Field::Host)).child(div().w(px(96.)).child(self.field("端口", None, Field::Port))))
                             .child(self.field("用户名", None, Field::Username))
                             .child(
@@ -620,6 +623,13 @@ mod tests {
         assert_eq!(first("escape", &group).as_deref(), Some("connection_dialog::GroupDismiss"));
         // 对话框里别的输入框不受影响
         assert_eq!(first("escape", &["Root", "Workspace", "Input"]).as_deref(), Some("test::InputEscape"));
+    }
+
+    #[test]
+    fn a_connection_without_a_name_is_named_after_its_host() {
+        assert_eq!(connection_name("", " 10.0.1.11 "), "10.0.1.11");
+        assert_eq!(connection_name("   ", "example.com"), "example.com");
+        assert_eq!(connection_name(" web-01 ", "10.0.1.11"), "web-01");
     }
 
     #[test]

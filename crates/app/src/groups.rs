@@ -133,14 +133,9 @@ pub fn matches(conn: &StoredConnection, query: &str) -> bool {
     [&conn.name, &conn.host, &conn.username, &conn.group].iter().any(|v| v.to_lowercase().contains(&needle))
 }
 
-/// 名称旁边的主机名：连接就是以主机名命名时不再重复显示一遍。
+/// 标签悬停时提示的主机地址（标签上只显示名字）：名字本身就是主机地址时不再重复提示。
 pub fn distinct_host<'a>(name: &str, host: &'a str) -> &'a str {
     if host.is_empty() || name.trim().eq_ignore_ascii_case(host.trim()) { "" } else { host }
-}
-
-/// 标签上名字旁边的主机地址：标签改过名（`custom`）就不显示——用户自己起的名字已经说明是哪台了；没改名同 `distinct_host`。
-pub fn tab_host<'a>(custom: Option<&str>, name: &str, host: &'a str) -> &'a str {
-    if custom.is_some() { "" } else { distinct_host(name, host) }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -363,10 +358,9 @@ mod tests {
         assert_eq!(distinct_host("fro1.qfdk.me", "fro1.qfdk.me"), "");
         assert_eq!(distinct_host(" FRO2.qfdk.me ", "fro2.qfdk.me"), "");
         assert_eq!(distinct_host("web-01", "10.0.1.11"), "10.0.1.11");
-        // 标签改了名：只显示改的名字，不再带主机地址
-        assert_eq!(tab_host(None, "web-01", "10.0.1.11"), "10.0.1.11");
-        assert_eq!(tab_host(None, "fro1.qfdk.me", "fro1.qfdk.me"), "");
-        assert_eq!(tab_host(Some("生产库"), "web-01", "10.0.1.11"), "");
+        // 标签改了名：悬停照样提示主机地址
+        assert_eq!(distinct_host("生产库", "10.0.1.11"), "10.0.1.11");
+        assert_eq!(distinct_host("web-01", ""), "");
     }
 
     #[test]

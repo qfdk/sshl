@@ -330,7 +330,8 @@ impl Workspace {
                 let id = session.connection_id.clone();
                 let active = self.active.as_deref() == Some(id.as_str());
                 let name = self.tab_name(session);
-                let host: SharedString = self.connection(&id).map(|c| groups::tab_host(session.custom_title.as_deref(), &name, &c.host).to_string()).unwrap_or_default().into();
+                // 标签上只有名字；主机地址悬停时才提示（名字本身就是地址的不重复）
+                let host: SharedString = self.connection(&id).map(|c| groups::distinct_host(&name, &c.host).to_string()).unwrap_or_default().into();
                 let mark = match &self.tab_drop {
                     Some((target, side)) if *target == id => Some(*side),
                     _ => None,
@@ -381,6 +382,7 @@ impl Workspace {
                     })
                     .child(
                         div()
+                            .id(("tab-body", index))
                             .h_full()
                             .flex()
                             .items_center()
@@ -390,16 +392,7 @@ impl Workspace {
                             .when(rename.is_none(), |t| t.cursor_pointer())
                             .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::color(if disconnected { ui::MUTED_FOREGROUND } else { ui::SUCCESS })))
                             .child(label)
-                            .when(active && !host.is_empty(), |t| {
-                                t.child(
-                                    div()
-                                        .truncate()
-                                        .font_family(settings::DEFAULT_FONT_FAMILY)
-                                        .text_size(px(11.))
-                                        .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                        .child(host.clone()),
-                                )
-                            }),
+                            .when(rename.is_none() && !host.is_empty(), |t| t.tooltip(move |window, cx| kit::tooltip(host.clone(), window, cx))),
                     )
                     .child(
                         kit::mini_button(SharedString::from(format!("close-{id}")), Icon::X, close_label, ui::MUTED_FOREGROUND)
