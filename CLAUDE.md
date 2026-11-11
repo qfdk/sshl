@@ -46,7 +46,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   窗口选项 `app_owns_titlebar_drag: true`：AppKit 不再在标题栏高度内自己拖窗口（标签就在那一条里，不设的话拖标签排序时
   整个窗口跟着走，GPUI 层面拦不住；devhook 的合成事件也碰不到 AppKit 这层，测不出来）。所以能拖窗口的地方都要是 drag_region
   （顶栏的上边距算在顶栏里）。拖动区里的标签、按钮外面包 `workspace::controls`（按下不冒泡给拖动区）。
-  没有底部状态栏：内容区到窗口右 / 下边只留 6px（`COLLAPSED_COLUMN_LEFT`），设置按钮在侧栏标题行（+ 和收起按钮之间）。
+  没有底部状态栏：侧栏展开时内容区到窗口右 / 下边留 6px（`CONTENT_EDGE`）；侧栏收起时内容区贴满窗口（终端卡片不画圆角、阴影），
+  只有顶栏两边留 6px。设置按钮在侧栏标题行（+ 和收起按钮之间）。
   侧栏收起（⌘B，`settings.sidebar_collapsed`）= 整个不画，不留图标栏：顶栏和红绿灯同一行，左边让出 `TRAFFIC_LIGHTS_WIDTH`、
   只放展开按钮（新建连接不重复放，标签栏末尾有 +）。收起时焦点在搜索框里就交回内容区——直接问焦点句柄，
   不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。

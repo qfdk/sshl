@@ -736,6 +736,7 @@ impl Render for TerminalView {
                 focused,
                 cursor_on: self.blink_on || !focused,
                 marked: self.marked.clone(),
+                full_bleed: crate::settings::get(cx).sidebar_collapsed,
             })
             .when(self.drop_hover, |d| d.child(drop_hint()))
     }
@@ -816,6 +817,8 @@ struct TerminalElement {
     focused: bool,
     cursor_on: bool,
     marked: Option<String>,
+    /// 侧栏收起、卡片贴满窗口：不画圆角和阴影。
+    full_bleed: bool,
 }
 
 impl IntoElement for TerminalElement {
@@ -860,17 +863,19 @@ impl Element for TerminalElement {
         let frame = self.frame.clone();
         let m = &self.metrics;
         let pad = px(TERMINAL_PADDING);
-        let radius = Corners::all(px(CARD_RADIUS));
+        let radius = Corners::all(px(if self.full_bleed { 0. } else { CARD_RADIUS }));
         let padding_color = if frame.rows.is_empty() { theme::term::BACKGROUND } else { frame.padding };
 
-        window.paint_drop_shadows(
-            card,
-            radius,
-            &[
-                BoxShadow { color: theme::alpha(0x16181d, 0.10), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false },
-                BoxShadow { color: theme::alpha(0x16181d, 0.10), offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.), inset: false },
-            ],
-        );
+        if !self.full_bleed {
+            window.paint_drop_shadows(
+                card,
+                radius,
+                &[
+                    BoxShadow { color: theme::alpha(0x16181d, 0.10), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.), inset: false },
+                    BoxShadow { color: theme::alpha(0x16181d, 0.10), offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.), inset: false },
+                ],
+            );
+        }
         window.paint_quad(quad(card, radius, hsla(padding_color), px(0.), gpui::transparent_black(), BorderStyle::default()));
 
         let origin = card.origin + point(pad, pad);
