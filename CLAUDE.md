@@ -43,6 +43,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **冷启动**：从 `open` 到窗口显示中位 ~300ms（旧 Tauri 版 ~600ms）。启动路径上别加同步 IO、字体枚举、网络；
   系统字体列表只在设置对话框里后台加载。启动时不主动激活应用（Finder / Dock 打开时系统会激活）。
 - **窗口**：透明标题栏，红绿灯在侧栏顶部单独一行；拖动区用 `workspace::drag_region`（按下移动窗口、双击缩放）。
+  拖动区里的标签、按钮外面包 `workspace::controls`（按下不冒泡给拖动区），否则拖标签排序时整个窗口跟着走。
+  没有底部状态栏：内容区到窗口右 / 下边只留 6px（`COLLAPSED_COLUMN_LEFT`），设置按钮在侧栏标题行（+ 和收起按钮之间）。
   侧栏收起（⌘B，`settings.sidebar_collapsed`）= 整个不画，不留图标栏：顶栏和红绿灯同一行，左边让出 `TRAFFIC_LIGHTS_WIDTH`、
   只放展开按钮（新建连接不重复放，标签栏末尾有 +）。收起时焦点在搜索框里就交回内容区——直接问焦点句柄，
   不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。
@@ -58,7 +60,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，
   core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
   （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。
-- **终端外观**：卡片按整行整列贴齐（余下不足一行 / 一列留给外面的浅色背景），四边 4px 内边距；内边距取边缘格子的主色
+- **终端外观**：卡片铺满内容区（余下不足一行 / 一列的留在卡片里，算右 / 下内边距），四边至少 4px 内边距；内边距取边缘格子的主色
   并把整行有底色的边缘行延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
   不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
   粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。

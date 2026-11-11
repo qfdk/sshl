@@ -12,7 +12,7 @@ use crate::groups::{self, Side};
 use crate::settings;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
-use crate::workspace::{ConnectionMenu, DraggedConnection, DropTarget, Workspace, drag_region};
+use crate::workspace::{ConnectionMenu, DraggedConnection, DropTarget, Workspace, controls, drag_region};
 
 pub(crate) struct DragPreview(pub(crate) SharedString);
 
@@ -70,6 +70,15 @@ impl Workspace {
             .tooltip(|window, cx| kit::tooltip("新建连接  ⌘N".into(), window, cx))
             .child(kit::icon(Icon::Plus))
             .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx)));
+        // 设置放在标题行（原来单独占侧栏底部一行，底部状态栏去掉后那一行只剩它）
+        let settings = kit::button("open-settings", Variant::Ghost)
+            .w(px(32.))
+            .h(px(32.))
+            .px_0()
+            .aria_label("设置")
+            .tooltip(|window, cx| kit::tooltip("设置  ⌘,".into(), window, cx))
+            .child(kit::icon(Icon::Settings))
+            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         div()
             .w(px(240.))
             .h_full()
@@ -91,7 +100,7 @@ impl Workspace {
                     .gap_2()
                     .child(img(APP_ICON).size(px(APP_ICON_SIZE)).m(px(-3.)))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("SSHL"))
-                    .child(div().ml_auto().flex().items_center().gap_1().child(new_connection).child(sidebar_toggle_button(false, cx))),
+                    .child(controls("sidebar-actions").ml_auto().flex().items_center().gap_1().child(new_connection).child(settings).child(sidebar_toggle_button(false, cx))),
             )
             .child(
                 div().px_3().pb_2().child(
@@ -109,23 +118,6 @@ impl Workspace {
                 ),
             )
             .child(div().mt_1().flex_1().min_h_0().child(self.connection_list(window, cx)))
-            .child(
-                div().mt_auto().flex_shrink_0().px_3().py_2().child(
-                    kit::button("open-settings", Variant::Ghost)
-                        .h(px(32.))
-                        .w_full()
-                        .justify_start()
-                        .px_2()
-                        .gap(px(8.))
-                        .aria_label("设置")
-                        .tooltip(|window, cx| kit::tooltip("设置  ⌘,".into(), window, cx))
-                        .text_size(px(13.))
-                        .text_color(theme::color(ui::MUTED_FOREGROUND))
-                        .child(kit::icon(Icon::Settings))
-                        .child("设置")
-                        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-                ),
-            )
             .into_any_element()
     }
 

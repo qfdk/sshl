@@ -850,12 +850,9 @@ impl Element for TerminalElement {
         let pad = px(TERMINAL_PADDING);
         let origin = bounds.origin + point(pad, pad);
         self.view.update(cx, |view, _| view.resize(grid, origin));
-        // 卡片吸附整行整列：只占排下整数行列 + 内边距的大小
-        let card = size(
-            self.metrics.cell_width * f32::from(grid.cols) + pad * 2.,
-            self.metrics.line_height * f32::from(grid.rows) + pad * 2.,
-        );
-        Bounds::new(bounds.origin, card)
+        // 卡片铺满：排不下一整行 / 一整列的余量留在卡片里（右、下内边距多出来的那点），用边缘色补齐，
+        // 不留成卡片外面的浅色边（那样底边会比其他边宽出最多一行高）
+        bounds
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), card: &mut Bounds<Pixels>, window: &mut Window, cx: &mut App) {
