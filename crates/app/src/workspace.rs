@@ -220,7 +220,11 @@ impl Workspace {
         let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
         let favorite_panel = cx.new(|cx| FavoritePanel::new(window, cx));
         let quick_connect = cx.new(|cx| QuickConnect::new(window, cx));
+        sync_appearance(window, cx);
         let subscriptions = vec![
+            // 界面外观：设置里改了（预览、保存、不保存还原）或者系统在浅色 / 深色之间切了，都重新定一次
+            cx.observe_global_in::<settings::Settings>(window, |_, window, cx| sync_appearance(window, cx)),
+            cx.observe_window_appearance(window, |_, window, cx| sync_appearance(window, cx)),
             // 窗口退到后台（⌘ 点链接后浏览器抢了前台）：之后松开 ⌘ 我们收不到，角标不能一直挂着
             cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
@@ -1452,7 +1456,7 @@ impl Render for Workspace {
         let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
         // 没会话时的空页面看着像个空终端：底色跟着配色，提示字在浅底上换成深灰
         let palette = settings::get(cx).terminal_theme();
-        let empty_hint = if palette.is_light() { ui::MUTED_FOREGROUND } else { 0xcbd5e1 };
+        let empty_hint: u32 = if palette.is_light() { 0x5b6270 } else { 0xcbd5e1 };
         div()
             .size_full()
             .relative()
@@ -1631,6 +1635,15 @@ impl Workspace {
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// 按设置和系统外观定界面是浅色还是深色。变了才动：换掉 gpui-base 的颜色（输入框的字、光标）并重画。
+fn sync_appearance(window: &Window, cx: &mut App) {
+    let dark = settings::get(cx).appearance.is_dark(window.appearance());
+    if theme::set_dark(dark) {
+        gpui_base::Theme::global_mut(cx).tokens = theme::base_tokens(dark);
+        cx.refresh_windows();
     }
 }
 

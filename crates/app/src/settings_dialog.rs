@@ -18,6 +18,7 @@ use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Settings};
 use crate::sidebar::DragPreview;
 use crate::terminal::frame::Rgb;
 use crate::theme::term::{self, Theme};
+use crate::theme::Appearance;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
 
@@ -57,6 +58,7 @@ fn presets(installed: &[String]) -> Vec<Preset> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Font,
+    Appearance,
     Groups,
 }
 
@@ -207,6 +209,7 @@ impl SettingsDialog {
             copy_on_select: snapshot.copy_on_select,
             right_click_paste: snapshot.right_click_paste,
             terminal_theme: snapshot.terminal_theme,
+            appearance: snapshot.appearance,
             ..current.clone()
         };
         if restored != current {
@@ -366,6 +369,7 @@ impl Render for SettingsDialog {
         };
         let panel = match self.tab {
             Tab::Font => self.font_panel(window, cx),
+            Tab::Appearance => self.appearance_panel(cx),
             Tab::Groups => self.groups_panel(window, cx),
         };
         let body = div()
@@ -411,6 +415,7 @@ impl Render for SettingsDialog {
                             .border_r_1()
                             .border_color(theme::color(ui::BORDER))
                             .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, "终端", self.tab == Tab::Font, cx))
+                            .child(tab_button("settings-tab-appearance", Tab::Appearance, Icon::Moon, "外观", self.tab == Tab::Appearance, cx))
                             .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, "分组管理", self.tab == Tab::Groups, cx)),
                     )
                     // 窗口矮（最小 600）时「终端」这页放不下：右边这块自己滚动，标题栏和保存按钮不会被挤出窗口
@@ -651,6 +656,43 @@ impl SettingsDialog {
                 });
                 cx.notify();
             }))
+    }
+
+    /// 界面外观：点了立刻换（预览），保存才记住；和「终端」页共用一套保存 / 不保存还原。
+    fn appearance_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let current = settings::get(cx).appearance;
+        let entity = cx.entity();
+        let options = [
+            (Appearance::System, None, SharedString::from("跟随系统")),
+            (Appearance::Light, None, "浅色".into()),
+            (Appearance::Dark, None, "深色".into()),
+        ];
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(kit::field_label("界面外观"))
+                    .child(div().w(px(300.)).child(kit::segmented("appearance", &options, current, move |value, _, cx| {
+                        settings::preview(cx, |s| s.appearance = value);
+                        entity.update(cx, |_, cx| cx.notify());
+                    })))
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child("终端里的颜色不跟着变，在「终端」页的配色里选")),
+            )
+            .child(
+                div()
+                    .pt_3()
+                    .flex()
+                    .justify_end()
+                    .border_t_1()
+                    .border_color(theme::color(ui::BORDER))
+                    .child(kit::labeled_button("appearance-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
+            )
+            .into_any_element()
     }
 
     fn groups_panel(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {

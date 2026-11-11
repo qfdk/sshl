@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 
-use crate::theme::term;
+use crate::theme::{Appearance, term};
 
 pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
@@ -28,6 +28,8 @@ pub struct Settings {
     pub right_click_paste: bool,
     /// 终端配色的 id（`theme::term::THEMES`）。不认识的按默认显示，存的值不动。
     pub terminal_theme: String,
+    /// 界面外观：跟随系统 / 浅色 / 深色（终端里的颜色归 `terminal_theme` 管）。
+    pub appearance: Appearance,
 }
 
 impl Default for Settings {
@@ -42,6 +44,7 @@ impl Default for Settings {
             copy_on_select: false,
             right_click_paste: false,
             terminal_theme: term::DEFAULT_ID.into(),
+            appearance: Appearance::System,
         }
     }
 }
@@ -250,6 +253,16 @@ mod tests {
         assert_eq!(s.terminal_theme, "no-such-theme");
         assert_eq!(s.terminal_theme().id, "carbonfox");
         assert!(serde_json::to_string(&s).unwrap().contains(r#""terminalTheme":"no-such-theme""#), "写盘时不改写");
+    }
+
+    #[test]
+    fn the_appearance_defaults_to_the_system_and_round_trips() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert_eq!(old.appearance, Appearance::System, "旧设置里没有这一项：跟随系统");
+        let s = Settings { appearance: Appearance::Dark, ..Settings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""appearance":"dark""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().appearance, Appearance::Dark);
     }
 
     #[test]

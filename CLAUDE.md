@@ -99,6 +99,14 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   改默认前景 / 背景 / 光标和调色板前 16 色（程序用 OSC 改过的照留），libghostty 因此把整屏标脏，下一帧所有行重建：格子里存的是
   「默认色 / 第几号色」，屏幕上和回滚历史里的字都跟着变，真彩色不变。选区色不在 libghostty 里，`Painter.theme` 跟着换。
   终端没出第一帧时的底色、没会话时的空页面、设置里的字体预览也跟着配色；输入法组字用帧里的 `Frame.foreground` / `background`。
+- **界面外观**（设置 →「外观」页：跟随系统 / 浅色 / 深色，`settings.appearance`，默认跟随系统）：和终端配色是两回事，只管侧栏、顶栏、文件管理、系统页、对话框。
+  `theme::ui` 里每个颜色角色是一个 `Token`（亮、深两个值），`theme::color` / `alpha` 画的时候按当前外观取；写死的 `0xRRGGBB` 也能传，不跟着变
+  （只用在跟着终端配色走的地方，比如空页面的提示字）。新颜色一律加成 `Token`，别在界面代码里写死十六进制。
+  深色的层次是反的：窗口底（`SHELL`）最暗，卡片亮一点，浮起来的东西再亮一点——所以分段控件的选中项用 `RAISED`、描边按钮用 `CONTROL` / `CONTROL_BORDER`，
+  不是 `CARD`（深色下 `CARD` 比槽还暗；描边按钮用 `CARD` 的话在深底上只剩一块暗影，用户看着比旁边的主按钮小）。气泡提示用 `TOOLTIP`。
+  当前是不是深色记在 `theme` 的一个静态开关里，`workspace::sync_appearance` 在启动、设置变了（预览 / 保存 / 还原）、系统外观变了时重新定，
+  变了就换掉 gpui-base 的 token（输入框的字、占位字、光标从那里取）并重画所有窗口。测试盯着两种外观下的文字对比度。
+  devhook 的 `appearance dark|light|system` 只改内存里的外观，看深色界面用；注意别的操作触发 `settings::update` 时会把它一起写盘，测完检查设置文件。
 - **内置字体**：JetBrainsMono Nerd Font（非 Mono 版，图标是正常大小；Mono 版把图标压成一格，用户嫌不好看）两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
 - **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的
   text_color、不继承，别直接用。图标在 `assets.rs` 的 `icons!` 表里登记。
@@ -195,7 +203,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   点了过去、悬停的 × 直接删（不用先进那个目录）、↑↓ ↵ 可选，一敲字换成子目录补全。文件管理里不另放收藏按钮 / 菜单（顶栏那个星星是全局入口）。
   地址栏的两个下拉都包在 `deferred` 里画，否则会被后面的表头和文件行盖住。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
-- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色）。首次启动从旧版 WebView 的
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观）。首次启动从旧版 WebView 的
   localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
 - **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
   （填充密码由后端解密直接写通道）。

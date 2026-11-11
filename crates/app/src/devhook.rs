@@ -195,6 +195,17 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             window.dispatch_event(PlatformInput::FileDrop(gpui::FileDropEvent::Pending { position: at }), cx);
             Ok(())
         }
+        // appearance dark | light | system：只改内存里的界面外观（不写设置文件），看深色界面用
+        "appearance" => {
+            let appearance = match rest.trim() {
+                "dark" => crate::theme::Appearance::Dark,
+                "light" => crate::theme::Appearance::Light,
+                "system" => crate::theme::Appearance::System,
+                other => return Err(format!("appearance {other}：只认 dark / light / system")),
+            };
+            crate::settings::preview(cx, |s| s.appearance = appearance);
+            Ok(())
+        }
         "selection" => {
             window.dispatch_action(Box::new(crate::terminal::view::LogSelection), cx);
             Ok(())

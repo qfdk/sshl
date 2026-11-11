@@ -1,49 +1,140 @@
 //! 设计稿 B「纸页」：浅灰窗口底（shell）上放白色卡片，主色为蓝（色相 251°，加深到白字可读 4.66:1）。
-//! 数值由旧界面 index.css 的 oklch 换算成 sRGB。
+//! 亮色数值由旧界面 index.css 的 oklch 换算成 sRGB；深色是同一套角色的另一组值（`ui::Token` 一个角色两个值）。
 
-use gpui::{Hsla, rgb};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-pub fn color(hex: u32) -> Hsla {
-    rgb(hex).into()
+use gpui::{Hsla, WindowAppearance, rgb};
+use serde::{Deserialize, Serialize};
+
+/// 界面现在是不是深色。只在界面线程改（`set_dark`），画的时候读。
+static DARK: AtomicBool = AtomicBool::new(false);
+
+pub fn is_dark() -> bool {
+    DARK.load(Ordering::Relaxed)
 }
 
-pub fn alpha(hex: u32, a: f32) -> Hsla {
-    let mut c: Hsla = rgb(hex).into();
+/// 返回有没有变。变了之后调用方要重画窗口、把 gpui-base 的 token 换掉（`base_tokens`）。
+pub fn set_dark(dark: bool) -> bool {
+    DARK.swap(dark, Ordering::Relaxed) != dark
+}
+
+/// 设置里的「外观」。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// 跟随系统的浅色 / 深色。
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub fn is_dark(self, system: WindowAppearance) -> bool {
+        match self {
+            Appearance::System => matches!(system, WindowAppearance::Dark | WindowAppearance::VibrantDark),
+            Appearance::Light => false,
+            Appearance::Dark => true,
+        }
+    }
+}
+
+/// 能当颜色用的：`ui` 里的角色（跟着外观变），或者写死的 0xRRGGBB（不变）。
+pub trait Tone {
+    fn hex(self) -> u32;
+}
+
+impl Tone for u32 {
+    fn hex(self) -> u32 {
+        self
+    }
+}
+
+impl Tone for ui::Token {
+    fn hex(self) -> u32 {
+        self.resolve(is_dark())
+    }
+}
+
+pub fn color(tone: impl Tone) -> Hsla {
+    rgb(tone.hex()).into()
+}
+
+pub fn alpha(tone: impl Tone, a: f32) -> Hsla {
+    let mut c: Hsla = rgb(tone.hex()).into();
     c.a = a;
     c
 }
 
-/// gpui-base 行为层用到的主题色。输入框的选区取强调色的 40%：它默认的强调色是近白的浅灰，
-/// 画在白底输入框上看不出选中了什么，换成主色蓝。
-pub fn base_tokens() -> gpui_base::SemanticThemeTokens {
+/// gpui-base 行为层用到的主题色：输入框的字、占位字、光标取这里的前景色。输入框的选区取强调色的 40%：
+/// 它默认的强调色是近白的浅灰，画在白底输入框上看不出选中了什么，换成主色蓝。
+pub fn base_tokens(dark: bool) -> gpui_base::SemanticThemeTokens {
+    let pick = |token: ui::Token| -> Hsla { rgb(token.resolve(dark)).into() };
     let mut tokens = gpui_base::SemanticThemeTokens::default();
-    tokens.colors.accent = color(ui::PRIMARY);
+    if dark {
+        tokens.colors = gpui_base::ColorTokens::dark();
+        tokens.colors.background = pick(ui::SHELL);
+        tokens.colors.surface = pick(ui::CARD);
+        tokens.colors.foreground = pick(ui::FOREGROUND);
+        tokens.colors.surface_foreground = pick(ui::FOREGROUND);
+        tokens.colors.muted_foreground = pick(ui::MUTED_FOREGROUND);
+        tokens.colors.border = pick(ui::BORDER);
+    }
+    tokens.colors.accent = pick(ui::PRIMARY);
     tokens
 }
 
-/// 界面颜色（亮色）。
+/// 界面颜色：每个角色一对值（亮色、深色）。
 pub mod ui {
-    pub const SHELL: u32 = 0xf3f4f6;
-    pub const CARD: u32 = 0xffffff;
-    pub const FOREGROUND: u32 = 0x020618;
-    pub const PRIMARY: u32 = 0x2777c3;
-    pub const PRIMARY_FOREGROUND: u32 = 0xf9fafb;
-    pub const SECONDARY: u32 = 0xe6e8ec;
-    pub const MUTED: u32 = 0xf1f5f9;
-    pub const MUTED_FOREGROUND: u32 = 0x5b6270;
-    pub const ACCENT: u32 = 0xe5f0fd;
-    pub const ACCENT_FOREGROUND: u32 = 0x1d4975;
-    pub const DESTRUCTIVE: u32 = 0xe7000b;
-    pub const SUCCESS: u32 = 0x11b981;
-    pub const WARNING: u32 = 0xd97706;
-    /// 成功 / 警告色做文字时用深一号的（原色在白底上对比度不够）。
-    pub const SUCCESS_FOREGROUND: u32 = 0x047857;
-    pub const WARNING_FOREGROUND: u32 = 0xb45309;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Token {
+        light: u32,
+        dark: u32,
+    }
+
+    impl Token {
+        pub const fn resolve(self, dark: bool) -> u32 {
+            if dark { self.dark } else { self.light }
+        }
+    }
+
+    const fn token(light: u32, dark: u32) -> Token {
+        Token { light, dark }
+    }
+
+    /// 窗口底（侧栏、顶栏）。深色时比卡片更暗。
+    pub const SHELL: Token = token(0xf3f4f6, 0x17181b);
+    pub const CARD: Token = token(0xffffff, 0x222327);
+    /// 槽里浮起来的那一块（分段控件的选中项）：亮色是白卡片，深色要比槽亮。
+    pub const RAISED: Token = token(0xffffff, 0x41444c);
+    pub const FOREGROUND: Token = token(0x020618, 0xe8eaee);
+    /// 主色：既做按钮底（上面是白字），也做文字 / 图标。深色时提亮到在深卡片上看得清，白字还读得出。
+    pub const PRIMARY: Token = token(0x2777c3, 0x3d8bdb);
+    pub const PRIMARY_FOREGROUND: Token = token(0xf9fafb, 0xffffff);
+    pub const SECONDARY: Token = token(0xe6e8ec, 0x2d2f35);
+    pub const MUTED: Token = token(0xf1f5f9, 0x2a2c31);
+    pub const MUTED_FOREGROUND: Token = token(0x5b6270, 0x9ba1ad);
+    pub const ACCENT: Token = token(0xe5f0fd, 0x213b58);
+    pub const ACCENT_FOREGROUND: Token = token(0x1d4975, 0xbddafa);
+    pub const DESTRUCTIVE: Token = token(0xe7000b, 0xf0535b);
+    pub const SUCCESS: Token = token(0x11b981, 0x11b981);
+    pub const WARNING: Token = token(0xd97706, 0xe08a1a);
+    /// 成功 / 警告色做文字时：亮色用深一号的（原色在白底上对比度不够），深色用亮一号的。
+    pub const SUCCESS_FOREGROUND: Token = token(0x047857, 0x34d399);
+    pub const WARNING_FOREGROUND: Token = token(0xb45309, 0xfbbf24);
     /// 「系统」页区分指标用：内存紫、磁盘青绿。
-    pub const VIOLET: u32 = 0x7c3aed;
-    pub const TEAL: u32 = 0x0f766e;
-    pub const BORDER: u32 = 0xe2e8f0;
-    pub const RING: u32 = 0x5695d7;
+    pub const VIOLET: Token = token(0x7c3aed, 0xa78bfa);
+    pub const TEAL: Token = token(0x0f766e, 0x2dd4bf);
+    pub const BORDER: Token = token(0xe2e8f0, 0x34373d);
+    /// 没勾的复选框的边：比普通边框深一号，在卡片上认得出是个框。
+    pub const CHECK_BORDER: Token = token(0xcbd5e1, 0x555963);
+    /// 描边按钮（取消、还原默认）：亮色是白底细边；深色时底和边都比卡片亮一号，不然在深底上只剩一块更暗的影子，看着比旁边的主按钮小。
+    pub const CONTROL: Token = token(0xffffff, 0x33363d);
+    pub const CONTROL_BORDER: Token = token(0xe2e8f0, 0x4a4e57);
+    pub const RING: Token = token(0x5695d7, 0x5695d7);
+    /// 气泡提示：亮色是深底浅字，深色是比卡片亮一号的底。
+    pub const TOOLTIP: Token = token(0x020618, 0x41444c);
+    pub const TOOLTIP_FOREGROUND: Token = token(0xf9fafb, 0xf4f5f7);
 }
 
 /// 终端配色：内置几套，设置里选（`Settings::terminal_theme` 存 id）。默认是对齐用户 Ghostty 配置的 Carbonfox 改版。
@@ -301,13 +392,65 @@ mod tests {
 
     #[test]
     fn input_selection_is_visible_on_a_white_field() {
-        let selection = InputEditorStyle::default().resolved(&base_tokens()).selection;
+        let selection = InputEditorStyle::default().resolved(&base_tokens(false)).selection;
         let field = color(ui::CARD);
         let contrast = (luminance(field.into()) + 0.05) / (luminance(over(selection, field)) + 0.05);
         assert!(contrast > 1.4, "选区和输入框底色分不出来：对比度 {contrast}");
         // 选区下的字还要看得清
         let text = (luminance(over(selection, field)) + 0.05) / (luminance(color(ui::FOREGROUND).into()) + 0.05);
         assert!(text > 7., "选区里的字不清楚：对比度 {text}");
+    }
+
+    fn ui_contrast(a: ui::Token, b: ui::Token, dark: bool) -> f32 {
+        let l = |t: ui::Token| luminance(gpui::rgb(t.resolve(dark)));
+        let (a, b) = (l(a), l(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn the_appearance_setting_decides_light_or_dark() {
+        use gpui::WindowAppearance::{Dark, Light, VibrantDark, VibrantLight};
+        assert!(!Appearance::System.is_dark(Light) && !Appearance::System.is_dark(VibrantLight));
+        assert!(Appearance::System.is_dark(Dark) && Appearance::System.is_dark(VibrantDark), "跟随系统");
+        assert!(!Appearance::Light.is_dark(Dark), "定了浅色就不看系统");
+        assert!(Appearance::Dark.is_dark(Light), "定了深色就不看系统");
+    }
+
+    /// 两种外观下字都看得清：正文 7:1、次要文字 4.5:1（卡片和窗口底上都要），主色 / 红色做字和按钮上的白字 3:1 以上。
+    #[test]
+    fn both_appearances_keep_text_readable() {
+        for dark in [false, true] {
+            let name = if dark { "深色" } else { "浅色" };
+            for surface in [ui::CARD, ui::SHELL, ui::MUTED] {
+                let text = ui_contrast(ui::FOREGROUND, surface, dark);
+                assert!(text >= 7., "{name}：正文只有 {text:.2}:1");
+                let muted = ui_contrast(ui::MUTED_FOREGROUND, surface, dark);
+                assert!(muted >= 4.5, "{name}：次要文字只有 {muted:.2}:1");
+            }
+            for accent in [ui::PRIMARY, ui::DESTRUCTIVE] {
+                let on_card = ui_contrast(accent, ui::CARD, dark);
+                assert!(on_card >= 3., "{name}：强调色在卡片上只有 {on_card:.2}:1");
+                let label = ui_contrast(ui::PRIMARY_FOREGROUND, accent, dark);
+                assert!(label >= 3., "{name}：按钮上的字只有 {label:.2}:1");
+            }
+            let hover = ui_contrast(ui::ACCENT_FOREGROUND, ui::ACCENT, dark);
+            assert!(hover >= 4.5, "{name}：悬停行上的字只有 {hover:.2}:1");
+            let tip = ui_contrast(ui::TOOLTIP_FOREGROUND, ui::TOOLTIP, dark);
+            assert!(tip >= 7., "{name}：气泡提示的字只有 {tip:.2}:1");
+        }
+    }
+
+    /// 深色时层次反过来：窗口底最暗，卡片亮一点，浮起来的选中项和描边按钮再亮一点。
+    #[test]
+    fn dark_surfaces_get_lighter_as_they_rise() {
+        let l = |t: ui::Token| luminance(gpui::rgb(t.resolve(true)));
+        assert!(l(ui::SHELL) < l(ui::CARD));
+        assert!(l(ui::CARD) < l(ui::CONTROL) && l(ui::CONTROL) < l(ui::CONTROL_BORDER));
+        assert!(l(ui::SECONDARY) < l(ui::RAISED), "分段控件的选中项要比槽亮");
+        // 输入框里的字跟着外观走
+        let tokens = base_tokens(true);
+        assert_eq!(tokens.colors.foreground, color(ui::FOREGROUND.resolve(true)));
+        assert_eq!(base_tokens(false).colors.accent, color(ui::PRIMARY.resolve(false)));
     }
 
     fn contrast(a: Rgb, b: Rgb) -> f32 {

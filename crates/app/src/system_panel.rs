@@ -258,7 +258,7 @@ pub fn filter_services<'a>(services: &'a [ServiceInfo], query: &str, sort: (Serv
 }
 
 /// 服务的状态文字和颜色。
-pub fn service_status(service: &ServiceInfo) -> (&'static str, u32) {
+pub fn service_status(service: &ServiceInfo) -> (&'static str, ui::Token) {
     match (service.active.as_str(), service.sub.as_str()) {
         ("failed", _) => ("失败", ui::DESTRUCTIVE),
         // 一次性服务（防火墙规则、AppArmor）跑完退出但仍算启用
@@ -272,7 +272,7 @@ pub fn service_status(service: &ServiceInfo) -> (&'static str, u32) {
 }
 
 /// 用量比例 → 颜色：≥ 90% 红、≥ 75% 橙，其余用这项指标自己的颜色。
-pub fn usage_color(ratio: f32, base: u32) -> u32 {
+pub fn usage_color(ratio: f32, base: ui::Token) -> ui::Token {
     if ratio >= 0.9 {
         ui::DESTRUCTIVE
     } else if ratio >= 0.75 {
@@ -283,7 +283,7 @@ pub fn usage_color(ratio: f32, base: u32) -> u32 {
 }
 
 /// 进程 CPU%（一个核满载是 100）→ 颜色：≥ 50 红、≥ 20 橙，其余绿。
-pub fn cpu_color(cpu: f32) -> u32 {
+pub fn cpu_color(cpu: f32) -> ui::Token {
     if cpu >= 50. {
         ui::DESTRUCTIVE
     } else if cpu >= 20. {
@@ -294,7 +294,7 @@ pub fn cpu_color(cpu: f32) -> u32 {
 }
 
 /// 状态色做文字时用的颜色（绿、橙换深一号）。
-pub fn readable(color: u32) -> u32 {
+pub fn readable(color: ui::Token) -> ui::Token {
     match color {
         ui::SUCCESS => ui::SUCCESS_FOREGROUND,
         ui::WARNING => ui::WARNING_FOREGROUND,
@@ -616,7 +616,7 @@ impl SystemPanel {
     fn overview_cards(&self) -> impl IntoElement {
         let o = self.overview.clone().unwrap_or_default();
         // 每项指标一个颜色（图标底色、进度条）；用量高了进度条和百分比变橙 / 红
-        let card = |glyph: Icon, color: u32, title: &'static str, value: String, sub: Option<String>, ratio: Option<f32>| {
+        let card = |glyph: Icon, color: ui::Token, title: &'static str, value: String, sub: Option<String>, ratio: Option<f32>| {
             div()
                 .flex_1()
                 .min_w_0()
@@ -892,7 +892,7 @@ impl SystemPanel {
 
 impl SystemPanel {
     /// 行尾悬停才出现的文字按钮（结束、启动、停止…）。
-    fn hover_button(id: (&'static str, usize), label: &'static str, aria: String, color: u32) -> gpui::Stateful<gpui::Div> {
+    fn hover_button(id: (&'static str, usize), label: &'static str, aria: String, color: ui::Token) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .role(Role::Button)
@@ -921,7 +921,7 @@ impl SystemPanel {
                 let busy = self.busy.as_deref() == Some(service.unit.as_str());
                 let (status, color) = if busy { ("处理中…", ui::WARNING) } else { service_status(&service) };
                 let running = service.is_running();
-                let button = |id: &'static str, action: ServiceAction, color: u32, cx: &mut Context<Self>| {
+                let button = |id: &'static str, action: ServiceAction, color: ui::Token, cx: &mut Context<Self>| {
                     let target = service.clone();
                     Self::hover_button((id, ix), action_label(action), format!("{} {name}", action_label(action)), color).on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
@@ -1003,7 +1003,7 @@ impl SystemPanel {
 }
 
 /// 带底色的小标签（协议、地址范围、服务状态）。
-fn pill(text: u32, background: gpui::Hsla) -> gpui::Div {
+fn pill(text: ui::Token, background: gpui::Hsla) -> gpui::Div {
     div()
         .flex_shrink_0()
         .px(px(6.))

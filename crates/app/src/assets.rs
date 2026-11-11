@@ -58,6 +58,7 @@ icons! {
     Server => "server",
     Settings => "settings",
     SquareTerminal => "square-terminal",
+    Moon => "moon",
     Star => "star",
     StarFilled => "star-filled",
     Trash => "trash-2",

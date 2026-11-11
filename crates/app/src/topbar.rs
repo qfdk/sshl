@@ -602,7 +602,7 @@ impl Workspace {
 }
 
 /// 延迟的显示：< 100ms 绿、≤ 200ms 黄、更慢或超时红。
-pub(crate) fn latency_text(rtt: Option<std::time::Duration>) -> (String, u32) {
+pub(crate) fn latency_text(rtt: Option<std::time::Duration>) -> (String, ui::Token) {
     match rtt {
         None => ("超时".into(), ui::DESTRUCTIVE),
         Some(rtt) => {

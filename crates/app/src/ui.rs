@@ -105,8 +105,8 @@ pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
             .hover(|s| s.bg(theme::alpha(ui::DESTRUCTIVE, 0.9))),
         Variant::Outline => base
             .border_1()
-            .border_color(theme::color(ui::BORDER))
-            .bg(theme::color(ui::CARD))
+            .border_color(theme::color(ui::CONTROL_BORDER))
+            .bg(theme::color(ui::CONTROL))
             .text_color(theme::color(ui::FOREGROUND))
             .shadow_xs()
             .hover(|s| s.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND))),
@@ -132,7 +132,7 @@ pub fn icon_button(id: impl Into<ElementId>, variant: Variant, glyph: Icon, titl
 }
 
 /// 小号图标按钮（行内操作，26px）。
-pub fn mini_button(id: impl Into<ElementId>, glyph: Icon, title: impl Into<SharedString>, color: u32) -> Stateful<Div> {
+pub fn mini_button(id: impl Into<ElementId>, glyph: Icon, title: impl Into<SharedString>, color: ui::Token) -> Stateful<Div> {
     let title = title.into();
     div()
         .id(id)
@@ -162,8 +162,8 @@ impl gpui::Render for Tooltip {
             .px_2()
             .py_1()
             .rounded(px(6.))
-            .bg(theme::color(ui::FOREGROUND))
-            .text_color(theme::color(ui::PRIMARY_FOREGROUND))
+            .bg(theme::color(ui::TOOLTIP))
+            .text_color(theme::color(ui::TOOLTIP_FOREGROUND))
             .text_size(px(12.))
             .child(self.0.clone())
     }
@@ -206,7 +206,7 @@ pub fn checkbox(id: impl Into<ElementId>, checked: bool) -> Stateful<Div> {
                     .text_color(theme::color(ui::PRIMARY_FOREGROUND))
                     .child(icon_sized(Icon::Check, 12.))
             } else {
-                b.bg(theme::color(ui::CARD)).border_color(theme::color(0xcbd5e1))
+                b.bg(theme::color(ui::CARD)).border_color(theme::color(ui::CHECK_BORDER))
             }
         })
 }
@@ -248,7 +248,7 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
                 .cursor_pointer()
                 .map(|t| {
                     if active {
-                        t.bg(theme::color(ui::CARD)).font_weight(FontWeight::MEDIUM).shadow_xs()
+                        t.bg(theme::color(ui::RAISED)).font_weight(FontWeight::MEDIUM).shadow_xs()
                     } else {
                         t.text_color(theme::color(ui::MUTED_FOREGROUND)).hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
                     }
