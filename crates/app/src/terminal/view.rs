@@ -252,7 +252,7 @@ pub struct TerminalView {
     /// 搜索条（⌘F）的输入框；`search_open` 时显示在右上角。
     search: Entity<InputState>,
     search_open: bool,
-    _search_subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
     /// 按住 ⌘ 时鼠标下的纯文本网址（画下划线、手形光标）。
     hover_link: Option<Link>,
     /// 鼠标最近一次在终端上的位置（窗口坐标）；移出终端是 None。按下 / 松开 ⌘ 时据此重新找链接。
@@ -384,6 +384,15 @@ impl TerminalView {
             }
         });
 
+        // 窗口退到后台（⌘ 点链接后浏览器抢了前台）：之后松开 ⌘ 我们收不到，回来时下划线不能还留着
+        let activation = cx.observe_window_activation(window, |view, window, cx| {
+            if !window.is_window_active() {
+                view.cmd_down = false;
+                view.link_press = false;
+                view.update_hover_link(cx);
+            }
+        });
+
         let view = Self {
             handle,
             shell,
@@ -406,7 +415,7 @@ impl TerminalView {
             scroll_remainder: 0.0,
             search,
             search_open: false,
-            _search_subscription: search_subscription,
+            _subscriptions: vec![search_subscription, activation],
             hover_link: None,
             pointer: None,
             cmd_down: false,

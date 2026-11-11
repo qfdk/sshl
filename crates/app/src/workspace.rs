@@ -389,6 +389,10 @@ impl Workspace {
 
     /// ⌘T：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
     pub(crate) fn new_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 对话框 / 提示框开着时 ⌘T 不在背后开标签
+        if self.modal_open(cx) {
+            return;
+        }
         let cwd = self.active_session().filter(|s| s.local).and_then(|s| s.view.read(cx).local_cwd());
         let metrics = Metrics::measure(window, cx);
         let area = self.terminal_area.map(|b| b.size).unwrap_or_else(|| window.viewport_size());
@@ -429,18 +433,29 @@ impl Workspace {
 
     /// ⌘⇧] / ⌘⇧[：切到右 / 左边的标签（两头绕回）。
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dismiss_panels_for_shortcut(cx) {
+            return;
+        }
         let ids: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
         if let Some(next) = groups::cycle_tab(&ids, self.active.as_ref(), step) {
             self.select_tab(&next, window, cx);
         }
+        // 已经在那个标签上（select_tab 不动）时，收掉面板后焦点也回内容区
+        self.refocus(window, cx);
+        cx.notify();
     }
 
     /// ⌘1 … ⌘9：切到第 n 个标签；没有那么多标签时什么都不做。
     fn select_nth_tab(&mut self, action: &SelectTab, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dismiss_panels_for_shortcut(cx) {
+            return;
+        }
         let ids: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
         if let Some(id) = groups::nth_tab(&ids, action.0) {
             self.select_tab(&id, window, cx);
         }
+        self.refocus(window, cx);
+        cx.notify();
     }
 
     /// 标签右键「关闭其他标签」：一次确认，断开除它以外的所有会话，停在它上面。
@@ -1033,6 +1048,34 @@ impl Workspace {
         self.open_fill_menu(window, cx);
     }
 
+    /// 有对话框 / 提示框开着，或正在连接（连接遮罩）：这时快捷键不在它们背后切标签、切视图、弹面板。
+    fn modal_open(&self, cx: &App) -> bool {
+        let dialog_open = self.connection_dialog.is_some() || self.import_dialog.is_some() || self.settings_dialog.is_some() || self.snippet_dialog.is_some();
+        self.pending.is_some() || dialog_open || prompts::is_open(cx)
+    }
+
+    /// 快捷键切标签 / 切视图之前：有对话框时不动（返回 false）；浮着的面板（⌘K、命令片段、填充密码、右键菜单）先收掉。
+    fn dismiss_panels_for_shortcut(&mut self, cx: &App) -> bool {
+        if self.modal_open(cx) {
+            return false;
+        }
+        self.quick_open = false;
+        self.snippets_open = false;
+        self.fill_menu = None;
+        self.menu = None;
+        true
+    }
+
+    /// ⌘I / ⌘O / ⌘P：切视图。
+    fn show_main_tab(&mut self, tab: MainTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dismiss_panels_for_shortcut(cx) {
+            self.set_main_tab(tab, window, cx);
+            // 视图没变（已经在这一页）时 set_main_tab 不动：面板收掉后焦点也要回内容区
+            self.refocus(window, cx);
+            cx.notify();
+        }
+    }
+
     // ---------- 快速连接（⌘K） ----------
 
     fn toggle_quick_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1040,8 +1083,7 @@ impl Workspace {
             return self.close_quick_connect(window, cx);
         }
         // 正在连 / 有对话框或提示框时不弹，免得叠在上面抢焦点
-        let dialog_open = self.connection_dialog.is_some() || self.import_dialog.is_some() || self.settings_dialog.is_some() || self.snippet_dialog.is_some();
-        if self.pending.is_some() || dialog_open || prompts::is_open(cx) {
+        if self.modal_open(cx) {
             return;
         }
         self.snippets_open = false;
@@ -1094,7 +1136,7 @@ impl Workspace {
             return self.close_snippets(window, cx);
         }
         let Some((connection_id, _)) = self.snippet_scope() else { return };
-        if self.snippet_dialog.is_some() {
+        if self.modal_open(cx) {
             return;
         }
         self.fill_menu = None;
@@ -1354,9 +1396,9 @@ impl Render for Workspace {
             })
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::minimize))
-            .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.set_main_tab(MainTab::Terminal, window, cx)))
-            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.set_main_tab(MainTab::Files, window, cx)))
-            .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.set_main_tab(MainTab::System, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.show_main_tab(MainTab::Terminal, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.show_main_tab(MainTab::Files, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.show_main_tab(MainTab::System, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_snippets(window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &NewLocalTerminal, window, cx| this.new_local_terminal(window, cx)))
