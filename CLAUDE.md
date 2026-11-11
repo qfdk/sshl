@@ -63,8 +63,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，
   core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
   （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。
-- **终端外观**：铺满内容区，四边 4px 内边距。排不下一整行的余量全放在上面（`grid_offset`）：最后一行（nvim 状态栏）贴底边，
-  下面只有 4px、铺它自己的颜色——余量放底下的话，不是状态栏下多一条深色边，就是颜色铺下去像多了一行；左右余量平分。
+- **终端外观**：铺满内容区，左、右、上 4px 内边距，底边不留。排不下一整行的余量也全放在上面（`grid_offset`）：最后一行（nvim 状态栏）
+  正好贴着窗口底边——底下留 4px 的话，不是状态栏下多一条深色边，就是它的颜色铺下去、状态栏比别的行高出一截（用户两样都嫌）；左右余量平分。
   边缘整行的底色左右铺到边，上边只铺 4px（再往上是余量，用内边距色）；其余内边距取边缘格子的主色
   并把整行有底色的边缘行延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
   不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
