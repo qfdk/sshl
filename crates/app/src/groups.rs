@@ -140,6 +140,27 @@ pub fn cycle_tab<T: PartialEq + Clone>(ids: &[T], current: Option<&T>, step: isi
     ids.get(at.rem_euclid(ids.len() as isize) as usize).cloned()
 }
 
+/// ⌘1 … ⌘9：第 `n` 个标签（从 1 数，标签栏从左到右）；没有那么多标签（或 n 是 0）是 None。
+pub fn nth_tab<T: Clone>(ids: &[T], n: usize) -> Option<T> {
+    n.checked_sub(1).and_then(|at| ids.get(at)).cloned()
+}
+
+/// 标签自定义名字最多几个字（按字符数，中英文都算一个）：再长标签栏也放不下，多出来的截掉。
+pub const TAB_TITLE_MAX: usize = 40;
+
+/// 标签上显示的名字：改过名的用自定义名，否则用默认名字（连接名 / 「本机」）。
+pub fn tab_title<'a>(custom: Option<&'a str>, default: &'a str) -> &'a str {
+    custom.unwrap_or(default)
+}
+
+/// 重命名确认时的输入 → 自定义名：去掉首尾空白，超过 [`TAB_TITLE_MAX`] 个字的截掉；
+/// 空的、或和默认名字一样的 = 不要自定义名（None），标签回到默认名字。
+pub fn tab_custom_title(input: &str, default: &str) -> Option<String> {
+    let capped: String = input.trim().chars().take(TAB_TITLE_MAX).collect();
+    let title = capped.trim_end();
+    (!title.is_empty() && title != default).then(|| title.to_string())
+}
+
 /// 新本机标签的名字：「本机」，已有的话「本机 2」「本机 3」…，取最小的没用过的。
 pub fn local_tab_name(existing: &[String]) -> String {
     (1..)
@@ -160,6 +181,43 @@ mod tests {
         assert_eq!(cycle_tab(&ids, Some(&"a"), 1), Some("b"));
         assert_eq!(cycle_tab(&ids, None, 1), Some("a"), "没有当前标签时从第一个开始");
         assert_eq!(cycle_tab::<&str>(&[], None, 1), None);
+    }
+
+    #[test]
+    fn cmd_number_picks_the_nth_tab_from_the_left() {
+        let ids = ["a", "b", "c"];
+        assert_eq!(nth_tab(&ids, 1), Some("a"));
+        assert_eq!(nth_tab(&ids, 3), Some("c"));
+        assert_eq!(nth_tab(&ids, 4), None, "没有第 4 个标签：什么都不做");
+        assert_eq!(nth_tab(&ids, 0), None);
+        assert_eq!(nth_tab::<&str>(&[], 1), None);
+    }
+
+    #[test]
+    fn a_custom_tab_title_wins_over_the_default() {
+        assert_eq!(tab_title(Some("生产库"), "web-01"), "生产库");
+        assert_eq!(tab_title(None, "web-01"), "web-01");
+        assert_eq!(tab_title(None, "本机 2"), "本机 2");
+    }
+
+    #[test]
+    fn renaming_trims_the_input_and_blank_restores_the_default() {
+        assert_eq!(tab_custom_title("  生产库 ", "web-01").as_deref(), Some("生产库"));
+        assert_eq!(tab_custom_title("a  b", "web-01").as_deref(), Some("a  b"), "中间的空格留着");
+        assert_eq!(tab_custom_title("", "web-01"), None);
+        assert_eq!(tab_custom_title(" \t  ", "web-01"), None, "全是空白 = 恢复默认名字");
+        assert_eq!(tab_custom_title(" web-01 ", "web-01"), None, "改回默认名字也就是没有自定义名");
+    }
+
+    #[test]
+    fn overlong_tab_titles_are_cut_at_the_limit() {
+        let long = "长".repeat(TAB_TITLE_MAX + 5);
+        assert_eq!(tab_custom_title(&long, "web").unwrap().chars().count(), TAB_TITLE_MAX);
+        let exact = "x".repeat(TAB_TITLE_MAX);
+        assert_eq!(tab_custom_title(&exact, "web").as_deref(), Some(exact.as_str()));
+        // 截断处正好是空格：截完不留尾巴上的空白
+        let spaced = format!("{} tail", "y".repeat(TAB_TITLE_MAX - 1));
+        assert_eq!(tab_custom_title(&spaced, "web").unwrap(), "y".repeat(TAB_TITLE_MAX - 1));
     }
 
     #[test]

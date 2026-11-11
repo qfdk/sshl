@@ -422,19 +422,23 @@ impl Workspace {
             }
         };
         let local = self.session(&id).is_some_and(|s| s.local);
+        let rename = || MenuEntry::Item(MenuItem::new("重命名", action(|this, id, window, cx| this.start_rename(id, window, cx))));
         let entries = if on_tab && local {
             // 本机标签：没有可重连的连接和主机地址
             vec![
+                rename(),
+                MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::new("关闭其他标签", action(|this, id, window, cx| this.close_other_tabs(id, window, cx))).disabled(self.sessions.len() < 2),
                 ),
                 MenuEntry::Item(MenuItem::new("关闭", action(|this, id, window, cx| this.disconnect(id, window, cx)))),
             ]
         } else if on_tab {
-            // 标签：重连、复制地址、关闭其他、关闭
+            // 标签：改名、重连、复制地址、关闭其他、关闭
             let host = conn.as_ref().map(|c| c.host.clone());
             let copied = host.clone().unwrap_or_default();
             vec![
+                rename(),
                 MenuEntry::Item(MenuItem::new("重新连接", action(|this, id, window, cx| this.reconnect_tab(id, window, cx))).disabled(conn.is_none())),
                 MenuEntry::Item(
                     MenuItem::new("复制主机地址", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))).disabled(host.is_none()),

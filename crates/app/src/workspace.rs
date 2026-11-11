@@ -35,14 +35,22 @@ actions!(
     [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
 );
 
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
+/// ⌘1 … ⌘9：切到第 n 个标签（从 1 数，标签栏从左到右，本机标签也算）。
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct SelectTab(pub usize);
+
+/// ⌘1 … ⌘9 依次对应第 1 … 9 个标签（KeyBinding 要 'static 的按键串）。
+const TAB_KEYS: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
+
+pub fn key_bindings() -> Vec<KeyBinding> {
+    let mut bindings = vec![
         KeyBinding::new("cmd-w", CloseTab, None),
-        KeyBinding::new("cmd-1", ShowTerminal, Some("Workspace")),
-        // 顺序同顶栏：终端、文件管理、系统（系统不常用，放最后）
-        KeyBinding::new("cmd-2", ShowFiles, Some("Workspace")),
-        KeyBinding::new("cmd-3", ShowSystem, Some("Workspace")),
-        KeyBinding::new("cmd-p", ShowSnippets, Some("Workspace")),
+        // 视图：终端 / 文件管理 / 系统，顺序同顶栏（系统不常用，放最后）；数字键留给切标签
+        KeyBinding::new("cmd-i", ShowTerminal, Some("Workspace")),
+        KeyBinding::new("cmd-o", ShowFiles, Some("Workspace")),
+        KeyBinding::new("cmd-p", ShowSystem, Some("Workspace")),
+        KeyBinding::new("cmd-shift-p", ShowSnippets, Some("Workspace")),
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
@@ -53,14 +61,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-{", PrevTab, Some("Workspace")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
         KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Workspace")),
-    ]);
+    ];
+    bindings.extend(TAB_KEYS.into_iter().zip(1..).map(|(key, n)| KeyBinding::new(key, SelectTab(n), Some("Workspace"))));
+    bindings
+}
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(key_bindings());
 }
 
 /// 连接遮罩延迟出现：预热池命中时整个连接 <300ms，像本地终端一样直接出终端，不闪一层遮罩。
 const LOADING_DELAY: Duration = Duration::from_millis(300);
 /// 标签栏延迟多久量一次。
 const LATENCY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-/// 按住 ⌘ 多久后浮出数字角标：太短则 ⌘C / ⌘V 这类快捷键会让角标一闪。
+/// 按住 ⌘ 多久后浮出快捷键角标：太短则 ⌘C / ⌘V 这类快捷键会让角标一闪。
 const HINT_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -76,6 +90,8 @@ pub struct Session {
     pub connection_id: String,
     /// 会话建立时的名称（连接被删后标签仍用它）。
     pub name: SharedString,
+    /// 标签的自定义名字（双击标签 / 右键「重命名」）；None 用默认名字。只跟着这个打开的标签，不存库、重启不留。
+    pub custom_title: Option<SharedString>,
     pub view: Entity<TerminalView>,
     /// 本机终端（没有文件管理 / 系统页 / 填充密码）。
     pub local: bool,
@@ -148,6 +164,8 @@ pub struct Workspace {
     /// 正在拖动的连接 / 标签（连接 id），拖动中半透明。
     pub(crate) dragging: Option<String>,
     pub(crate) tab_drop: Option<(String, Side)>,
+    /// 正在原地重命名的标签（`topbar.rs`）。
+    pub(crate) renaming: Option<crate::topbar::TabRename>,
     pub(crate) hint_visible: bool,
     hint_task: Option<Task<()>>,
     pub(crate) fill_menu: Option<FillMenu>,
@@ -237,6 +255,7 @@ impl Workspace {
             drop_target: None,
             dragging: None,
             tab_drop: None,
+            renaming: None,
             hint_visible: false,
             hint_task: None,
             fill_menu: None,
@@ -306,6 +325,17 @@ impl Workspace {
         self.connections.iter().find(|c| c.id == id)
     }
 
+    /// 标签的默认名字：保存的连接名（连接被删了用会话建立时的名字；本机标签是「本机」「本机 2」…）。
+    pub(crate) fn default_tab_name(&self, session: &Session) -> SharedString {
+        self.connection(&session.connection_id).map(|c| SharedString::from(c.name.clone())).unwrap_or_else(|| session.name.clone())
+    }
+
+    /// 标签上显示的名字：改过名的用自定义名，否则默认名字。确认框里说「断开 / 关闭『某某』」也用它。
+    pub(crate) fn tab_name(&self, session: &Session) -> SharedString {
+        let default = self.default_tab_name(session);
+        groups::tab_title(session.custom_title.as_deref(), &default).to_string().into()
+    }
+
     // ---------- 连接 ----------
 
     /// 侧栏双击 / 标签点击 / 右键「连接」：已开着就切过去（后台探活，失效自动重连），否则新连。
@@ -371,21 +401,45 @@ impl Workspace {
         self.next_local += 1;
         let names: Vec<String> = self.sessions.iter().filter(|s| s.local).map(|s| s.name.to_string()).collect();
         let subscription = cx.subscribe_in(&view, window, Self::terminal_event);
-        self.sessions.push(Session { connection_id: id.clone(), name: groups::local_tab_name(&names).into(), view, local: true, _subscription: subscription });
+        self.sessions.push(Session {
+            connection_id: id.clone(),
+            name: groups::local_tab_name(&names).into(),
+            custom_title: None,
+            view,
+            local: true,
+            _subscription: subscription,
+        });
         self.activate(&id, window, cx);
     }
 
-    /// ⌘⇧] / ⌘⇧[：切到右 / 左边的标签（两头绕回）。同点标签：断开的只切过去看，不自动重连。
-    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
-        let Some(next) = groups::cycle_tab(&ids, self.active.as_ref(), step) else { return };
-        if self.active.as_deref() == Some(next.as_str()) {
+    /// 切到一个已打开的标签：点标签、⌘1 … ⌘9、⌘⇧] / ⌘⇧[ 都走这里。
+    /// 走 connect_to_saved 而不是直接切：会话已失效时它会接着重连，和侧栏双击一致；
+    /// 已断开的标签只切过去看（终端里提示按 Enter 重连），不自动重连。
+    pub(crate) fn select_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active.as_deref() == Some(id) {
             return;
         }
-        if self.session(&next).is_some_and(|s| s.view.read(cx).is_disconnected()) {
-            self.activate(&next, window, cx);
+        let Some(session) = self.session(id) else { return };
+        if session.view.read(cx).is_disconnected() {
+            self.activate(id, window, cx);
         } else {
-            self.connect_to_saved(&next, window, cx);
+            self.connect_to_saved(id, window, cx);
+        }
+    }
+
+    /// ⌘⇧] / ⌘⇧[：切到右 / 左边的标签（两头绕回）。
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
+        if let Some(next) = groups::cycle_tab(&ids, self.active.as_ref(), step) {
+            self.select_tab(&next, window, cx);
+        }
+    }
+
+    /// ⌘1 … ⌘9：切到第 n 个标签；没有那么多标签时什么都不做。
+    fn select_nth_tab(&mut self, action: &SelectTab, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
+        if let Some(id) = groups::nth_tab(&ids, action.0) {
+            self.select_tab(&id, window, cx);
         }
     }
 
@@ -511,6 +565,7 @@ impl Workspace {
                 self.sessions.push(Session {
                     connection_id: pending.connection_id.clone(),
                     name: pending.name,
+                    custom_title: None,
                     view: pending.view,
                     local: false,
                     _subscription: subscription,
@@ -671,7 +726,7 @@ impl Workspace {
                 return self.disconnect_now(&connection_id, window, cx);
             };
             let message = format!("「{program}」还在运行，关闭标签会结束它。");
-            let answer = prompts::confirm(window, cx, Options::new(format!("关闭「{}」", session.name)).message(message).confirm("关闭"));
+            let answer = prompts::confirm(window, cx, Options::new(format!("关闭「{}」", self.tab_name(session))).message(message).confirm("关闭"));
             cx.spawn_in(window, async move |this, cx| {
                 if answer.await.unwrap_or(false) {
                     let _ = this.update_in(cx, |this, window, cx| this.disconnect_now(&connection_id, window, cx));
@@ -685,7 +740,8 @@ impl Workspace {
             let connection_id = connection_id.to_string();
             return self.disconnect_now(&connection_id, window, cx);
         }
-        let name = if session.name.is_empty() { SharedString::from("这个会话") } else { session.name.clone() };
+        let name = self.tab_name(session);
+        let name = if name.is_empty() { SharedString::from("这个会话") } else { name };
         let on_files = self.main_tab == MainTab::Files && self.active.as_deref() == Some(connection_id);
         let transferring = self.file_manager.read(cx).active_transfers() > 0;
         let consequence = if transferring {
@@ -713,6 +769,12 @@ impl Workspace {
 
     fn disconnect_now(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.sessions.iter().position(|s| s.connection_id == connection_id) else { return };
+        // 正在重命名的标签被关掉：输入框跟着收掉（不改名）。焦点在它里面的话，最后交给内容区，
+        // 免得停在没了的输入框上（切到文件管理页的标签时 activate 不挪焦点）
+        let rename_focused = self
+            .renaming
+            .take_if(|r| r.connection_id == connection_id)
+            .is_some_and(|r| r.is_focused(window, cx));
         let session = self.sessions.remove(index);
         // 正在重连时关掉：连接请求一起取消，免得连上一个没人管的会话
         if !session.local {
@@ -733,6 +795,9 @@ impl Workspace {
         self.session_gone(session_id.as_deref(), connection_id, was_active && next.is_none(), "连接已断开，请重新连接到服务器", window, cx);
         if let Some(next) = next {
             self.switch_to(&next, window, cx);
+        }
+        if rename_focused {
+            self.refocus(window, cx);
         }
         cx.notify();
     }
@@ -1274,7 +1339,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus)
             // GPUI 在最后一次输入是键盘时把所有元素都当作没被悬停，而 Finder 的拖放事件不会切回鼠标：
-            // 刚在终端敲完 cd、或按 ⌘2 切到文件管理，再从 Finder 拖文件进来，松手什么都不会发生。
+            // 刚在终端敲完 cd、或按 ⌘O 切到文件管理，再从 Finder 拖文件进来，松手什么都不会发生。
             // 拖进窗口时补一个鼠标移动，把输入方式切回鼠标，终端和文件管理的 on_drop 才收得到。
             .on_drag_move::<ExternalPaths>(|event: &DragMoveEvent<ExternalPaths>, window, cx| {
                 if window.last_input_was_keyboard() {
@@ -1295,6 +1360,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_snippets(window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &NewLocalTerminal, window, cx| this.new_local_terminal(window, cx)))
+            .on_action(cx.listener(Self::select_nth_tab))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
@@ -1444,7 +1510,32 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{Action, KeyContext, Keymap, Keystroke};
+
     use super::*;
+
+    #[test]
+    fn cmd_numbers_switch_tabs_and_cmd_letters_switch_views() {
+        let mut keymap = Keymap::new(key_bindings());
+        // 终端自己的 ⌘ 键（⌘C / ⌘F / ⌘0 …）不能把这些抢走
+        keymap.add_bindings(crate::terminal::view::key_bindings());
+        let stack: Vec<KeyContext> = ["Root", "Workspace", "Terminal"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let first = |key: &'static str| -> Option<Box<dyn Action>> {
+            let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
+            bindings.first().map(|b| b.action().boxed_clone())
+        };
+        for (key, n) in TAB_KEYS.into_iter().zip(1..) {
+            assert_eq!(key, format!("cmd-{n}"));
+            let action = first(key).unwrap_or_else(|| panic!("{key} 没有绑定"));
+            assert!(action.partial_eq(&SelectTab(n)), "{key} 应切到第 {n} 个标签，实际是 {}", action.name());
+        }
+        let name = |key: &'static str| first(key).map(|a| a.name());
+        assert_eq!(name("cmd-i"), Some("workspace::ShowTerminal"));
+        assert_eq!(name("cmd-o"), Some("workspace::ShowFiles"));
+        assert_eq!(name("cmd-p"), Some("workspace::ShowSystem"));
+        assert_eq!(name("cmd-shift-p"), Some("workspace::ShowSnippets"));
+        assert_eq!(name("cmd-0"), Some("terminal::ZoomReset"), "⌘0 还是终端的字号复原，不是标签");
+    }
 
     fn form(auth: AuthKind) -> ConnectionForm {
         ConnectionForm {

@@ -1,9 +1,11 @@
 //! 顶栏：会话标签（可拖动排序）+ 右侧的 终端 / 文件管理、填充密码、断开（旧 SessionTabs.tsx + App.tsx 顶栏）。
 
 use gpui::{
-    AnyElement, AppContext, Context, DragMoveEvent, FontWeight, InteractiveElement, IntoElement, ParentElement, Role,
-    SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred, div, point, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext, ClickEvent, Context, DragMoveEvent, Entity, Focusable, Font, FontWeight, InteractiveElement, IntoElement,
+    KeyBinding, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, TextRun, Window, actions, anchored,
+    deferred, div, point, prelude::FluentBuilder, px,
 };
+use gpui_base::input::{Input, InputEvent, InputState};
 
 use crate::assets::Icon;
 use crate::groups::{self, Side};
@@ -12,6 +14,35 @@ use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
 use crate::workspace::{CONTENT_EDGE, ConnectionMenu, DraggedTab, MainTab, TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS, TRAFFIC_LIGHTS_WIDTH, Workspace, controls, drag_region};
+
+actions!(topbar, [ConfirmTabRename, CancelTabRename]);
+
+/// 标签重命名的输入框。它在顶栏里、不在终端的上下文里：敲的字不会被终端的按键处理发给远端。
+const RENAME_CONTEXT: &str = "TabRename";
+/// 重命名输入框的宽度跟着字走，夹在这两个数之间：太窄不好敲，太宽把别的标签挤走。
+const RENAME_MIN_WIDTH: f32 = 80.;
+const RENAME_MAX_WIDTH: f32 = 240.;
+
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        // 绑在比 gpui-base 输入框更深的上下文里，压过它自己的回车 / Esc
+        KeyBinding::new("enter", ConfirmTabRename, Some("TabRename > Input")),
+        KeyBinding::new("escape", CancelTabRename, Some("TabRename > Input")),
+    ]
+}
+
+/// 正在原地重命名的标签：名字换成输入框。
+pub(crate) struct TabRename {
+    pub(crate) connection_id: String,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+impl TabRename {
+    pub(crate) fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
+    }
+}
 
 /// 按住 ⌘ 时浮在标签 / 按钮右上角的快捷键。
 fn hint(key: impl Into<SharedString>, visible: bool) -> AnyElement {
@@ -41,6 +72,7 @@ impl Workspace {
         if !cx.has_active_drag() {
             self.tab_drop = None;
         }
+        self.settle_rename(window, cx);
         let connected = self.active.is_some();
         // 本机标签只有终端：不放 终端 / 文件管理 / 系统 和填充密码
         let local = self.active_session().is_some_and(|s| s.local);
@@ -66,7 +98,7 @@ impl Workspace {
                         .child(controls("topbar-expand").child(sidebar_toggle_button(true, cx))),
                 )
             })
-            .child(self.session_tabs(cx))
+            .child(self.session_tabs(window, cx))
             .child(
                 controls("topbar-actions")
                     .ml_auto()
@@ -110,7 +142,7 @@ impl Workspace {
                     let _ = this.update(cx, |this, cx| this.set_main_tab(tab, window, cx));
                 },
             ))
-            // 数字角标浮在每个选项的右上角（与旧版一样不挤动布局）；选项等宽，叠一层同样三等分的格子放角标
+            // 快捷键角标（⌘I / ⌘O / ⌘P）浮在每个选项的右上角（与旧版一样不挤动布局）；选项等宽，叠一层同样三等分的格子放角标
             .child(
                 div()
                     .absolute()
@@ -118,12 +150,12 @@ impl Workspace {
                     .p(px(3.))
                     .flex()
                     .gap(px(2.))
-                    .children((1..=3).map(|n| div().relative().flex_1().h_full().child(hint(n.to_string(), hints)))),
+                    .children(["I", "O", "P"].map(|key| div().relative().flex_1().h_full().child(hint(key, hints)))),
             )
             .into_any_element()
     }
 
-    /// 命令片段按钮（⌘P）和它下面的面板。
+    /// 命令片段按钮（⌘⇧P）和它下面的面板。
     fn snippet_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.snippets_open;
         let button = div()
@@ -142,8 +174,8 @@ impl Workspace {
             .hover(|s| s.text_color(theme::color(if open { ui::PRIMARY } else { ui::FOREGROUND })))
             .when(!self.hint_visible, |b| b.tooltip(|window, cx| kit::tooltip("命令片段".into(), window, cx)))
             .child(kit::icon_sized(Icon::CodeXml, 16.))
-            // 和「终端 / 文件管理 / 系统」的 1 / 2 / 3 同一个基准：分段控件里的选项内缩 3px，角标相对选项定位
-            .child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint("P", self.hint_visible))))
+            // 和「终端 / 文件管理 / 系统」的 I / O / P 同一个基准：分段控件里的选项内缩 3px，角标相对选项定位
+            .child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint("⇧P", self.hint_visible))))
             .on_hover(cx.listener(|this, hovered: &bool, _, _| this.snippet_button_hovered = *hovered))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_snippets(window, cx)));
         let panel = open.then(|| {
@@ -285,17 +317,19 @@ impl Workspace {
         )
     }
 
-    fn session_tabs(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn session_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.sessions.is_empty() {
             return div().into_any_element();
         }
+        let hints = self.hint_visible;
         let tabs: Vec<AnyElement> = self
             .sessions
             .iter()
-            .map(|session| {
+            .enumerate()
+            .map(|(index, session)| {
                 let id = session.connection_id.clone();
                 let active = self.active.as_deref() == Some(id.as_str());
-                let name = self.connection(&id).map(|c| SharedString::from(c.name.clone())).unwrap_or_else(|| session.name.clone());
+                let name = self.tab_name(session);
                 let host: SharedString = self.connection(&id).map(|c| groups::distinct_host(&name, &c.host).to_string()).unwrap_or_default().into();
                 let mark = match &self.tab_drop {
                     Some((target, side)) if *target == id => Some(*side),
@@ -305,17 +339,19 @@ impl Workspace {
                 let disconnected = session.view.read(cx).is_disconnected();
                 let close_label = SharedString::from(format!("{} {name}", if session.local { "关闭" } else { "断开" }));
                 let (click_id, close_id, drag_id, move_id, drop_name) = (id.clone(), id.clone(), id.clone(), id.clone(), name.clone());
-                div()
+                let rename = self.renaming.as_ref().filter(|r| r.connection_id == id);
+                let label = match rename {
+                    Some(rename) => self.rename_field(rename, window, cx),
+                    None => div()
+                        .truncate()
+                        .map(|t| if active { t.font_weight(FontWeight::SEMIBOLD) } else { t.text_color(theme::alpha(ui::FOREGROUND, 0.8)) })
+                        .child(name.clone())
+                        .into_any_element(),
+                };
+                let tab = div()
                     .id(SharedString::from(format!("tab-{id}")))
                     .role(Role::Tab)
                     .aria_label(name.clone())
-                    .on_mouse_down(gpui::MouseButton::Right, cx.listener({
-                        let id = id.clone();
-                        move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            this.menu = Some(ConnectionMenu { connection_id: id.clone(), position: event.position, on_tab: true });
-                            cx.notify();
-                        }
-                    }))
                     .relative()
                     .h(px(34.))
                     .flex()
@@ -351,14 +387,9 @@ impl Workspace {
                             .gap_2()
                             .pl_3()
                             .pr(px(6.))
-                            .cursor_pointer()
+                            .when(rename.is_none(), |t| t.cursor_pointer())
                             .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::color(if disconnected { ui::MUTED_FOREGROUND } else { ui::SUCCESS })))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .map(|t| if active { t.font_weight(FontWeight::SEMIBOLD) } else { t.text_color(theme::alpha(ui::FOREGROUND, 0.8)) })
-                                    .child(name.clone()),
-                            )
+                            .child(label)
                             .when(active && !host.is_empty(), |t| {
                                 t.child(
                                     div()
@@ -378,16 +409,27 @@ impl Workspace {
                                 this.disconnect(&close_id, window, cx);
                             })),
                     )
-                    // 走 connect_to_saved 而不是直接切：会话已失效时它会接着重连，和侧栏双击一致；
-                    // 已断开的标签只切过去看（终端里提示按 Enter 重连），不自动重连
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.active.as_deref() == Some(click_id.as_str()) {
-                            return;
+                    // ⌘ 角标：前 9 个标签浮出序号（⌘1 … ⌘9）；正在改名的不显示。延后画：gpui 的边框画在子元素之后，
+                    // 不延后的话当前标签的边框线会压在角标上
+                    .when(index < 9 && rename.is_none(), |t| t.child(gpui::deferred(hint((index + 1).to_string(), hints))));
+                // 改名中：不接单击 / 双击 / 右键 / 拖动，在输入框里点、拖选文字只归输入框
+                if rename.is_some() {
+                    return tab.into_any_element();
+                }
+                tab
+                    .on_mouse_down(gpui::MouseButton::Right, cx.listener({
+                        let id = id.clone();
+                        move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            this.menu = Some(ConnectionMenu { connection_id: id.clone(), position: event.position, on_tab: true });
+                            cx.notify();
                         }
-                        if this.session(&click_id).is_some_and(|s| s.view.read(cx).is_disconnected()) {
-                            this.activate(&click_id, window, cx);
+                    }))
+                    // 单击切过去，双击原地改名（非当前标签：第一下已经切过去了）
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if event.click_count() >= 2 {
+                            this.start_rename(&click_id, window, cx);
                         } else {
-                            this.connect_to_saved(&click_id, window, cx);
+                            this.select_tab(&click_id, window, cx);
                         }
                     }))
                     .on_drag(DraggedTab { connection_id: drag_id, name: drop_name }, {
@@ -448,6 +490,111 @@ impl Workspace {
             )
             .into_any_element()
     }
+
+    /// 改名中的标签里，名字换成的输入框。宽度跟着字走（夹在最小 / 最大之间），换上去时标签只宽出输入框的内边距。
+    fn rename_field(&self, rename: &TabRename, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let text = rename.input.read(cx).value();
+        let style = window.text_style();
+        let text_width = if text.is_empty() {
+            0.
+        } else {
+            let font = Font { weight: FontWeight::SEMIBOLD, ..style.font() };
+            let run = TextRun { len: text.len(), font, color: style.color, background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text, px(14.), &[run], None).width)
+        };
+        // 左右内边距 12 + 边框 2 + 光标留一点
+        let width = (text_width + 20.).clamp(RENAME_MIN_WIDTH, RENAME_MAX_WIDTH);
+        let input = rename.input.clone();
+        div()
+            .id("tab-rename")
+            .key_context(RENAME_CONTEXT)
+            .role(Role::TextInput)
+            .aria_label("重命名标签")
+            .w(px(width))
+            .h(px(26.))
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme::color(ui::RING))
+            .bg(theme::color(ui::CARD))
+            .font_weight(FontWeight::SEMIBOLD)
+            .line_height(px(20.))
+            .on_action(cx.listener(|this, _: &ConfirmTabRename, window, cx| this.finish_rename(true, window, cx)))
+            .on_action(cx.listener(|this, _: &CancelTabRename, window, cx| this.finish_rename(false, window, cx)))
+            // 点到输入框外面就确认，拖动区、侧栏这类不拿焦点的地方也算。等这次点击把焦点挪完再收尾：
+            // 点进终端的焦点留在终端，点在不拿焦点的地方才把焦点交回内容区
+            .on_mouse_down_out(cx.listener(move |this, _, window, cx| this.finish_rename_later(&input, true, window, cx)))
+            .child(div().flex_1().min_w_0().child(Input::new(&rename.input)))
+            .into_any_element()
+    }
+
+    /// 双击标签 / 右键「重命名」：名字原地换成输入框，预填当前名字并全选。非当前标签先切过去（同点击标签）。
+    pub(crate) fn start_rename(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.as_ref().is_some_and(|r| r.connection_id == id) {
+            return;
+        }
+        // 另一个标签还在改：先按确认收掉
+        self.finish_rename(true, window, cx);
+        self.select_tab(id, window, cx);
+        let Some(current) = self.session(id).map(|s| self.tab_name(s)) else { return };
+        let input = cx.new(|cx| InputState::new(window, cx));
+        input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+            input.select_all(window, cx);
+            input.focus(window, cx);
+        });
+        let subscription = cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| match event {
+            // 宽度跟着字走
+            InputEvent::Change => cx.notify(),
+            // 失焦 = 确认（焦点已经去了别处，不抢回来）
+            InputEvent::Blur => this.finish_rename_later(input, true, window, cx),
+            _ => {}
+        });
+        self.renaming = Some(TabRename { connection_id: id.to_string(), input, _subscription: subscription });
+        cx.notify();
+    }
+
+    /// 收掉重命名。`commit` 时把输入规整成自定义名（`groups::tab_custom_title`：空的 / 和默认一样 = 恢复默认名字）。
+    /// 焦点交回这个标签的内容区：回车 / Esc 时它还在输入框里；点在不拿焦点的地方（顶栏空白、侧栏）时它落到了工作区自己身上，
+    /// 都算没地方去。已经去了别处（点进终端、切了标签、弹了对话框 / 提示框）的不抢回来。
+    pub(crate) fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.renaming.take() else { return };
+        if commit {
+            let value = rename.input.read(cx).value();
+            if let Some(at) = self.sessions.iter().position(|s| s.connection_id == rename.connection_id) {
+                let default = self.default_tab_name(&self.sessions[at]);
+                self.sessions[at].custom_title = groups::tab_custom_title(&value, &default).map(SharedString::from);
+            }
+        }
+        if rename.is_focused(window, cx) || self.focus.is_focused(window) || window.focused(cx).is_none() {
+            self.refocus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// 这一轮事件处理完再收尾（失焦、点到别处时：那次点击先把焦点挪到它该去的地方）。
+    /// 期间已经收掉、或换成了另一次重命名的，不动。
+    fn finish_rename_later(&mut self, input: &Entity<InputState>, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = input.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if this.renaming.as_ref().is_some_and(|r| r.input == input) {
+                this.finish_rename(commit, window, cx);
+            }
+        });
+    }
+
+    /// 收尾不能只靠失焦事件：窗口不在前台时 GPUI 不发 Focus / Blur，那时焦点被拿走（切标签、弹提示框）就收不到，
+    /// 输入框会一直挂着。每次画顶栏时看一眼，输入框已经没焦点了就按确认收掉。
+    fn settle_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(rename) = &self.renaming
+            && !rename.is_focused(window, cx)
+        {
+            let input = rename.input.clone();
+            self.finish_rename_later(&input, true, window, cx);
+        }
+    }
 }
 
 /// 延迟的显示：< 100ms 绿、≤ 200ms 黄、更慢或超时红。
@@ -473,6 +620,32 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn enter_and_escape_reach_the_tab_rename_before_the_input_box() {
+        use gpui::{KeyContext, Keymap, Keystroke};
+        gpui::actions!(test, [InputEnter, InputEscape]);
+        // 同 gpui-base：输入框自己的回车 / Esc 先绑（main.rs 里 gpui_base::init 在前）
+        let mut keymap = Keymap::new(vec![
+            KeyBinding::new("enter", InputEnter, Some("Input")),
+            KeyBinding::new("escape", InputEscape, Some("Input")),
+        ]);
+        keymap.add_bindings(crate::workspace::key_bindings());
+        keymap.add_bindings(key_bindings());
+        let stack: Vec<KeyContext> = ["Root", "Workspace", RENAME_CONTEXT, "Input"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let first = |key: &'static str| {
+            let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
+            bindings.first().map(|b| b.action().name().to_string())
+        };
+        assert_eq!(first("enter").as_deref(), Some("topbar::ConfirmTabRename"));
+        assert_eq!(first("escape").as_deref(), Some("topbar::CancelTabRename"));
+        // 改名时 ⌘ 快捷键照常归工作区（切走 = 输入框失焦 = 确认）
+        assert_eq!(first("cmd-2").as_deref(), Some("workspace::SelectTab"));
+        // 别的输入框（侧栏搜索）里回车还是输入框自己的
+        let search: Vec<KeyContext> = ["Root", "Workspace", "Input"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+        let bindings = keymap.bindings_for_input(&[Keystroke::parse("enter").unwrap()], &search).0;
+        assert_eq!(bindings.first().map(|b| b.action().name()), Some("test::InputEnter"));
+    }
 
     #[test]
     fn latency_is_colored_by_how_slow_it_is() {

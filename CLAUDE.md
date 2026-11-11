@@ -125,7 +125,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **从 `~/.ssh/config` 导入**（新建连接对话框左下角，`import_dialog.rs` + `crates/core/src/ssh_config.rs`）：列出不带通配的 Host，
   逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
   同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
-- **「系统」页**（⌘3，顶栏顺序 终端 / 文件管理（⌘2）/ 系统，系统不常用放最后，`system_panel.rs` + core 的 `server_info.rs` / `services.rs`）：负载 / 内存 / 磁盘 / 运行时间，
+- **「系统」页**（⌘P，顶栏顺序 终端（⌘I）/ 文件管理（⌘O）/ 系统，系统不常用放最后，`system_panel.rs` + core 的 `server_info.rs` / `services.rs`）：负载 / 内存 / 磁盘 / 运行时间，
   下面三个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、再否则 lsof）、systemd 服务（list-units + list-unit-files，
   没被载入的已停服务也列出）。可结束进程、启停 / 重启服务、开关开机启动（停止、重启先确认）。容器管理做过又删了：用户用不到。
   命令走 `run_as_file_user`，切过来时先同步文件管理身份，终端 sudo -i 之后就以 root 跑。没权限（`services::needs_root`）时不只报错，
@@ -138,17 +138,22 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
   TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上
   （`seq` 这类逐行 write 的和 `script -q /dev/null` 一样慢，是内核开销，不是终端）。
-  工作区里本机标签 id 是 `local:<n>`（`Session.local`）：只有终端（不显示 终端 / 文件管理 / 系统、填充密码，⌘2 / ⌘3 不切），
+  工作区里本机标签 id 是 `local:<n>`（`Session.local`）：只有终端（不显示 终端 / 文件管理 / 系统、填充密码，⌘O / ⌘P 不切），
   shell 退出标签直接关；⌘W 前台只有 shell 时直接关，有程序在跑（`tcgetpgrp` ≠ shell）才问；新标签从当前本机标签前台进程的目录开始
   （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段「仅本机」归属 `local`，所有本机标签共用。
-  标签切换 ⌘⇧] / ⌘⇧[、⌃Tab / ⌃⇧Tab（`groups::cycle_tab`，两头绕回）。
+  标签切换 ⌘⇧] / ⌘⇧[、⌃Tab / ⌃⇧Tab（`groups::cycle_tab`，两头绕回）；⌘1 … ⌘9 切到第几个标签（`groups::nth_tab`，本机标签也算，
+  没那么多就不动）。点标签、⌘ 数字、⌘⇧] 都走 `Workspace::select_tab`。按住 ⌘ 时前 9 个标签角上浮出序号，视图按钮浮出 I / O / P。
 - **快速连接**（⌘K，`quick_connect.rs`）：顶部居中的浮层，只搜保存的连接（空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里，
   名称以第一个词开头的排前面），↑↓ 选、↵ 连、Esc / 点外面关；已开着的带绿点、选了就切过去（`connect_to_saved`）。
   顺序同侧栏。侧栏收起时空页面提示 ⌘K。有对话框 / 提示框 / 正在连接时不弹。
 - **右键菜单**（`sidebar.rs` 的 `connection_menu_overlay`，`ConnectionMenu.on_tab` 区分）：侧栏连接项是 连接 / 编辑 / 断开 / 删除（连着时编辑、删除置灰）；
-  标签是 重新连接 / 复制主机地址 / 关闭其他标签 / 关闭。连接项上不放悬停按钮（和右键菜单、标签 × 重复）。
+  标签是 重命名 / 重新连接 / 复制主机地址 / 关闭其他标签 / 关闭（本机标签只有 重命名 / 关闭其他标签 / 关闭）。连接项上不放悬停按钮（和右键菜单、标签 × 重复）。
   标签的「重新连接」对还连着的会话先在后端断开旧会话（`reconnect_tab`；终端的 reconnect 只换 shell 通道，不关旧连接）。
-- **命令片段**（`snippets.rs`，库里 `snippets` 表，`config_store::snippets`）：顶栏按钮 / ⌘P 打开面板，搜索、↑↓ 选、↵ 执行、⇧↵ 只填入。
+- **标签重命名**（`topbar.rs` 的 `start_rename` / `finish_rename`）：双击标签或右键「重命名」，名字原地换成输入框（预填、全选），
+  ↵ 确认、Esc 取消、点到别处 / 失焦也算确认，之后焦点回内容区。名字存在 `Session.custom_title`，只跟着这个打开的标签：
+  不写库、不改保存的连接名、重启不留；原地重连、拖动排序都还在。去掉首尾空白、最多 40 个字（`groups::tab_custom_title`），
+  清空或改回默认名 = 恢复默认（连接名 / 「本机」）。窗口不在前台时没有失焦事件，所以每次画顶栏还看一眼输入框丢没丢焦点（`settle_rename`）。
+- **命令片段**（`snippets.rs`，库里 `snippets` 表，`config_store::snippets`）：顶栏按钮 / ⌘⇧P 打开面板，搜索、↑↓ 选、↵ 执行、⇧↵ 只填入。
   按粘贴发到终端（多行命令走括号粘贴，不会边粘边执行），执行时再补回车；不在终端页会先切过去。片段可以所有服务器通用，
   也可以只属于某个连接（删连接时一起删）。面板里的上下 / 回车 / Esc 绑在 `SnippetPanel > Input`，压过 gpui-base 输入框自己的绑定。
 - **远程目录收藏**：按连接存在 `sshl.db` 的 `bookmarks` 表（删连接时一起删）。同浏览器地址栏：远程地址栏右端的书签
