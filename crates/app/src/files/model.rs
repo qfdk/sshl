@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
+use sshl_core::config_store::Bookmark;
 use sshl_core::local_fs::LocalEntry;
 use sshl_core::sftp::RemoteEntry;
 
@@ -164,6 +165,11 @@ pub fn bookmark_label(path: &str) -> (String, String) {
     let normalized = normalize_remote_path(path);
     let clean = normalized.trim_end_matches('/');
     (basename(clean), parent_path(clean, PaneKind::Remote))
+}
+
+/// 收藏在列表里的标题和小字：起了名字的是「名字 + 完整路径」，没起的是「目录名 + 上一级路径」。
+pub fn bookmark_lines(bookmark: &Bookmark) -> (String, String) {
+    if bookmark.name.is_empty() { bookmark_label(&bookmark.path) } else { (bookmark.name.clone(), bookmark.path.clone()) }
 }
 
 pub fn basename(path: &str) -> String {
@@ -355,6 +361,14 @@ mod tests {
         assert_eq!(remote_home_from(None), "");
         assert_eq!(remote_home_from(Some("")), "");
         assert_eq!(remote_home_from(Some("relative/dir")), "");
+    }
+
+    #[test]
+    fn a_named_bookmark_shows_its_name_over_the_whole_path() {
+        let named = Bookmark { path: "/srv/www/blog".into(), name: "博客".into() };
+        assert_eq!(bookmark_lines(&named), ("博客".into(), "/srv/www/blog".into()));
+        let plain = Bookmark { path: "/srv/www/blog".into(), name: String::new() };
+        assert_eq!(bookmark_lines(&plain), ("blog".into(), "/srv/www".into()));
     }
 
     #[test]

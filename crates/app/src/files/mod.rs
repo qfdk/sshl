@@ -10,5 +10,5 @@ mod sudo;
 mod view;
 
 pub use delete::shell_quote;
-pub use model::bookmark_label;
+pub use model::{bookmark_label, bookmark_lines};
 pub use view::{FileManager, FileManagerEvent, FileSession};

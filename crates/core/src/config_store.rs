@@ -331,9 +331,22 @@ fn save_snippet_in(conn: &rusqlite::Connection, input: &SaveSnippetInput) -> rus
     }
 }
 
-/// 某连接收藏的远程目录，按收藏先后。
-pub fn bookmarks(connection_id: &str) -> AppResult<Vec<String>> {
+/// 收藏的目录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    pub path: String,
+    /// 自己起的名字；空 = 没起，界面显示目录名。
+    pub name: String,
+}
+
+/// 某连接收藏的目录，按收藏先后。
+pub fn bookmarks(connection_id: &str) -> AppResult<Vec<Bookmark>> {
     db::with_db(|conn| bookmarks_in(conn, connection_id))
+}
+
+/// 给收藏起名 / 改名；空 = 恢复成显示目录名。
+pub fn rename_bookmark(connection_id: &str, path: &str, name: &str) -> AppResult<()> {
+    db::with_db(|conn| rename_bookmark_in(conn, connection_id, path, name))
 }
 
 /// 收藏 / 取消收藏一个远程目录。
@@ -341,10 +354,15 @@ pub fn set_bookmarked(connection_id: &str, path: &str, bookmarked: bool) -> AppR
     db::with_db(|conn| set_bookmarked_in(conn, connection_id, path, bookmarked))
 }
 
-fn bookmarks_in(conn: &rusqlite::Connection, connection_id: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT path FROM bookmarks WHERE connection_id=?1 ORDER BY sort_order, rowid")?;
-    let rows = stmt.query_map(rusqlite::params![connection_id], |r| r.get(0))?;
+fn bookmarks_in(conn: &rusqlite::Connection, connection_id: &str) -> rusqlite::Result<Vec<Bookmark>> {
+    let mut stmt = conn.prepare("SELECT path, name FROM bookmarks WHERE connection_id=?1 ORDER BY sort_order, rowid")?;
+    let rows = stmt.query_map(rusqlite::params![connection_id], |r| Ok(Bookmark { path: r.get(0)?, name: r.get(1)? }))?;
     rows.collect()
+}
+
+fn rename_bookmark_in(conn: &rusqlite::Connection, connection_id: &str, path: &str, name: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE bookmarks SET name=?3 WHERE connection_id=?1 AND path=?2", rusqlite::params![connection_id, path, name])?;
+    Ok(())
 }
 
 fn set_bookmarked_in(conn: &rusqlite::Connection, connection_id: &str, path: &str, bookmarked: bool) -> rusqlite::Result<()> {
@@ -404,6 +422,31 @@ mod tests {
         conn
     }
 
+    fn bookmark_paths(conn: &rusqlite::Connection, connection_id: &str) -> Vec<String> {
+        bookmarks_in(conn, connection_id).unwrap().into_iter().map(|b| b.path).collect()
+    }
+
+    #[test]
+    fn a_bookmark_keeps_the_name_it_was_given_until_it_is_removed() {
+        let conn = memory_db();
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        set_bookmarked_in(&conn, "b", "/var/log", true).unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap(), [Bookmark { path: "/var/log".into(), name: String::new() }]);
+        rename_bookmark_in(&conn, "a", "/var/log", "日志").unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap(), [Bookmark { path: "/var/log".into(), name: "日志".into() }]);
+        assert_eq!(bookmarks_in(&conn, "b").unwrap()[0].name, "", "别的连接同一路径的收藏不跟着改");
+        // 重复收藏不冲掉名字
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap()[0].name, "日志");
+        rename_bookmark_in(&conn, "a", "/var/log", "").unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap()[0].name, "");
+        // 取消收藏再收藏：名字不留
+        rename_bookmark_in(&conn, "a", "/var/log", "日志").unwrap();
+        set_bookmarked_in(&conn, "a", "/var/log", false).unwrap();
+        set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
+        assert_eq!(bookmarks_in(&conn, "a").unwrap()[0].name, "");
+    }
+
     #[test]
     fn bookmarks_are_per_connection_in_the_order_added() {
         let conn = memory_db();
@@ -412,12 +455,12 @@ mod tests {
         set_bookmarked_in(&conn, "b", "/srv", true).unwrap();
         // 重复收藏不产生第二条，也不改顺序
         set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
-        assert_eq!(bookmarks_in(&conn, "a").unwrap(), ["/var/log", "/etc/nginx"]);
-        assert_eq!(bookmarks_in(&conn, "b").unwrap(), ["/srv"]);
+        assert_eq!(bookmark_paths(&conn, "a"), ["/var/log", "/etc/nginx"]);
+        assert_eq!(bookmark_paths(&conn, "b"), ["/srv"]);
         set_bookmarked_in(&conn, "a", "/var/log", false).unwrap();
-        assert_eq!(bookmarks_in(&conn, "a").unwrap(), ["/etc/nginx"]);
+        assert_eq!(bookmark_paths(&conn, "a"), ["/etc/nginx"]);
         set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
-        assert_eq!(bookmarks_in(&conn, "a").unwrap(), ["/etc/nginx", "/var/log"], "重新收藏排到最后");
+        assert_eq!(bookmark_paths(&conn, "a"), ["/etc/nginx", "/var/log"], "重新收藏排到最后");
     }
 
     #[test]
@@ -428,8 +471,8 @@ mod tests {
         set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
         set_bookmarked_in(&conn, "b", "/srv", true).unwrap();
         delete_connection_rows(&conn, "a").unwrap();
-        assert!(bookmarks_in(&conn, "a").unwrap().is_empty());
-        assert_eq!(bookmarks_in(&conn, "b").unwrap(), ["/srv"], "别的连接不受影响");
+        assert!(bookmark_paths(&conn, "a").is_empty());
+        assert_eq!(bookmark_paths(&conn, "b"), ["/srv"], "别的连接不受影响");
         let secrets: i64 = conn.query_row("SELECT COUNT(*) FROM secrets", [], |r| r.get(0)).unwrap();
         assert_eq!(secrets, 1);
     }

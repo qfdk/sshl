@@ -51,6 +51,7 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connections (
             connection_id TEXT NOT NULL,
             path          TEXT NOT NULL,
             sort_order    INTEGER NOT NULL DEFAULT 0,
+            name          TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (connection_id, path)
         );
         CREATE TABLE IF NOT EXISTS snippets (
@@ -90,6 +91,16 @@ fn open() -> AppResult<Connection> {
     // 认证方式：空 = 加这一列之前存的，按有没有私钥推断（AuthKind::from_db）
     if !has_auth {
         conn.execute("ALTER TABLE connections ADD COLUMN auth TEXT NOT NULL DEFAULT ''", [])
+            .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
+    }
+
+    // 收藏的名字：空 = 没起名，显示目录名
+    let bookmark_has_name = conn
+        .prepare("SELECT 1 FROM pragma_table_info('bookmarks') WHERE name='name'")
+        .and_then(|mut stmt| stmt.exists([]))
+        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
+    if !bookmark_has_name {
+        conn.execute("ALTER TABLE bookmarks ADD COLUMN name TEXT NOT NULL DEFAULT ''", [])
             .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
     }
 

@@ -28,7 +28,7 @@ use super::identity::{
     FileIdentity, SessionRecord, SyncStatus, TerminalIdentity, Via, record_sync_result, sync_file_user,
 };
 use super::model::{
-    FileEntry, ListCache, PaneKind, basename, bookmark_label, checks_to_permissions, format_date, format_file_size,
+    FileEntry, ListCache, PaneKind, basename, bookmark_lines, checks_to_permissions, format_date, format_file_size,
     format_permissions, is_root_path, join_path, normalize_remote_path, parent_path, permissions_to_checks,
     readable_permissions, remote_home_from, valid_octal, visible_files,
 };
@@ -314,7 +314,7 @@ pub struct FileManager {
     hide_status: Option<Task<()>>,
     menu: Option<MenuState>,
     /// 当前连接收藏的远程目录（按收藏先后）。
-    bookmarks: Vec<String>,
+    bookmarks: Vec<config_store::Bookmark>,
     /// 远程地址栏下拉列着收藏（点进地址栏时出现，一敲字换成子目录补全）。
     bookmark_list: bool,
     permission: Option<PermissionDialog>,
@@ -1452,7 +1452,7 @@ impl FileManager {
 
     fn toggle_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.remote.path.clone();
-        let bookmarked = !self.bookmarks.contains(&path);
+        let bookmarked = !self.is_bookmarked(&path);
         self.set_bookmarked(&path, bookmarked, window, cx);
     }
 
@@ -1467,6 +1467,10 @@ impl FileManager {
         Some(self.remote.path.clone()).filter(|path| !path.is_empty())
     }
 
+    fn is_bookmarked(&self, path: &str) -> bool {
+        self.bookmarks.iter().any(|bookmark| bookmark.path == path)
+    }
+
     fn showing_bookmarks(&self, kind: PaneKind) -> bool {
         kind == PaneKind::Remote && self.bookmark_list && !self.bookmarks.is_empty() && !self.remote.suggesting
     }
@@ -1475,12 +1479,12 @@ impl FileManager {
         if !self.showing_bookmarks(kind) {
             return None;
         }
-        self.remote.highlight.and_then(|i| self.bookmarks.get(i)).cloned()
+        self.remote.highlight.and_then(|i| self.bookmarks.get(i)).map(|bookmark| bookmark.path.clone())
     }
 
     /// 地址栏右端的收藏开关：当前目录已收藏是实心蓝色。
     fn bookmark_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let marked = self.bookmarks.contains(&self.remote.path);
+        let marked = self.is_bookmarked(&self.remote.path);
         let (label, tip) = if marked { ("取消收藏当前目录", "取消收藏  ⌘D") } else { ("收藏当前目录", "收藏当前目录  ⌘D") };
         div()
             .id("path-bookmark")
@@ -1529,8 +1533,9 @@ impl FileManager {
             .bg(theme::color(ui::CARD))
             .shadow_md()
             .occlude()
-            .children(self.bookmarks.iter().enumerate().map(|(index, path)| {
-                let (name, parent) = bookmark_label(path);
+            .children(self.bookmarks.iter().enumerate().map(|(index, bookmark)| {
+                let path = &bookmark.path;
+                let (name, parent) = bookmark_lines(bookmark);
                 let highlighted = highlight == Some(index);
                 let here = *path == current;
                 let group = SharedString::from(format!("bookmark-{index}"));
