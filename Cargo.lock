@@ -5557,7 +5557,7 @@ dependencies = [
 
 [[package]]
 name = "sshl"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "dirs",
  "futures",
@@ -5576,7 +5576,7 @@ dependencies = [
 
 [[package]]
 name = "sshl-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
