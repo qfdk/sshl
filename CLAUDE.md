@@ -112,6 +112,15 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
+- **本机终端**（⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
+  接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；
+  键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
+  TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上
+  （`seq` 这类逐行 write 的和 `script -q /dev/null` 一样慢，是内核开销，不是终端）。
+  工作区里本机标签 id 是 `local:<n>`（`Session.local`）：只有终端（不显示 终端 / 文件管理 / 系统、填充密码，⌘2 / ⌘3 不切），
+  shell 退出标签直接关；⌘W 前台只有 shell 时直接关，有程序在跑（`tcgetpgrp` ≠ shell）才问；新标签从当前本机标签前台进程的目录开始
+  （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段「仅本机」归属 `local`，所有本机标签共用。
+  标签切换 ⌘⇧] / ⌘⇧[、⌃Tab / ⌃⇧Tab（`groups::cycle_tab`，两头绕回）。
 - **快速连接**（⌘K，`quick_connect.rs`）：顶部居中的浮层，只搜保存的连接（空格分开的每个词都要出现在名称 / 主机 / 用户 / 分组里，
   名称以第一个词开头的排前面），↑↓ 选、↵ 连、Esc / 点外面关；已开着的带绿点、选了就切过去（`connect_to_saved`）。
   顺序同侧栏。侧栏收起时空页面提示 ⌘K。有对话框 / 提示框 / 正在连接时不弹。

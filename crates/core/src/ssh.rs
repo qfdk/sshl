@@ -51,7 +51,7 @@ pub trait TerminalSink: Send + Sync + 'static {
     fn closed(&self, code: Option<u32>, reason: String);
 }
 
-enum Outbound {
+pub(crate) enum Outbound {
     Data(Vec<u8>),
     Resize { cols: u32, rows: u32 },
     /// 终端线程确认已解析的原始字节数。
@@ -66,6 +66,13 @@ pub struct ShellHandle(mpsc::UnboundedSender<Outbound>);
 
 /// 对应 [`ShellHandle`] 的接收端，交给 [`connect`]。连接前写入的会排队，连上后按序发出。
 pub struct ShellReceiver(mpsc::UnboundedReceiver<Outbound>);
+
+impl ShellReceiver {
+    /// 本机终端（[`crate::local_shell`]）在自己的线程上同步收；写端全没了返回 None。
+    pub(crate) fn blocking_recv(&mut self) -> Option<Outbound> {
+        self.0.blocking_recv()
+    }
+}
 
 pub fn shell_channel() -> (ShellHandle, ShellReceiver) {
     let (tx, rx) = mpsc::unbounded_channel();

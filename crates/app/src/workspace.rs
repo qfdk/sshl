@@ -26,11 +26,14 @@ use crate::quick_connect::{self, QuickConnect, QuickConnectEvent};
 use crate::settings;
 use crate::settings_dialog::{SettingsDialog, SettingsDialogEvent};
 use crate::snippets::{SnippetDialog, SnippetDialogEvent, SnippetPanel, SnippetPanelEvent};
-use crate::terminal::{Metrics, TerminalEvent, TerminalView};
+use crate::terminal::{Metrics, Status, TerminalEvent, TerminalView};
 use crate::theme::{self, ui};
 use crate::ui as kit;
 
-actions!(workspace, [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, OpenSettings, ToggleSidebar, OpenQuickConnect]);
+actions!(
+    workspace,
+    [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
+);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -44,6 +47,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("cmd-k", OpenQuickConnect, Some("Workspace")),
+        // 本机终端和标签切换：同 Ghostty / Terminal / 浏览器
+        KeyBinding::new("cmd-t", NewLocalTerminal, Some("Workspace")),
+        KeyBinding::new("cmd-}", NextTab, Some("Workspace")),
+        KeyBinding::new("cmd-{", PrevTab, Some("Workspace")),
+        KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Workspace")),
     ]);
 }
 
@@ -63,12 +72,18 @@ pub enum MainTab {
 }
 
 pub struct Session {
+    /// 保存的连接 id；本机终端是 `local:<n>`。
     pub connection_id: String,
     /// 会话建立时的名称（连接被删后标签仍用它）。
     pub name: SharedString,
     pub view: Entity<TerminalView>,
+    /// 本机终端（没有文件管理 / 系统页 / 填充密码）。
+    pub local: bool,
     _subscription: Subscription,
 }
+
+/// 命令片段里「仅本机」的归属：所有本机标签共用（标签 id 每次都不同）。
+const LOCAL_SNIPPET_SCOPE: &str = "local";
 
 struct Pending {
     connection_id: String,
@@ -160,6 +175,8 @@ pub struct Workspace {
     pub(crate) focus: FocusHandle,
     /// 当前会话的往返延迟（连接 id，None = 超时）；切会话时清掉，量到再显示。
     pub(crate) latency: Option<(String, Option<std::time::Duration>)>,
+    /// 下一个本机标签的编号（标签 id 用，不显示）。
+    next_local: u64,
     _latency_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -241,6 +258,7 @@ impl Workspace {
             quick_open: false,
             focus: cx.focus_handle(),
             latency: None,
+            next_local: 1,
             _latency_task: cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(LATENCY_INTERVAL).await;
@@ -339,14 +357,46 @@ impl Workspace {
         self.reconnect_in_place(id, window, cx);
     }
 
+    /// ⌘T：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
+    pub(crate) fn new_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.active_session().filter(|s| s.local).and_then(|s| s.view.read(cx).local_cwd());
+        let metrics = Metrics::measure(window, cx);
+        let area = self.terminal_area.map(|b| b.size).unwrap_or_else(|| window.viewport_size());
+        let view = cx.new(|cx| TerminalView::local(cwd, metrics.grid(area), window, cx));
+        if let Status::Failed(error) = view.read(cx).status.clone() {
+            prompts::alert_later(window, cx, Options::new("打开本机终端失败").message(error));
+            return;
+        }
+        let id = format!("local:{}", self.next_local);
+        self.next_local += 1;
+        let names: Vec<String> = self.sessions.iter().filter(|s| s.local).map(|s| s.name.to_string()).collect();
+        let subscription = cx.subscribe_in(&view, window, Self::terminal_event);
+        self.sessions.push(Session { connection_id: id.clone(), name: groups::local_tab_name(&names).into(), view, local: true, _subscription: subscription });
+        self.activate(&id, window, cx);
+    }
+
+    /// ⌘⇧] / ⌘⇧[：切到右 / 左边的标签（两头绕回）。同点标签：断开的只切过去看，不自动重连。
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
+        let Some(next) = groups::cycle_tab(&ids, self.active.as_ref(), step) else { return };
+        if self.active.as_deref() == Some(next.as_str()) {
+            return;
+        }
+        if self.session(&next).is_some_and(|s| s.view.read(cx).is_disconnected()) {
+            self.activate(&next, window, cx);
+        } else {
+            self.connect_to_saved(&next, window, cx);
+        }
+    }
+
     /// 标签右键「关闭其他标签」：一次确认，断开除它以外的所有会话，停在它上面。
     pub(crate) fn close_other_tabs(&mut self, keep: &str, window: &mut Window, cx: &mut Context<Self>) {
         let others: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).filter(|id| id != keep).collect();
         if others.is_empty() {
             return;
         }
-        let message = format!("确定要断开其他 {} 个会话吗？", others.len());
-        let answer = prompts::confirm(window, cx, Options::new("关闭其他标签").message(message).confirm("断开"));
+        let message = format!("确定要关闭其他 {} 个标签吗？连着的会话会断开。", others.len());
+        let answer = prompts::confirm(window, cx, Options::new("关闭其他标签").message(message).confirm("关闭"));
         let keep = keep.to_string();
         cx.spawn_in(window, async move |this, cx| {
             if !answer.await.unwrap_or(false) {
@@ -462,6 +512,7 @@ impl Workspace {
                     connection_id: pending.connection_id.clone(),
                     name: pending.name,
                     view: pending.view,
+                    local: false,
                     _subscription: subscription,
                 });
                 self.activate(&pending.connection_id, window, cx);
@@ -474,6 +525,12 @@ impl Workspace {
             TerminalEvent::Declined if is_pending => {
                 self.pending = None;
                 cx.notify();
+            }
+            // 本机 shell 退出（exit、^D）：标签直接关掉，同 Ghostty / Terminal
+            TerminalEvent::Closed if self.sessions.iter().any(|s| &s.view == view && s.local) => {
+                if let Some(connection_id) = self.sessions.iter().find(|s| &s.view == view).map(|s| s.connection_id.clone()) {
+                    self.disconnect_now(&connection_id, window, cx);
+                }
             }
             // 远端关了（exit、掉线）：标签和屏幕留着，终端里提示按回车重连；文件管理显示已断开
             TerminalEvent::Closed => {
@@ -546,6 +603,12 @@ impl Workspace {
             Some(FileSession { session_id, connection_id: s.connection_id.clone(), name: s.name.clone() })
         });
         let disconnected = self.session(connection_id).is_some_and(|s| s.view.read(cx).is_disconnected());
+        // 本机标签只有终端：停在文件管理 / 系统页时切回终端
+        if self.session(connection_id).is_some_and(|s| s.local) && self.main_tab != MainTab::Terminal {
+            self.main_tab = MainTab::Terminal;
+            self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
+            self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
+        }
         let id = connection_id.to_string();
         let system_session = file_session.as_ref().map(|s| s.session_id.clone());
         self.system_panel.update(cx, |panel, cx| panel.set_session(system_session, cx));
@@ -601,6 +664,22 @@ impl Workspace {
     /// 所有断开入口（标签 ×、侧栏、右键菜单、顶栏按钮、⌘W）都走这里，统一先确认。
     pub(crate) fn disconnect(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session(connection_id) else { return };
+        // 本机标签：前台只有 shell 时直接关；有程序在跑（vim、ssh、dev server）才问
+        if session.local {
+            let connection_id = connection_id.to_string();
+            let Some(program) = session.view.read(cx).local_busy() else {
+                return self.disconnect_now(&connection_id, window, cx);
+            };
+            let message = format!("「{program}」还在运行，关闭标签会结束它。");
+            let answer = prompts::confirm(window, cx, Options::new(format!("关闭「{}」", session.name)).message(message).confirm("关闭"));
+            cx.spawn_in(window, async move |this, cx| {
+                if answer.await.unwrap_or(false) {
+                    let _ = this.update_in(cx, |this, window, cx| this.disconnect_now(&connection_id, window, cx));
+                }
+            })
+            .detach();
+            return;
+        }
         // 已经断开的标签：关掉就是了，不用确认
         if session.view.read(cx).is_disconnected() {
             let connection_id = connection_id.to_string();
@@ -636,8 +715,10 @@ impl Workspace {
         let Some(index) = self.sessions.iter().position(|s| s.connection_id == connection_id) else { return };
         let session = self.sessions.remove(index);
         // 正在重连时关掉：连接请求一起取消，免得连上一个没人管的会话
-        let attempt = session.view.read(cx).attempt_id.clone();
-        backend::get().runtime.spawn(async move { ssh::cancel_connect(&backend::get().state, &attempt).await });
+        if !session.local {
+            let attempt = session.view.read(cx).attempt_id.clone();
+            backend::get().runtime.spawn(async move { ssh::cancel_connect(&backend::get().state, &attempt).await });
+        }
         if let Some(session_id) = session.view.read(cx).session_id().map(str::to_string) {
             // 用户主动断开：探活结果回来时不能把它当成「连接失效」去自动重连
             self.revalidating.remove(&session_id);
@@ -929,11 +1010,25 @@ impl Workspace {
 
     // ---------- 命令片段 ----------
 
+    /// 命令片段归属的连接 id 和名字：本机标签共用一个（[`LOCAL_SNIPPET_SCOPE`]）。
+    fn snippet_scope(&self) -> Option<(String, SharedString)> {
+        let id = self.active.clone()?;
+        if self.session(&id).is_some_and(|s| s.local) {
+            return Some((LOCAL_SNIPPET_SCOPE.into(), "本机".into()));
+        }
+        let name = self
+            .connection(&id)
+            .map(|c| SharedString::from(c.name.clone()))
+            .or_else(|| self.session(&id).map(|s| s.name.clone()))
+            .unwrap_or_default();
+        Some((id, name))
+    }
+
     pub(crate) fn toggle_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.snippets_open {
             return self.close_snippets(window, cx);
         }
-        let Some(connection_id) = self.active.clone() else { return };
+        let Some((connection_id, _)) = self.snippet_scope() else { return };
         if self.snippet_dialog.is_some() {
             return;
         }
@@ -976,12 +1071,7 @@ impl Workspace {
     }
 
     fn open_snippet_dialog(&mut self, editing: Option<sshl_core::config_store::Snippet>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(connection_id) = self.active.clone() else { return };
-        let name = self
-            .connection(&connection_id)
-            .map(|c| SharedString::from(c.name.clone()))
-            .or_else(|| self.session(&connection_id).map(|s| s.name.clone()))
-            .unwrap_or_default();
+        let Some((connection_id, name)) = self.snippet_scope() else { return };
         self.snippets_open = false;
         let dialog = cx.new(|cx| SnippetDialog::new(editing, connection_id, name, window, cx));
         // 存好或取消都回到片段面板：新建的那条马上就能点
@@ -1008,6 +1098,10 @@ impl Workspace {
 
     pub(crate) fn set_main_tab(&mut self, tab: MainTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.active.is_none() || self.main_tab == tab {
+            return;
+        }
+        // 本机标签没有文件管理 / 系统页
+        if tab != MainTab::Terminal && self.active_session().is_some_and(|s| s.local) {
             return;
         }
         self.main_tab = tab;
@@ -1192,6 +1286,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.set_main_tab(MainTab::System, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_snippets(window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
+            .on_action(cx.listener(|this, _: &NewLocalTerminal, window, cx| this.new_local_terminal(window, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
             .on_action(cx.listener(|this, _: &OpenQuickConnect, window, cx| this.toggle_quick_connect(window, cx)))
@@ -1253,10 +1350,21 @@ impl Render for Workspace {
                                                 .gap_4()
                                                 .child(div().text_sm().text_color(theme::color(0xcbd5e1)).child(if sidebar_collapsed { "按 ⌘K 快速连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
                                                 .child(
-                                                    kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), "新建连接")
-                                                        .h(px(32.))
-                                                        .text_size(px(13.))
-                                                        .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
+                                                    div()
+                                                        .flex()
+                                                        .gap_3()
+                                                        .child(
+                                                            kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), "新建连接")
+                                                                .h(px(32.))
+                                                                .text_size(px(13.))
+                                                                .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
+                                                        )
+                                                        .child(
+                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), "本机终端 ⌘T")
+                                                                .h(px(32.))
+                                                                .text_size(px(13.))
+                                                                .on_click(cx.listener(|this, _, window, cx| this.new_local_terminal(window, cx))),
+                                                        ),
                                                 ),
                                         ),
                                     }),

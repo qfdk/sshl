@@ -42,6 +42,8 @@ impl Workspace {
             self.tab_drop = None;
         }
         let connected = self.active.is_some();
+        // 本机标签只有终端：不放 终端 / 文件管理 / 系统 和填充密码
+        let local = self.active_session().is_some_and(|s| s.local);
         let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
         drag_region("topbar")
             .flex()
@@ -80,8 +82,9 @@ impl Workspace {
                                 .child(text),
                         )
                     })
-                    .when(connected, |r| r.child(self.snippet_button(cx)).child(self.main_tabs(cx)))
-                    .when(connected && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
+                    .when(connected, |r| r.child(self.snippet_button(cx)))
+                    .when(connected && !local, |r| r.child(self.main_tabs(cx)))
+                    .when(connected && !local && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
                         r.child(self.fill_button(cx))
                     })
                     .when_some(self.fill_menu_panel(window, cx), |r, panel| r.child(panel)),
@@ -295,6 +298,7 @@ impl Workspace {
                 };
                 let dragging = self.dragging.as_deref() == Some(id.as_str()) && cx.has_active_drag();
                 let disconnected = session.view.read(cx).is_disconnected();
+                let close_label = SharedString::from(format!("{} {name}", if session.local { "关闭" } else { "断开" }));
                 let (click_id, close_id, drag_id, move_id, drop_name) = (id.clone(), id.clone(), id.clone(), id.clone(), name.clone());
                 div()
                     .id(SharedString::from(format!("tab-{id}")))
@@ -362,7 +366,7 @@ impl Workspace {
                             }),
                     )
                     .child(
-                        kit::mini_button(SharedString::from(format!("close-{id}")), Icon::X, SharedString::from(format!("断开 {name}")), ui::MUTED_FOREGROUND)
+                        kit::mini_button(SharedString::from(format!("close-{id}")), Icon::X, close_label, ui::MUTED_FOREGROUND)
                             .mr_1()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();

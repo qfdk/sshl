@@ -37,6 +37,8 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 bytes = "1"
 tracing = "0.1"
+# 本机终端：openpty / setsid / 进程信息（版本同依赖树里已有的）
+libc = "0.2"
 
 [dev-dependencies]
 # tokio::time::pause：SFTP 卡死检测的单元测试用虚拟时钟

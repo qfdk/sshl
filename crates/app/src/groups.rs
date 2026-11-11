@@ -131,9 +131,44 @@ pub fn move_tab<T: PartialEq + Clone>(ids: &[T], dragged: &T, target: &T, side: 
     rest
 }
 
+/// ⌘⇧] / ⌘⇧[（⌃Tab / ⌃⇧Tab）：从 `current` 往右 / 左数 `step` 个标签，两头绕回。
+pub fn cycle_tab<T: PartialEq + Clone>(ids: &[T], current: Option<&T>, step: isize) -> Option<T> {
+    if ids.is_empty() {
+        return None;
+    }
+    let at = current.and_then(|c| ids.iter().position(|id| id == c)).map_or(0, |i| i as isize + step);
+    ids.get(at.rem_euclid(ids.len() as isize) as usize).cloned()
+}
+
+/// 新本机标签的名字：「本机」，已有的话「本机 2」「本机 3」…，取最小的没用过的。
+pub fn local_tab_name(existing: &[String]) -> String {
+    (1..)
+        .map(|n| if n == 1 { "本机".to_string() } else { format!("本机 {n}") })
+        .find(|name| !existing.contains(name))
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycling_tabs_wraps_around_both_ends() {
+        let ids = ["a", "b", "c"];
+        assert_eq!(cycle_tab(&ids, Some(&"c"), 1), Some("a"));
+        assert_eq!(cycle_tab(&ids, Some(&"a"), -1), Some("c"));
+        assert_eq!(cycle_tab(&ids, Some(&"a"), 1), Some("b"));
+        assert_eq!(cycle_tab(&ids, None, 1), Some("a"), "没有当前标签时从第一个开始");
+        assert_eq!(cycle_tab::<&str>(&[], None, 1), None);
+    }
+
+    #[test]
+    fn local_tabs_take_the_smallest_free_number() {
+        assert_eq!(local_tab_name(&[]), "本机");
+        assert_eq!(local_tab_name(&["本机".into()]), "本机 2");
+        assert_eq!(local_tab_name(&["本机".into(), "本机 3".into()]), "本机 2");
+        assert_eq!(local_tab_name(&["本机 2".into()]), "本机");
+    }
 
     fn conn(id: &str, group: &str) -> StoredConnection {
         StoredConnection {

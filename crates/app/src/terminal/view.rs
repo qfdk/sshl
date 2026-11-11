@@ -20,6 +20,7 @@ use gpui::{
 use libghostty_vt::{key, mouse};
 use sshl_core::error::AppError;
 use sshl_core::known_hosts::{HostKeyCheck, HostKeyPrompt, HostKeyQuestion};
+use sshl_core::local_shell::{self, LocalOptions, LocalShell};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
@@ -91,6 +92,8 @@ impl Metrics {
 pub enum Status {
     Connecting,
     Connected { session_id: String },
+    /// 本机 shell 在跑。
+    Local,
     Failed(String),
     Closed,
 }
@@ -204,6 +207,8 @@ fn host_key_options(question: &HostKeyQuestion) -> Options {
 pub struct TerminalView {
     handle: TerminalHandle,
     shell: ShellHandle,
+    /// 本机终端（不是 SSH）。
+    local: Option<LocalShell>,
     /// shell 输出的去处（终端线程 + 界面消息），重连时接到新通道上。
     sink: Arc<Sink>,
     connect_task: Option<Task<()>>,
@@ -238,6 +243,26 @@ impl Focusable for TerminalView {
 
 impl TerminalView {
     pub fn connect(details: ConnectionDetails, grid: GridSize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (mut view, shell_rx) = Self::new(grid, window, cx);
+        view.start_connection(details, shell_rx, window, cx);
+        view
+    }
+
+    /// 本机终端：起登录 shell（`cwd` 为 None 时在主目录）。起不来时状态是 Failed。
+    pub fn local(cwd: Option<std::path::PathBuf>, grid: GridSize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let (mut view, shell_rx) = Self::new(grid, window, cx);
+        let options = LocalOptions { cwd, cols: grid.cols, rows: grid.rows, program: None };
+        match local_shell::spawn(options, shell_rx, view.sink.clone()) {
+            Ok(shell) => {
+                view.local = Some(shell);
+                view.status = Status::Local;
+            }
+            Err(error) => view.status = Status::Failed(error.to_string()),
+        }
+        view
+    }
+
+    fn new(grid: GridSize, window: &mut Window, cx: &mut Context<Self>) -> (Self, ssh::ShellReceiver) {
         let (shell, shell_rx) = ssh::shell_channel();
         let (ui_tx, mut ui_rx) = unbounded::<UiMsg>();
         let notify_tx = ui_tx.clone();
@@ -263,7 +288,11 @@ impl TerminalView {
                     }
                     UiMsg::Engine(engine::Event::Bell) => {}
                     UiMsg::Closed => {
-                        if matches!(view.status, Status::Connected { .. }) {
+                        if view.status == Status::Local {
+                            // 本机 shell 退出了：工作区直接关掉标签（同 Ghostty / Terminal）
+                            view.status = Status::Closed;
+                            cx.emit(TerminalEvent::Closed);
+                        } else if matches!(view.status, Status::Connected { .. }) {
                             view.status = Status::Closed;
                             view.notice("连接已断开 · 按 Enter 重新连接");
                             cx.emit(TerminalEvent::Closed);
@@ -313,9 +342,10 @@ impl TerminalView {
         })
         .detach();
 
-        let mut view = Self {
+        let view = Self {
             handle,
             shell,
+            local: None,
             sink,
             connect_task: None,
             frame: Arc::new(Frame::default()),
@@ -334,8 +364,7 @@ impl TerminalView {
             scroll_remainder: 0.0,
             _tasks: vec![events_task, blink_task],
         };
-        view.start_connection(details, shell_rx, window, cx);
-        view
+        (view, shell_rx)
     }
 
     /// 发起连接（首次 / 重连），结果更新状态并通知工作区。
@@ -402,7 +431,7 @@ impl TerminalView {
 
     /// 命令片段发到终端：按粘贴发（多行命令不会一行一行地先执行），`execute` 时再补一个回车。断开时不发。
     pub fn send_command(&mut self, command: &str, execute: bool) {
-        if self.is_disconnected() || self.session_id().is_none() {
+        if self.is_disconnected() || (self.session_id().is_none() && !self.is_local()) {
             return;
         }
         self.input(Input::Paste(command.to_string()));
@@ -426,6 +455,20 @@ impl TerminalView {
 
     pub fn password_prompt(&self) -> bool {
         self.password_prompt
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.local.is_some()
+    }
+
+    /// 本机终端前台在跑的程序（不是 shell 自己时）：关标签前问一声。
+    pub fn local_busy(&self) -> Option<String> {
+        self.local.as_ref().filter(|_| self.status == Status::Local)?.foreground_program()
+    }
+
+    /// 本机终端此刻的目录：新开的本机标签从这里开始。
+    pub fn local_cwd(&self) -> Option<std::path::PathBuf> {
+        self.local.as_ref()?.cwd()
     }
 
     /// 关闭：结束终端通道（远端会话随之断开）。
@@ -640,6 +683,7 @@ impl Render for TerminalView {
         let focused = self.focus.is_focused(window) && window.is_window_active();
         self.focused = focused;
         let connected = matches!(self.status, Status::Connected { .. });
+        let local = self.status == Status::Local;
         div()
             .id("terminal")
             .key_context(CONTEXT)
@@ -662,6 +706,14 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_scroll(cx.listener(Self::scroll))
+            // 本机：从 Finder 拖进来的文件把路径（转义好）填到命令行，同 Terminal / Ghostty
+            .when(local, |d| {
+                d.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    let text: Vec<String> = paths.paths().iter().map(|p| shell_escape(&p.to_string_lossy())).collect();
+                    this.input(Input::Paste(format!("{} ", text.join(" "))));
+                    cx.notify();
+                }))
+            })
             .when(connected, |d| {
                 d.on_drag_move::<ExternalPaths>(cx.listener(|this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
                     let inside = event.bounds.contains(&event.event.position);
@@ -739,6 +791,18 @@ impl EntityInputHandler for TerminalView {
     fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
         None
     }
+}
+
+/// 拖进本机终端的路径：shell 特殊字符前加反斜杠（中文等非 ASCII 原样保留）。
+fn shell_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if !(c.is_ascii_alphanumeric() || !c.is_ascii() || "/._-+,:@%=^~".contains(c)) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn hsla(c: Rgb) -> Hsla {
@@ -1079,5 +1143,12 @@ mod tests {
         assert_eq!(resolve(&keymap, "tab"), 0);
         assert_eq!(resolve(&keymap, "shift-tab"), 0);
         assert_eq!(resolve(&keymap, "cmd-c"), 1);
+    }
+
+    #[test]
+    fn dropped_paths_are_escaped_for_the_shell_but_keep_non_ascii() {
+        assert_eq!(shell_escape("/Users/me/My File (1).txt"), r"/Users/me/My\ File\ \(1\).txt");
+        assert_eq!(shell_escape("/tmp/a'b\"$c&d"), r#"/tmp/a\'b\"\$c\&d"#);
+        assert_eq!(shell_escape("/Users/me/下载/报告-v2.pdf"), "/Users/me/下载/报告-v2.pdf");
     }
 }

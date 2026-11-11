@@ -3,4 +3,4 @@ pub mod frame;
 mod keys;
 pub mod view;
 
-pub use view::{Metrics, TerminalEvent, TerminalView};
+pub use view::{Metrics, Status, TerminalEvent, TerminalView};

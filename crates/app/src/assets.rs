@@ -58,6 +58,7 @@ icons! {
     Search => "search",
     Server => "server",
     Settings => "settings",
+    SquareTerminal => "square-terminal",
     Trash => "trash-2",
     Type => "type",
     Upload => "upload",
