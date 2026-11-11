@@ -36,6 +36,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 /// 搜索回滚历史每轮最多占这么久，然后回头处理按键和输出。
 const SEARCH_SLICE: Duration = Duration::from_millis(4);
+/// 匹配不超过这么多时，每次刷新都精确算「第几个」（要取整张匹配列表）；再多就只在首次选中时算一次。
+const NEWEST_EXACT_MAX: usize = 20_000;
 /// 回滚历史上限。
 const SCROLLBACK_BYTES: usize = 20 * 1024 * 1024;
 
@@ -370,11 +372,15 @@ impl Engine {
         let mut dirty = false;
         // 回滚历史还没搜完：不阻塞等消息，每轮接着搜一片
         let mut searching = false;
+        // 画面变了、搜索结果还没跟上；下次最早什么时候再刷新搜索（按上次的耗时节流）
+        let mut search_stale = false;
+        let mut search_next = Instant::now();
         let mut bell = false;
         let mut last_frame = Instant::now() - FRAME_INTERVAL;
         loop {
             // 有积压就不阻塞；否则等消息。有待发的 PTY 尺寸、或画面改了但还没到出帧时刻时，最多等到那一刻
-            let wait = if backlog.is_empty() && !searching {
+            let search_due = (self.search.is_some() && (searching || search_stale)).then_some(search_next);
+            let wait = if backlog.is_empty() {
                 // hold 期间画面改了也不出帧（只等 hold 结束或超时）；hold 开始时留下的那一帧照常按时交出去
                 let (unsent, held_since) = {
                     let painter = self.painter.borrow();
@@ -382,7 +388,7 @@ impl Engine {
                 };
                 let frame_due = (unsent || (dirty && held_since.is_none())).then(|| last_frame + FRAME_INTERVAL);
                 let hold_due = held_since.map(|since| since + HOLD_TIMEOUT);
-                earliest(earliest(self.pty_deadline(), frame_due), hold_due)
+                earliest(earliest(earliest(self.pty_deadline(), frame_due), hold_due), search_due)
                     .map(|deadline| deadline.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
@@ -399,6 +405,8 @@ impl Engine {
                 },
             };
             // 按键、改尺寸等控制消息立刻处理（刷屏时 ^C 不排在积压的输出后面），输出进积压
+            // 这一轮终端有没有变（按键、改尺寸、新输出）：搜索结果要跟着刷新
+            let mut touched = false;
             for input in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
                 match input {
                     Input::Shutdown => return,
@@ -408,6 +416,7 @@ impl Engine {
                     other => {
                         self.handle(other);
                         dirty = true;
+                        touched = true;
                     }
                 }
             }
@@ -429,17 +438,27 @@ impl Engine {
                     offset = 0;
                 }
                 dirty = true;
+                touched = true;
             }
             if self.unacked > 0 {
                 self.shell.lock().unwrap().ack(std::mem::take(&mut self.unacked));
             }
             self.flush_pty_size();
-            if self.search.is_some() && (dirty || searching) {
-                let (changed, pending) = self.refresh_search();
-                dirty |= changed;
-                searching = pending;
-            } else {
+            if self.search.is_none() {
                 searching = false;
+                search_stale = false;
+            } else {
+                search_stale |= touched;
+                if (searching || search_stale) && Instant::now() >= search_next {
+                    let started = Instant::now();
+                    let (changed, pending) = self.refresh_search();
+                    dirty |= changed;
+                    searching = pending;
+                    search_stale = false;
+                    // 节流：搜索最多占这个线程约两成时间。平时一次几十微秒，等于不限；匹配几十万个时一次要几毫秒，
+                    // 刷屏中每帧都刷新会拖慢解析和按键，高亮晚一点跟上没关系
+                    search_next = Instant::now() + started.elapsed() * 4;
+                }
             }
             // 出帧：两帧至少隔 FRAME_INTERVAL（屏幕刷新一次）。原来积压一清空就立刻出帧，刷屏时数据一小块一小块地到、
             // 每块都清空积压，一秒出上千帧（屏幕只显示 60 帧），多出来的都白算。打字时两次按键间隔远大于它，回显照样立刻出帧
@@ -797,48 +816,52 @@ impl Engine {
 }
 
 impl SearchDriver {
+    /// 推进一片并取结果。libghostty 的 feed 在匹配很多时不便宜（22 万个匹配实测 7ms 一次），所以每次只 feed 一回：
+    /// 先在已经取到的数据里 tick，再用一份快照（它会 feed）同时算编号、取屏幕上的匹配。
     fn refresh(&mut self, term: &mut Terminal<'static, 'static>, size: GridSize) -> libghostty_vt::error::Result<frame::SearchInfo> {
-        // feed 让搜索看到终端的新内容并取下一段回滚历史，tick 在已取的数据里找
         let started = Instant::now();
-        let mut status;
-        loop {
-            self.search.feed(term)?;
-            status = self.search.status()?;
-            while status == SearchStatus::Running && started.elapsed() < SEARCH_SLICE {
-                status = self.search.tick()?;
-            }
-            if status == SearchStatus::Complete || started.elapsed() >= SEARCH_SLICE {
-                break;
-            }
+        let mut status = self.search.status()?;
+        while status == SearchStatus::Running && started.elapsed() < SEARCH_SLICE {
+            status = self.search.tick()?;
         }
-        let searching = status != SearchStatus::Complete;
-        let total = self.search.total_matches()?;
-        if self.autoselect && total > 0 {
+        let found = self.search.total_matches()?;
+        if self.autoselect && found > 0 {
             self.autoselect = false;
             let newest = self.newest_index(term)?;
-            let selected = self.select_newest(term, newest, total);
+            let selected = self.select_newest(term, newest, found);
             // 中途出错也把滚动策略改回来
             self.search.set_scroll(SearchScroll::IfNeeded)?;
             selected?;
-        } else if !searching {
-            self.autoselect = false;
         }
-        // 界面上的「第几个」从真正最新的那个算起
-        let selected = match self.search.selected_index()? {
-            Some(index) if total > 0 => Some((index + total - self.newest_index(term)? % total) % total),
-            _ => None,
-        };
+        let index = self.search.selected_index()?;
         let mut spans = Vec::new();
-        let snapshot = self.search.snapshot(term)?;
-        let term = snapshot.terminal();
-        let at = |grid_ref| term.point_from_grid_ref(&grid_ref, PointSpace::Viewport).ok().flatten().map(|p| (p.x, p.y));
-        let current = snapshot.selected_match()?;
-        for found in snapshot.viewport_matches(&mut self.storage)? {
-            let is_current = current.as_ref().is_some_and(|current| current.equals(term, &found).unwrap_or(false));
-            frame::match_spans(at(found.start()), at(found.end()), size.cols, size.rows, is_current, &mut spans);
+        let mut newest = 0;
+        {
+            let snapshot = self.search.snapshot(term)?;
+            let term = snapshot.terminal();
+            // 「第几个」从真正最新的那个算起。要把整张列表取出来，匹配太多时不值得每次都做：那时编号差几个也看不出来
+            if index.is_some() && found <= NEWEST_EXACT_MAX {
+                let all: Vec<_> = snapshot.matches(&mut self.storage)?.collect();
+                let position = |i: usize| term.point_from_grid_ref(&all[i].start(), PointSpace::Screen).ok().flatten().map(|p| (p.y, p.x));
+                newest = frame::newest_index(all.len(), position);
+            }
+            let at = |grid_ref| term.point_from_grid_ref(&grid_ref, PointSpace::Viewport).ok().flatten().map(|p| (p.x, p.y));
+            let current = snapshot.selected_match()?;
+            for found in snapshot.viewport_matches(&mut self.storage)? {
+                let is_current = current.as_ref().is_some_and(|current| current.equals(term, &found).unwrap_or(false));
+                frame::match_spans(at(found.start()), at(found.end()), size.cols, size.rows, is_current, &mut spans);
+            }
         }
         spans.sort_by_key(|span| (span.y, span.start));
-        Ok(frame::SearchInfo { total, selected, searching, spans })
+        // 快照 feed 过了：状态和总数以它之后的为准
+        let searching = self.search.status()? != SearchStatus::Complete;
+        let total = self.search.total_matches()?;
+        if total == 0 && !searching {
+            self.autoselect = false;
+        }
+        let selected = index.filter(|_| total > 0).map(|index| (index + total - newest % total) % total);
+        // 有结果了但还没选中（刚 feed 出来的）：下一轮接着做
+        Ok(frame::SearchInfo { total, selected, searching: searching || (self.autoselect && total > 0), spans })
     }
 }
 
