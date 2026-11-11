@@ -1233,7 +1233,7 @@ fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<W
 /// 红绿灯（`main.rs` 的 `traffic_light_position`）连同右边留白占的宽度：侧栏收起时顶栏从这里往右排。
 pub(crate) const TRAFFIC_LIGHTS_WIDTH: f32 = 84.;
 /// 侧栏收起时右栏的上边距：让 34px 高的顶栏和红绿灯竖直居中对齐。
-const TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS: f32 = 7.;
+pub(crate) const TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS: f32 = 7.;
 /// 内容区（终端 / 文件管理 / 系统页）到窗口右边、下边的留白；侧栏收起时左边也是它（展开时紧挨侧栏只留 4px）。
 /// 没有底部状态栏了，留白收到最小，卡片几乎铺满窗口。
 pub(crate) const COLLAPSED_COLUMN_LEFT: f32 = 6.;
@@ -1315,8 +1315,7 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .gap(px(10.))
-                            // 侧栏收起时顶栏和红绿灯同一行：上边距收到让两者竖直居中对齐
-                            .map(|column| if sidebar_collapsed && !window.is_fullscreen() { column.pt(px(TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS)) } else { column.pt_3() })
+                            // 上边距算在顶栏里（顶栏是拖动区，窗口最上面那条也要能拖），见 `top_bar`
                             .pr(px(COLLAPSED_COLUMN_LEFT))
                             .pb(px(COLLAPSED_COLUMN_LEFT))
                             .map(|column| if sidebar_collapsed { column.pl(px(COLLAPSED_COLUMN_LEFT)) } else { column.pl_1() })

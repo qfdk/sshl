@@ -11,7 +11,7 @@ use crate::settings;
 use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
-use crate::workspace::{COLLAPSED_COLUMN_LEFT, ConnectionMenu, DraggedTab, MainTab, TRAFFIC_LIGHTS_WIDTH, Workspace, controls, drag_region};
+use crate::workspace::{COLLAPSED_COLUMN_LEFT, ConnectionMenu, DraggedTab, MainTab, TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS, TRAFFIC_LIGHTS_WIDTH, Workspace, controls, drag_region};
 
 /// 按住 ⌘ 时浮在标签 / 按钮右上角的快捷键。
 fn hint(key: impl Into<SharedString>, visible: bool) -> AnyElement {
@@ -46,6 +46,8 @@ impl Workspace {
         let local = self.active_session().is_some_and(|s| s.local);
         let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
         drag_region("topbar")
+            // 窗口顶上到标签之间那条也属于拖动区；侧栏收起时顶栏和红绿灯同一行，上边距收到让两者竖直居中对齐
+            .map(|bar| if sidebar_collapsed && !window.is_fullscreen() { bar.pt(px(TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS)) } else { bar.pt_3() })
             .flex()
             .flex_shrink_0()
             .flex_wrap()

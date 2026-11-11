@@ -110,6 +110,9 @@ fn main() {
                 traffic_light_position: Some(point(px(16.), px(17.))),
             }),
             window_min_size: Some(gpui::size(px(900.), px(600.))),
+            // 标题栏是自己画的（标签、按钮都在红绿灯那一条里），拖窗口只走 workspace::drag_region。
+            // 不设的话 AppKit 在标题栏高度内自己拖窗口：拖标签排序时整个窗口跟着走，GPUI 拦不住
+            app_owns_titlebar_drag: true,
             ..Default::default()
         };
         let window = cx
