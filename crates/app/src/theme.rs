@@ -13,6 +13,14 @@ pub fn alpha(hex: u32, a: f32) -> Hsla {
     c
 }
 
+/// gpui-base 行为层用到的主题色。输入框的选区取强调色的 40%：它默认的强调色是近白的浅灰，
+/// 画在白底输入框上看不出选中了什么，换成主色蓝。
+pub fn base_tokens() -> gpui_base::SemanticThemeTokens {
+    let mut tokens = gpui_base::SemanticThemeTokens::default();
+    tokens.colors.accent = color(ui::PRIMARY);
+    tokens
+}
+
 /// 界面颜色（亮色）。
 pub mod ui {
     pub const SHELL: u32 = 0xf3f4f6;
@@ -73,3 +81,33 @@ pub mod term {
 
 /// 终端卡片四边的内边距（逻辑像素）。
 pub const TERMINAL_PADDING: f32 = 4.0;
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Hsla, Rgba};
+    use gpui_base::input::InputEditorStyle;
+
+    use super::*;
+
+    fn luminance(c: Rgba) -> f32 {
+        let lin = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+
+    fn over(top: Hsla, bottom: Hsla) -> Rgba {
+        let (t, b) = (Rgba::from(top), Rgba::from(bottom));
+        let mix = |t: f32, b: f32| t * top.a + b * (1. - top.a);
+        Rgba { r: mix(t.r, b.r), g: mix(t.g, b.g), b: mix(t.b, b.b), a: 1. }
+    }
+
+    #[test]
+    fn input_selection_is_visible_on_a_white_field() {
+        let selection = InputEditorStyle::default().resolved(&base_tokens()).selection;
+        let field = color(ui::CARD);
+        let contrast = (luminance(field.into()) + 0.05) / (luminance(over(selection, field)) + 0.05);
+        assert!(contrast > 1.4, "选区和输入框底色分不出来：对比度 {contrast}");
+        // 选区下的字还要看得清
+        let text = (luminance(over(selection, field)) + 0.05) / (luminance(color(ui::FOREGROUND).into()) + 0.05);
+        assert!(text > 7., "选区里的字不清楚：对比度 {text}");
+    }
+}

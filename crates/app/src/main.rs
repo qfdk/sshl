@@ -54,6 +54,7 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         gpui_base::init(cx);
+        gpui_base::Theme::global_mut(cx).tokens = theme::base_tokens();
         let prompts = prompts::init(cx);
         settings::init(cx);
         cx.text_system()
