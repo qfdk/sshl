@@ -2,7 +2,9 @@
 //! SSH 输出、键鼠、改尺寸都以消息进来；解析完一批就把屏幕整理成 [`Frame`] 交给界面，并确认流控字节数。
 //! 界面线程从不碰终端本身，刷屏时解析和整理帧都不占界面。
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -29,6 +31,8 @@ const PTY_RESIZE_INTERVAL: Duration = Duration::from_millis(33);
 const OUTPUT_SLICE: usize = 64 * 1024;
 /// 刷屏时出帧的最短间隔（约一个显示刷新周期）。
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// 同步输出（DEC 2026）最多压住画面这么久：程序崩了 / 忘了结束时不至于一直卡在旧画面（同 Ghostty）。
+const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 /// 回滚历史上限。
 const SCROLLBACK_BYTES: usize = 20 * 1024 * 1024;
 
@@ -160,28 +164,45 @@ fn ghostty(c: Rgb) -> RgbColor {
 
 struct Engine {
     term: Terminal<'static, 'static>,
-    render: RenderState<'static>,
-    row_it: RowIterator<'static>,
-    cell_it: CellIterator<'static>,
+    /// 整理帧的那部分。同步输出开始时 libghostty 的回调要在 vt_write 中途拼帧，所以单独拿出来共用。
+    painter: Rc<RefCell<Painter>>,
     key_encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
     mouse_encoder: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
     selection: SelectionGesture,
     shell: Arc<Mutex<ShellHandle>>,
-    shared: Arc<Shared>,
-    notify: Box<dyn Fn(Event) + Send>,
+    notify: Rc<dyn Fn(Event) + Send>,
     size: GridSize,
-    rows: Vec<Arc<Row>>,
     /// 解析完、还没确认给 SSH 流控的字节数。
     unacked: u32,
     pty_size: (u16, u16),
     pty_sent_at: Option<Instant>,
     pty_pending: bool,
     buf: Vec<u8>,
-    text: String,
     focused: bool,
     blink: BlinkPolicy,
+}
+
+/// 把终端整理成 [`Frame`] 交给界面。
+///
+/// 同步输出（DEC 2026，Claude Code / Ink、neovim 等重画前后各发一次）：程序开始一段「hold」时，
+/// 终端里正好是它想留在屏幕上的那一帧——就在 libghostty 的回调里（vt_write 中途，hold 之后的字节还没解析）
+/// 把它拼好；hold 期间界面一直显示这一帧，hold 结束再按最新的出帧。不这样做的话清屏、逐行重写的中间状态
+/// 会被画出来，整块界面闪。结束一段马上开始下一段时，中间那个完整的帧也是在回调里留下的，不会丢。
+struct Painter {
+    render: RenderState<'static>,
+    row_it: RowIterator<'static>,
+    cell_it: CellIterator<'static>,
+    rows: Vec<Arc<Row>>,
+    text: String,
+    /// 最近拼好的帧；`unsent` = 界面还没拿到。
+    built: Arc<Frame>,
+    unsent: bool,
+    /// 当前 hold 开始的时刻；None = 没有 hold。
+    held_since: Option<Instant>,
+    shared: Arc<Shared>,
+    notify: Rc<dyn Fn(Event) + Send>,
 }
 
 /// 光标闪不闪只听 DECSCUSR（`CSI Ps SP q`）：0 回到默认（闪），1 / 3 / 5 闪，2 / 4 / 6 不闪。
@@ -264,27 +285,49 @@ impl Engine {
         let reply = shell.clone();
         term.on_pty_write(move |_, data| reply.lock().unwrap().write(data.to_vec()))?;
 
-        Ok(Self {
-            term,
+        let notify: Rc<dyn Fn(Event) + Send> = Rc::from(notify);
+        let painter = Rc::new(RefCell::new(Painter {
             render: RenderState::new()?,
             row_it: RowIterator::new()?,
             cell_it: CellIterator::new()?,
+            rows: Vec::new(),
+            text: String::with_capacity(8),
+            built: Arc::new(Frame::default()),
+            unsent: false,
+            held_since: None,
+            shared,
+            notify: notify.clone(),
+        }));
+        let hold = painter.clone();
+        term.on_render_hold(move |term, held| {
+            // 回调在 vt_write / resize / reset 里面跑：那时不会有别处借着 painter，借不到就当没 hold（照常出帧）
+            let Ok(mut painter) = hold.try_borrow_mut() else { return };
+            if held {
+                if let Err(error) = painter.build(term) {
+                    tracing::warn!("terminal frame failed: {error}");
+                }
+                painter.held_since = Some(Instant::now());
+            } else {
+                painter.held_since = None;
+            }
+        })?;
+
+        Ok(Self {
+            term,
+            painter,
             key_encoder: key::Encoder::new()?,
             key_event: key::Event::new()?,
             mouse_encoder: mouse::Encoder::new()?,
             mouse_event: mouse::Event::new()?,
             selection: SelectionGesture::new()?,
             shell,
-            shared,
             notify,
             size,
-            rows: Vec::new(),
             unacked: 0,
             pty_size: (size.cols, size.rows),
             pty_sent_at: None,
             pty_pending: false,
             buf: Vec::with_capacity(64),
-            text: String::with_capacity(8),
             focused: true,
             blink: BlinkPolicy::default(),
         })
@@ -307,8 +350,15 @@ impl Engine {
         loop {
             // 有积压就不阻塞；否则等消息。有待发的 PTY 尺寸、或画面改了但还没到出帧时刻时，最多等到那一刻
             let wait = if backlog.is_empty() {
-                let frame_due = dirty.then(|| last_frame + FRAME_INTERVAL);
-                earliest(self.pty_deadline(), frame_due).map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                // hold 期间画面改了也不出帧（只等 hold 结束或超时）；hold 开始时留下的那一帧照常按时交出去
+                let (unsent, held_since) = {
+                    let painter = self.painter.borrow();
+                    (painter.unsent, painter.held_since)
+                };
+                let frame_due = (unsent || (dirty && held_since.is_none())).then(|| last_frame + FRAME_INTERVAL);
+                let hold_due = held_since.map(|since| since + HOLD_TIMEOUT);
+                earliest(earliest(self.pty_deadline(), frame_due), hold_due)
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now()))
             } else {
                 Some(Duration::ZERO)
             };
@@ -359,12 +409,20 @@ impl Engine {
             self.flush_pty_size();
             // 出帧：两帧至少隔 FRAME_INTERVAL（屏幕刷新一次）。原来积压一清空就立刻出帧，刷屏时数据一小块一小块地到、
             // 每块都清空积压，一秒出上千帧（屏幕只显示 60 帧），多出来的都白算。打字时两次按键间隔远大于它，回显照样立刻出帧
-            if dirty && last_frame.elapsed() >= FRAME_INTERVAL {
-                if let Err(error) = self.publish() {
+            self.expire_hold(Instant::now());
+            let (unsent, held) = {
+                let painter = self.painter.borrow();
+                (painter.unsent, painter.held_since.is_some())
+            };
+            if ((dirty && !held) || unsent) && last_frame.elapsed() >= FRAME_INTERVAL {
+                if let Err(error) = self.paint() {
                     tracing::warn!("terminal frame failed: {error}");
                 }
                 last_frame = Instant::now();
-                dirty = false;
+                // hold 里的改动留到 hold 结束 / 超时再画
+                if !held {
+                    dirty = false;
+                }
             }
             if bell {
                 bell = false;
@@ -611,8 +669,42 @@ impl Engine {
     }
 
     /// 把屏幕整理成帧交给界面：只重建脏行，没变的行沿用上一帧的 Arc。
-    fn publish(&mut self) -> libghostty_vt::error::Result<()> {
-        let snapshot = self.render.update(&self.term)?;
+    /// 出帧：没有 hold 时按终端此刻的样子拼；hold 里只交 hold 开始时留下的那一帧（还没交的话）。
+    fn paint(&mut self) -> libghostty_vt::error::Result<()> {
+        let mut painter = self.painter.borrow_mut();
+        if painter.held_since.is_none() {
+            painter.build(&self.term)?;
+        }
+        painter.send();
+        Ok(())
+    }
+
+    /// hold 超过 [`HOLD_TIMEOUT`]：自己把模式关掉，回到正常出帧（libghostty 没有时钟，不会自己结束）。
+    fn expire_hold(&mut self, now: Instant) {
+        let expired = self.painter.borrow().held_since.is_some_and(|since| now.saturating_duration_since(since) >= HOLD_TIMEOUT);
+        if expired {
+            let _ = self.term.set_mode(Mode::SYNC_OUTPUT, false);
+            self.painter.borrow_mut().held_since = None;
+        }
+    }
+}
+
+impl Painter {
+    /// 交给界面（拼好了还没交才交）。
+    fn send(&mut self) {
+        if !self.unsent {
+            return;
+        }
+        self.unsent = false;
+        *self.shared.frame.lock().unwrap() = self.built.clone();
+        if !self.shared.notified.swap(true, Ordering::AcqRel) {
+            (self.notify)(Event::Frame);
+        }
+    }
+
+    /// 按终端此刻的样子拼一帧，和上一帧一样就不动。
+    fn build(&mut self, term: &Terminal<'static, 'static>) -> libghostty_vt::error::Result<()> {
+        let snapshot = self.render.update(term)?;
         let dirty = snapshot.dirty()?;
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
@@ -717,10 +809,10 @@ impl Engine {
             _ => None,
         };
         snapshot.clean()?;
-        let mouse_tracking = self.term.is_mouse_tracking().unwrap_or(false);
-        let alternate_screen = self.term.active_screen().is_ok_and(|s| s == Screen::Alternate);
+        let mouse_tracking = term.is_mouse_tracking().unwrap_or(false);
+        let alternate_screen = term.active_screen().is_ok_and(|s| s == Screen::Alternate);
         if clean {
-            let last = self.shared.frame.lock().unwrap();
+            let last = &self.built;
             if last.cursor == cursor && last.mouse_tracking == mouse_tracking && last.alternate_screen == alternate_screen {
                 return Ok(());
             }
@@ -749,10 +841,8 @@ impl Engine {
             mouse_tracking,
             alternate_screen,
         };
-        *self.shared.frame.lock().unwrap() = Arc::new(frame);
-        if !self.shared.notified.swap(true, Ordering::AcqRel) {
-            (self.notify)(Event::Frame);
-        }
+        self.built = Arc::new(frame);
+        self.unsent = true;
         Ok(())
     }
 }
@@ -800,7 +890,7 @@ mod tests {
 
     fn cursor_x(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> u16 {
         engine.term.vt_write(bytes);
-        engine.publish().unwrap();
+        engine.paint().unwrap();
         shared.frame.lock().unwrap().cursor.unwrap().x
     }
 
@@ -817,7 +907,7 @@ mod tests {
 
     fn blinking(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> bool {
         engine.write_output(bytes);
-        engine.publish().unwrap();
+        engine.paint().unwrap();
         shared.frame.lock().unwrap().cursor.unwrap().blinking
     }
 
@@ -835,5 +925,58 @@ mod tests {
         assert!(blinking(&mut engine, &shared, b"\x1b[4"), "还没收完，不变");
         assert!(!blinking(&mut engine, &shared, b" q"), "DECSCUSR 4（分两片到）：不闪的下划线");
         assert!(!blinking(&mut engine, &shared, b"\x1b[?12h\x1b[?12l"), "DEC 12 不认，仍按 DECSCUSR 不闪");
+    }
+
+    fn first_row(shared: &Shared) -> String {
+        shared.frame.lock().unwrap().rows[0].text().trim_end().to_string()
+    }
+
+    fn painted(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> String {
+        engine.write_output(bytes);
+        engine.paint().unwrap();
+        first_row(shared)
+    }
+
+    /// 同步输出（DEC 2026）：程序在 hold 里擦掉重写，hold 结束前界面只看到上一个完整的帧，不出半截的。
+    #[test]
+    fn a_render_hold_shows_the_last_finished_frame_until_it_ends() {
+        let (mut engine, shared) = engine();
+        assert_eq!(painted(&mut engine, &shared, b"old frame"), "old frame");
+        assert_eq!(painted(&mut engine, &shared, b"\x1b[?2026h\r\x1b[2Knew fr"), "old frame", "hold 里擦了一半不画");
+        assert_eq!(painted(&mut engine, &shared, b"ame"), "old frame");
+        assert_eq!(painted(&mut engine, &shared, b"\x1b[?2026l"), "new frame", "hold 结束一次换上");
+    }
+
+    /// 一段 hold 结束、下一段马上开始（同一片输出里）：中间那个完整的帧要画出来，不能一直停在更早的帧上。
+    #[test]
+    fn back_to_back_holds_still_show_each_finished_frame() {
+        let (mut engine, shared) = engine();
+        assert_eq!(painted(&mut engine, &shared, b"frame 0"), "frame 0");
+        let both = b"\x1b[?2026h\r\x1b[2Kframe 1\x1b[?2026l\x1b[?2026h\r\x1b[2Kfra";
+        assert_eq!(painted(&mut engine, &shared, both), "frame 1");
+        assert_eq!(painted(&mut engine, &shared, b"me 2\x1b[?2026l"), "frame 2");
+    }
+
+    /// 程序开了 hold 再也不结束（崩了）：超时后照常出帧。
+    #[test]
+    fn a_hold_that_never_ends_times_out() {
+        let (mut engine, shared) = engine();
+        assert_eq!(painted(&mut engine, &shared, b"\x1b[?2026hstuck"), "");
+        engine.expire_hold(Instant::now() + HOLD_TIMEOUT);
+        engine.paint().unwrap();
+        assert_eq!(first_row(&shared), "stuck");
+        assert!(!engine.term.mode(Mode::SYNC_OUTPUT).unwrap());
+    }
+
+    /// Claude Code 先用 DECRQM 问支不支持 2026，答了「支持」才发同步输出（它不认识 TERM_PROGRAM=SSHL）。
+    /// 应答由 libghostty 生成、经 on_pty_write 写回 shell。
+    #[test]
+    fn the_terminal_reports_synchronized_output_as_supported() {
+        let replies = Rc::new(RefCell::new(Vec::new()));
+        let sink = replies.clone();
+        let mut term = Terminal::new(80, 24).unwrap();
+        term.on_pty_write(move |_, data| sink.borrow_mut().extend_from_slice(data)).unwrap();
+        term.vt_write(b"\x1b[?2026$p");
+        assert_eq!(replies.borrow().as_slice(), b"\x1b[?2026;2$y", "2 = 支持、当前关着");
     }
 }

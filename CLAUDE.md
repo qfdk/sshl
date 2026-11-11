@@ -50,6 +50,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
 - **终端线程模型**：libghostty-vt 的类型都是 `!Send`，每个会话一个终端线程独占它（`terminal/engine.rs`）。
   SSH 输出、键鼠、改尺寸都以 `Input` 消息进来；界面只拿 `Frame` 快照来画，行是 `Arc<Row>`，没变的行沿用。
   每轮先处理控制消息（按键、^C 不排在积压输出后面），输出按 64KB 切片解析，刷屏时最多 16ms 出一帧。
+  同步输出（DEC 2026，Claude Code / Ink、neovim 重画时用；libghostty 对 DECRQM 2026 答「支持」，Claude Code 据此启用）：
+  `on_render_hold` 回调在 hold 开始时（vt_write 中途）就把当时完整的一帧拼好（`Painter`），hold 期间只显示这一帧，
+  结束后按最新的出帧，最长 1s 超时。不认的话擦掉重写的中间状态会被画出来，整块闪。
   键盘 / 鼠标 / 粘贴 / 焦点的编码都交给 libghostty（应用光标键、Kitty 键盘协议、括号粘贴）；
   普通字符走 GPUI 的输入法通道（`EntityInputHandler`），中文输入法组字画在光标处。
 - **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，
