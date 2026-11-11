@@ -13,9 +13,11 @@ use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, AuthKind, SaveConnectionInput, StoredConnection};
 use sshl_core::crypto_store;
 use sshl_core::events::CoreEvent;
+use sshl_core::sftp;
 use sshl_core::ssh::{self, ConnectionDetails};
 
 use crate::backend;
+use crate::favorites::{self, FavoritePanel, FavoritePanelEvent};
 use crate::connection_dialog::{ConnectionDialog, ConnectionDialogEvent, ConnectionForm};
 use crate::import_dialog::{ImportDialog, ImportDialogEvent};
 use crate::files::{FileManager, FileManagerEvent, FileSession};
@@ -32,7 +34,7 @@ use crate::ui as kit;
 
 actions!(
     workspace,
-    [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
+    [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, ShowFavorites, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
 );
 
 /// ⌘1 … ⌘9：切到第 n 个标签（从 1 数，标签栏从左到右，本机标签也算）。
@@ -51,6 +53,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-o", ShowFiles, Some("Workspace")),
         KeyBinding::new("cmd-p", ShowSystem, Some("Workspace")),
         KeyBinding::new("cmd-shift-p", ShowSnippets, Some("Workspace")),
+        KeyBinding::new("cmd-shift-d", ShowFavorites, Some("Workspace")),
         KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
@@ -98,8 +101,17 @@ pub struct Session {
     _subscription: Subscription,
 }
 
-/// 命令片段里「仅本机」的归属：所有本机标签共用（标签 id 每次都不同）。
-const LOCAL_SNIPPET_SCOPE: &str = "local";
+/// 命令片段里「本机」的归属、本机的目录收藏：所有本机标签共用（标签 id 每次都不同）。
+const LOCAL_SCOPE: &str = "local";
+
+/// 顶栏按钮下面的面板，一次只开一个。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TopPanel {
+    /// 命令片段（⌘⇧P）。
+    Snippets,
+    /// 目录收藏（⌘⇧D）。
+    Favorites,
+}
 
 struct Pending {
     connection_id: String,
@@ -182,10 +194,11 @@ pub struct Workspace {
     pub(crate) file_manager: Entity<FileManager>,
     system_panel: Entity<SystemPanel>,
     pub(crate) snippet_panel: Entity<SnippetPanel>,
-    /// 命令片段面板开着（顶栏按钮下面）。
-    pub(crate) snippets_open: bool,
-    /// 鼠标在片段按钮上：点按钮关面板时，「点到面板外面」先关了它，按钮的点击别再把它打开。
-    pub(crate) snippet_button_hovered: bool,
+    pub(crate) favorite_panel: Entity<FavoritePanel>,
+    /// 顶栏按钮下面开着的面板。
+    pub(crate) top_panel: Option<TopPanel>,
+    /// 鼠标在哪个面板按钮上：点按钮关面板时，「点到面板外面」先关了它，按钮的点击别再把它打开。
+    pub(crate) top_panel_hovered: Option<TopPanel>,
     snippet_dialog: Option<Entity<SnippetDialog>>,
     quick_connect: Entity<QuickConnect>,
     /// 快速连接（⌘K）开着。
@@ -205,6 +218,7 @@ impl Workspace {
         let file_manager = cx.new(|cx| FileManager::new(window, cx));
         let system_panel = cx.new(|cx| SystemPanel::new(window, cx));
         let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
+        let favorite_panel = cx.new(|cx| FavoritePanel::new(window, cx));
         let quick_connect = cx.new(|cx| QuickConnect::new(window, cx));
         let subscriptions = vec![
             // 窗口退到后台（⌘ 点链接后浏览器抢了前台）：之后松开 ⌘ 我们收不到，角标不能一直挂着
@@ -218,6 +232,7 @@ impl Workspace {
                 }
             }),
             cx.subscribe_in(&snippet_panel, window, Self::snippet_panel_event),
+            cx.subscribe_in(&favorite_panel, window, Self::favorite_panel_event),
             cx.subscribe_in(&quick_connect, window, Self::quick_connect_event),
             // 系统页：没权限时的 sudo 命令、看服务日志，都发到终端
             cx.subscribe_in(&system_panel, window, |this, _, event: &SystemPanelEvent, window, cx| match event {
@@ -280,8 +295,9 @@ impl Workspace {
             file_manager,
             system_panel,
             snippet_panel,
-            snippets_open: false,
-            snippet_button_hovered: false,
+            favorite_panel,
+            top_panel: None,
+            top_panel_hovered: None,
             snippet_dialog: None,
             quick_connect,
             quick_open: false,
@@ -677,7 +693,7 @@ impl Workspace {
         self.active = Some(connection_id.to_string());
         self.measure_latency(cx);
         self.fill_menu = None;
-        self.snippets_open = false;
+        self.top_panel = None;
         let file_session = self.session(connection_id).and_then(|s| {
             let session_id = s.view.read(cx).session_id()?.to_string();
             Some(FileSession { session_id, connection_id: s.connection_id.clone(), name: s.name.clone() })
@@ -848,7 +864,7 @@ impl Workspace {
             }
             self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
             self.fill_menu = None;
-            self.snippets_open = false;
+            self.top_panel = None;
             window.focus(&self.focus, cx);
         }
     }
@@ -1071,7 +1087,7 @@ impl Workspace {
             return false;
         }
         self.quick_open = false;
-        self.snippets_open = false;
+        self.top_panel = None;
         self.fill_menu = None;
         self.menu = None;
         true
@@ -1097,7 +1113,7 @@ impl Workspace {
         if self.modal_open(cx) {
             return;
         }
-        self.snippets_open = false;
+        self.top_panel = None;
         self.fill_menu = None;
         self.menu = None;
         let list = quick_connect::sidebar_order(&self.connections, &self.group_order);
@@ -1128,11 +1144,11 @@ impl Workspace {
 
     // ---------- 命令片段 ----------
 
-    /// 命令片段归属的连接 id 和名字：本机标签共用一个（[`LOCAL_SNIPPET_SCOPE`]）。
+    /// 命令片段、目录收藏归属的连接 id 和名字：本机标签共用一个（[`LOCAL_SCOPE`]）。
     fn snippet_scope(&self) -> Option<(String, SharedString)> {
         let id = self.active.clone()?;
         if self.session(&id).is_some_and(|s| s.local) {
-            return Some((LOCAL_SNIPPET_SCOPE.into(), "本机".into()));
+            return Some((LOCAL_SCOPE.into(), "本机".into()));
         }
         let name = self
             .connection(&id)
@@ -1142,38 +1158,87 @@ impl Workspace {
         Some((id, name))
     }
 
-    pub(crate) fn toggle_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.snippets_open {
-            return self.close_snippets(window, cx);
+    /// 点顶栏按钮 / 按快捷键：开着的是它就关，否则打开（另一个面板随之收掉）。
+    pub(crate) fn toggle_top_panel(&mut self, panel: TopPanel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.top_panel == Some(panel) {
+            return self.close_top_panel(window, cx);
         }
-        let Some((connection_id, _)) = self.snippet_scope() else { return };
+        let Some((scope, _)) = self.snippet_scope() else { return };
         if self.modal_open(cx) {
             return;
         }
         self.fill_menu = None;
-        self.snippets_open = true;
-        self.snippet_panel.update(cx, |panel, cx| panel.open(connection_id, window, cx));
+        self.top_panel = Some(panel);
+        match panel {
+            TopPanel::Snippets => self.snippet_panel.update(cx, |panel, cx| panel.open(scope, window, cx)),
+            TopPanel::Favorites => self.open_favorites(scope, window, cx),
+        }
         cx.notify();
     }
 
-    pub(crate) fn close_snippets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.snippets_open {
+    pub(crate) fn close_top_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.top_panel.is_none() {
             return;
         }
-        self.snippets_open = false;
+        self.top_panel = None;
         self.refocus(window, cx);
         cx.notify();
+    }
+
+    // ---------- 目录收藏 ----------
+
+    /// 「当前目录」：本机标签问 shell 的前台进程，文件管理页就是远程栏的目录；
+    /// 远程的终端页 / 系统页要到服务器上读终端的目录，面板先开着，读到了星星再出来。
+    fn open_favorites(&mut self, scope: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.active_session() else { return };
+        let view = session.view.read(cx);
+        let (current, probe) = if session.local {
+            (view.local_cwd().map(|path| path.to_string_lossy().into_owned()), None)
+        } else if self.main_tab == MainTab::Files {
+            (self.file_manager.read(cx).remote_path(), None)
+        } else {
+            (None, view.session_id().map(str::to_string))
+        };
+        self.favorite_panel.update(cx, |panel, cx| panel.open(scope.clone(), current, window, cx));
+        let Some(session_id) = probe else { return };
+        let cwd = backend::spawn(async move { sftp::file_terminal_cwd(&backend::get().state, session_id).await });
+        cx.spawn(async move |this, cx| {
+            let cwd = cwd.await.and_then(Result::ok).flatten();
+            let _ = this.update(cx, |this, cx| this.favorite_panel.update(cx, |panel, cx| panel.set_current(&scope, cwd, cx)));
+        })
+        .detach();
+    }
+
+    fn favorite_panel_event(&mut self, _: &Entity<FavoritePanel>, event: &FavoritePanelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            FavoritePanelEvent::Go(path) => {
+                self.top_panel = None;
+                if self.main_tab == MainTab::Files && !self.active_session().is_some_and(|s| s.local) {
+                    self.file_manager.update(cx, |files, cx| files.open_bookmark(path.clone(), window, cx));
+                    self.refocus(window, cx);
+                    cx.notify();
+                } else {
+                    self.run_in_terminal(&favorites::cd_command(path), true, window, cx);
+                }
+            }
+            // 文件管理地址栏用的是同一份收藏
+            FavoritePanelEvent::Changed => self.file_manager.update(cx, |files, cx| {
+                files.reload_bookmarks();
+                cx.notify();
+            }),
+            FavoritePanelEvent::Close => self.close_top_panel(window, cx),
+        }
     }
 
     fn snippet_panel_event(&mut self, _: &Entity<SnippetPanel>, event: &SnippetPanelEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SnippetPanelEvent::Run { command, execute } => {
-                self.snippets_open = false;
+                self.top_panel = None;
                 self.run_in_terminal(command, *execute, window, cx);
             }
             SnippetPanelEvent::New => self.open_snippet_dialog(None, window, cx),
             SnippetPanelEvent::Edit(snippet) => self.open_snippet_dialog(Some(snippet.clone()), window, cx),
-            SnippetPanelEvent::Close => self.close_snippets(window, cx),
+            SnippetPanelEvent::Close => self.close_top_panel(window, cx),
         }
     }
 
@@ -1190,12 +1255,12 @@ impl Workspace {
 
     fn open_snippet_dialog(&mut self, editing: Option<sshl_core::config_store::Snippet>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((connection_id, name)) = self.snippet_scope() else { return };
-        self.snippets_open = false;
+        self.top_panel = None;
         let dialog = cx.new(|cx| SnippetDialog::new(editing, connection_id, name, window, cx));
         // 存好或取消都回到片段面板：新建的那条马上就能点
         self._subscriptions.push(cx.subscribe_in(&dialog, window, |this, _, _: &SnippetDialogEvent, window, cx| {
             this.snippet_dialog = None;
-            this.toggle_snippets(window, cx);
+            this.toggle_top_panel(TopPanel::Snippets, window, cx);
         }));
         self.snippet_dialog = Some(dialog);
         cx.notify();
@@ -1414,7 +1479,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.show_main_tab(MainTab::Terminal, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.show_main_tab(MainTab::Files, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.show_main_tab(MainTab::System, window, cx)))
-            .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_snippets(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_top_panel(TopPanel::Snippets, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowFavorites, window, cx| this.toggle_top_panel(TopPanel::Favorites, window, cx)))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
             .on_action(cx.listener(|this, _: &NewLocalTerminal, window, cx| this.new_local_terminal(window, cx)))
             .on_action(cx.listener(Self::select_nth_tab))
@@ -1591,6 +1657,7 @@ mod tests {
         assert_eq!(name("cmd-o"), Some("workspace::ShowFiles"));
         assert_eq!(name("cmd-p"), Some("workspace::ShowSystem"));
         assert_eq!(name("cmd-shift-p"), Some("workspace::ShowSnippets"));
+        assert_eq!(name("cmd-shift-d"), Some("workspace::ShowFavorites"));
         assert_eq!(name("cmd-0"), Some("terminal::ZoomReset"), "⌘0 还是终端的字号复原，不是标签");
     }
 

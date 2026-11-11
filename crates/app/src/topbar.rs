@@ -1,7 +1,7 @@
 //! 顶栏：会话标签（可拖动排序）+ 右侧的 终端 / 文件管理、填充密码、断开（旧 SessionTabs.tsx + App.tsx 顶栏）。
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, DragMoveEvent, Entity, Focusable, Font, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, AnyView, App, AppContext, ClickEvent, Context, DragMoveEvent, Entity, Focusable, Font, FontWeight, InteractiveElement, IntoElement,
     KeyBinding, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, TextRun, Window, actions, anchored,
     deferred, div, point, prelude::FluentBuilder, px,
 };
@@ -13,7 +13,7 @@ use crate::settings;
 use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
-use crate::workspace::{CONTENT_EDGE, ConnectionMenu, DraggedTab, MainTab, TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS, TRAFFIC_LIGHTS_WIDTH, Workspace, controls, drag_region};
+use crate::workspace::{CONTENT_EDGE, ConnectionMenu, DraggedTab, MainTab, TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS, TRAFFIC_LIGHTS_WIDTH, TopPanel, Workspace, controls, drag_region};
 
 actions!(topbar, [ConfirmTabRename, CancelTabRename]);
 
@@ -119,7 +119,7 @@ impl Workspace {
                                 .child(text),
                         )
                     })
-                    .when(connected, |r| r.child(self.snippet_button(cx)))
+                    .when(connected, |r| r.child(self.panel_button(TopPanel::Snippets, cx)).child(self.panel_button(TopPanel::Favorites, cx)))
                     .when(connected && !local, |r| r.child(self.main_tabs(cx)))
                     .when(connected && !local && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
                         r.child(self.fill_button(cx))
@@ -155,13 +155,17 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 命令片段按钮（⌘⇧P）和它下面的面板。
-    fn snippet_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let open = self.snippets_open;
+    /// 顶栏的面板按钮（命令片段 ⌘⇧P、目录收藏 ⌘⇧D）和它下面的面板。
+    fn panel_button(&self, kind: TopPanel, cx: &mut Context<Self>) -> AnyElement {
+        let (id, label, glyph, key, content): (&'static str, &'static str, Icon, &'static str, AnyView) = match kind {
+            TopPanel::Snippets => ("snippets", "命令片段", Icon::CodeXml, "⇧P", self.snippet_panel.clone().into()),
+            TopPanel::Favorites => ("favorites", "目录收藏", Icon::Star, "⇧D", self.favorite_panel.clone().into()),
+        };
+        let open = self.top_panel == Some(kind);
         let button = div()
-            .id("snippets")
+            .id(id)
             .role(Role::Button)
-            .aria_label("命令片段")
+            .aria_label(label)
             .relative()
             .size(px(34.))
             .flex()
@@ -172,12 +176,19 @@ impl Workspace {
             .text_color(theme::color(if open { ui::PRIMARY } else { ui::MUTED_FOREGROUND }))
             .cursor_pointer()
             .hover(|s| s.text_color(theme::color(if open { ui::PRIMARY } else { ui::FOREGROUND })))
-            .when(!self.hint_visible, |b| b.tooltip(|window, cx| kit::tooltip("命令片段".into(), window, cx)))
-            .child(kit::icon_sized(Icon::CodeXml, 16.))
+            .when(!self.hint_visible, |b| b.tooltip(move |window, cx| kit::tooltip(label.into(), window, cx)))
+            .child(kit::icon_sized(glyph, 16.))
             // 和「终端 / 文件管理 / 系统」的 I / O / P 同一个基准：分段控件里的选项内缩 3px，角标相对选项定位
-            .child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint("⇧P", self.hint_visible))))
-            .on_hover(cx.listener(|this, hovered: &bool, _, _| this.snippet_button_hovered = *hovered))
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_snippets(window, cx)));
+            .child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint(key, self.hint_visible))))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, _| {
+                // 从一个按钮滑到另一个：前一个的「移出」可能晚到，别把后一个的记号清掉
+                if *hovered {
+                    this.top_panel_hovered = Some(kind);
+                } else if this.top_panel_hovered == Some(kind) {
+                    this.top_panel_hovered = None;
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| this.toggle_top_panel(kind, window, cx)));
         let panel = open.then(|| {
             let this = cx.entity().downgrade();
             div().absolute().right_0().top(px(40.)).child(
@@ -186,13 +197,13 @@ impl Workspace {
                         div()
                             .on_mouse_down_out(move |_, window, cx| {
                                 let _ = this.update(cx, |this, cx| {
-                                    // 点的是片段按钮：交给按钮的点击去关，不然这里先关、按钮又打开
-                                    if !this.snippet_button_hovered {
-                                        this.close_snippets(window, cx);
+                                    // 点的是这个面板自己的按钮：交给按钮的点击去关，不然这里先关、按钮又打开
+                                    if this.top_panel_hovered != Some(kind) {
+                                        this.close_top_panel(window, cx);
                                     }
                                 });
                             })
-                            .child(self.snippet_panel.clone()),
+                            .child(content),
                     ),
                 )
                 .with_priority(2),

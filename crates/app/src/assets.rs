@@ -31,8 +31,6 @@ macro_rules! icons {
 icons! {
     ArrowDownUp => "arrow-down-up",
     ArrowUp => "arrow-up",
-    Bookmark => "bookmark",
-    BookmarkFilled => "bookmark-filled",
     Check => "check",
     ChevronDown => "chevron-down",
     ChevronRight => "chevron-right",
@@ -60,6 +58,8 @@ icons! {
     Server => "server",
     Settings => "settings",
     SquareTerminal => "square-terminal",
+    Star => "star",
+    StarFilled => "star-filled",
     Trash => "trash-2",
     Type => "type",
     Upload => "upload",

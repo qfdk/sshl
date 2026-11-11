@@ -2,7 +2,7 @@
 
 /// 远程删除经 ssh exec 交给远端 shell：路径必须单引号包住（引号内不做任何展开），
 /// 内嵌单引号用 '\'' 闭合-转义-重开，与 core 的 shell_quote 一致。
-fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

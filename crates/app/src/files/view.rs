@@ -1421,10 +1421,10 @@ impl FileManager {
 
     // ---------------------------------------------------------------- 远程目录收藏
     //
-    // 同浏览器地址栏：地址栏右端的书签一点就收藏 / 取消当前目录（⌘D 同）；
+    // 同浏览器地址栏：地址栏右端的星星一点就收藏 / 取消当前目录（⌘D 同）；
     // 点进地址栏，下拉列出收藏的目录，点了过去，悬停的 × 直接删，不用先进那个目录。
 
-    fn reload_bookmarks(&mut self) {
+    pub fn reload_bookmarks(&mut self) {
         self.bookmarks = match &self.session {
             Some(session) => config_store::bookmarks(&session.connection_id).unwrap_or_else(|error| {
                 tracing::warn!("load bookmarks: {error}");
@@ -1456,10 +1456,15 @@ impl FileManager {
         self.set_bookmarked(&path, bookmarked, window, cx);
     }
 
-    fn open_bookmark(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_bookmark(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.bookmark_list = false;
         self.remote.highlight = None;
         self.load(PaneKind::Remote, Some(path), false, window, cx);
+    }
+
+    /// 远程栏此刻的目录（还没列出来时为 None）：顶栏的目录收藏拿它当「当前目录」。
+    pub fn remote_path(&self) -> Option<String> {
+        Some(self.remote.path.clone()).filter(|path| !path.is_empty())
     }
 
     fn showing_bookmarks(&self, kind: PaneKind) -> bool {
@@ -1498,7 +1503,7 @@ impl FileManager {
             // 点开关不弹收藏列表（地址栏按下会弹）
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_bookmark(window, cx)))
-            .child(kit::icon_sized(if marked { Icon::BookmarkFilled } else { Icon::Bookmark }, 15.))
+            .child(kit::icon_sized(if marked { Icon::StarFilled } else { Icon::Star }, 15.))
             .into_any_element()
     }
 

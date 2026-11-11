@@ -9,4 +9,6 @@ mod progress;
 mod sudo;
 mod view;
 
+pub use delete::shell_quote;
+pub use model::bookmark_label;
 pub use view::{FileManager, FileManagerEvent, FileSession};

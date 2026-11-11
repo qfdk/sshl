@@ -27,7 +27,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", SnippetClose, Some("SnippetPanel > Input")),
         KeyBinding::new("cmd-enter", SnippetSave, Some("SnippetDialog > Input")),
         KeyBinding::new("escape", SnippetClose, Some("SnippetDialog > Input")),
-        // 点了「所有服务器 / 仅…」之后焦点在对话框本身上
+        // 点了「所有服务器 / 本机」之后焦点在对话框本身上
         KeyBinding::new("cmd-enter", SnippetSave, Some("SnippetDialog")),
         KeyBinding::new("escape", SnippetClose, Some("SnippetDialog")),
     ]);
@@ -391,7 +391,7 @@ impl Render for SnippetDialog {
                     .child(kit::text_field(&self.name, false))
                     .child(kit::segmented(
                         "snippet-scope",
-                        &[(Scope::All, None, "所有服务器".into()), (Scope::ThisServer, None, format!("仅 {}", self.connection_name).into())],
+                        &[(Scope::All, None, "所有服务器".into()), (Scope::ThisServer, None, self.connection_name.clone())],
                         self.scope,
                         move |scope, _, cx| {
                             let _ = this.update(cx, |this, cx| {
