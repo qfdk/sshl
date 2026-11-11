@@ -1,5 +1,5 @@
 //! 终端视图：铺满内容区的深色直角卡片，四边 4px 内边距。左、右、上的内边距用边缘格子的底色延伸
-//! （全屏 TUI 的 cursorline 贴到卡片边）；底边那 4px 不延伸，是卡片的底色。
+//! （全屏 TUI 的 cursorline 贴到卡片边）；底边那 4px 不延伸，是卡片的底色，vim 这类全屏程序运行时不留。
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -1051,9 +1051,9 @@ fn highlighted(spans: &[MatchSpan], x: usize) -> bool {
 }
 
 /// 网格离卡片左 / 上边的距离（逻辑像素）：固定内边距 + 排不下整格的余量里放在这一边的份额（`share`，0–1），
-/// 按设备像素取整（不足一个设备像素的留在另一边）。
-fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32) -> f32 {
-    let leftover = (available - TERMINAL_PADDING * 2. - cell * f32::from(cells)).max(0.);
+/// 按设备像素取整（不足一个设备像素的留在另一边）。`pad_after` 是另一边（右 / 下）的内边距。
+fn grid_offset(available: f32, cells: u16, cell: f32, scale: f32, share: f32, pad_after: f32) -> f32 {
+    let leftover = (available - TERMINAL_PADDING - pad_after - cell * f32::from(cells)).max(0.);
     TERMINAL_PADDING + (leftover * share * scale).floor() / scale
 }
 
@@ -1069,6 +1069,12 @@ fn open_link(url: &str, cx: &mut App) {
         return;
     }
     cx.open_url(url);
+}
+
+/// 网格下面留多少：普通 shell 里是 4px 内边距；vim / nvim / less / htop 这类全屏程序（备用屏）运行时不留，
+/// 最后一行（状态栏）贴着窗口底边。行数两种情况一样（`Metrics::grid` 总按上下各 4px 算），进出全屏只是整屏挪 4px，不重排。
+fn bottom_padding(full_screen: bool) -> f32 {
+    if full_screen { 0. } else { TERMINAL_PADDING }
 }
 
 /// 窗口坐标落在网格的哪一格（列, 行）：`origin` 是网格左上角，`cell` 是一格的大小；在网格外（内边距、余量里）是 None。
@@ -1140,13 +1146,14 @@ impl Element for TerminalElement {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut Window, cx: &mut App) -> (Bounds<Pixels>, Point<Pixels>) {
         let grid = self.metrics.grid(bounds.size);
         let m = &self.metrics;
-        // 卡片铺满（同 Ghostty），四边 4px 内边距。排不下一整行的余量全放在上面：最后一行（nvim 状态栏）下面正好只有 4px。
+        // 卡片铺满（同 Ghostty），四边 4px 内边距；全屏程序（备用屏）运行时底边不留，见 `bottom_padding`。
+        // 排不下一整行的余量全放在上面：最后一行下面正好只有 4px（或贴底）。
         // 余量放底下的话状态栏下面那条边时宽时窄；上面那条是终端底色，和第一行连成一片看不出来。
         // 左右的余量平分（行的底色左右本来就铺到边）
         let origin = bounds.origin
             + point(
-                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5)),
-                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1.)),
+                px(grid_offset(f32::from(bounds.size.width), grid.cols, f32::from(m.cell_width), m.scale, 0.5, TERMINAL_PADDING)),
+                px(grid_offset(f32::from(bounds.size.height), grid.rows, f32::from(m.line_height), m.scale, 1., bottom_padding(self.frame.alternate_screen))),
             );
         self.view.update(cx, |view, _| view.resize(grid, origin));
         (bounds, origin)
@@ -1525,12 +1532,12 @@ mod tests {
     #[test]
     fn leftover_rows_go_on_top_and_leftover_columns_are_split() {
         // 高 500、行高 18：(500 - 8) / 18 = 27 行，余 6px 全放上面：最后一行下面正好是 4px 内边距
-        assert_eq!(grid_offset(500., 27, 18., 2., 1.), 10.);
+        assert_eq!(grid_offset(500., 27, 18., 2., 1., TERMINAL_PADDING), 10.);
         // 左右平分；余 7px 时 2 倍屏上能放 3.5px，1 倍屏按整像素取 3px（多的 1px 留在另一边）
-        assert_eq!(grid_offset(501., 27, 18., 2., 0.5), 7.5);
-        assert_eq!(grid_offset(501., 27, 18., 1., 0.5), 7.);
+        assert_eq!(grid_offset(501., 27, 18., 2., 0.5, TERMINAL_PADDING), 7.5);
+        assert_eq!(grid_offset(501., 27, 18., 1., 0.5, TERMINAL_PADDING), 7.);
         // 正好排满：只有内边距
-        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1.), 4.);
+        assert_eq!(grid_offset(8. + 18. * 10., 10, 18., 2., 1., TERMINAL_PADDING), 4.);
     }
 
     /// 四边都是 4px 内边距，底边也留：最后一行下面不多不少正好 4px（贴着窗口底边看着怪）。
@@ -1539,9 +1546,23 @@ mod tests {
         let m = Metrics { font_size: px(13.), cell_width: px(8.), line_height: px(18.), scale: 2. };
         for height in [8. + 18. * 10., 8. + 18. * 10. + 7., 500.] {
             let grid = m.grid(size(px(8. + 8. * 80.), px(height)));
-            let top = grid_offset(height, grid.rows, 18., 2., 1.);
+            let top = grid_offset(height, grid.rows, 18., 2., 1., bottom_padding(false));
             assert_eq!(height - (top + 18. * f32::from(grid.rows)), TERMINAL_PADDING, "高 {height}");
         }
         assert_eq!(m.grid(size(px(8. + 8. * 80.), px(4. + 18. * 10.))).rows, 9, "上下各扣 4px：差 4px 排不下第 10 行");
+    }
+
+    /// vim / nvim / less / htop 这类全屏程序（备用屏）运行时底边不留 4px：行数不变（不引起重排），
+    /// 整屏下移，最后一行（状态栏）贴着窗口底边。
+    #[test]
+    fn full_screen_programs_sit_on_the_bottom_edge() {
+        let m = Metrics { font_size: px(13.), cell_width: px(8.), line_height: px(18.), scale: 2. };
+        for height in [8. + 18. * 10., 8. + 18. * 10. + 7., 500.] {
+            let grid = m.grid(size(px(8. + 8. * 80.), px(height)));
+            let shell = grid_offset(height, grid.rows, 18., 2., 1., bottom_padding(false));
+            let vim = grid_offset(height, grid.rows, 18., 2., 1., bottom_padding(true));
+            assert_eq!(height - (vim + 18. * f32::from(grid.rows)), 0., "高 {height}：贴底");
+            assert_eq!(vim - shell, TERMINAL_PADDING, "比 shell 里下移 4px");
+        }
     }
 }

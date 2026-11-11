@@ -82,8 +82,11 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   core 攒够 64KB 补窗口；刷屏时积压与 ^C 后的尾巴都以 2MB 为界（release 实测刷屏中 ^C 到 `yes` 退出 71ms）。其他通道（SFTP / exec / 探活）用自动窗口
   （`CONNECTION_WINDOW` 8MB）。不要绕过 ack：不确认的话终端在 2MB 输出后停住。
 - **终端外观**：铺满内容区，四边 4px 内边距。排不下一整行的余量全放在上面（`grid_offset`）：最后一行（nvim 状态栏）下面正好只有 4px。
-  底边这 4px 不铺最后一行的颜色，用内边距色（nvim 的背景）。这是试了三种之后用户定的：余量放底下 = 状态栏下一条时宽时窄的深色边；
-  4px 铺状态栏的颜色 = 状态栏比别的行高出一截（「多出 4px」）；底边不留 = 贴着窗口底边太挤（「很奇怪」）。左右余量平分。
+  底边分两种（`view.rs` 的 `bottom_padding`）：普通 shell 里留 4px（内边距色，不铺最后一行的颜色）；vim / nvim / less / htop / tmux
+  这类全屏程序（备用屏，`frame.alternate_screen`）运行时不留，状态栏贴着窗口底边。行数两种情况一样（总按上下各 4px 算），
+  进出全屏只是整屏挪 4px，PTY 尺寸不变、不重排。这是试了几种之后用户定的：余量放底下 = 状态栏下一条时宽时窄的深色边；
+  4px 铺状态栏的颜色 = 状态栏比别的行高出一截；4px 用背景色 = vim 里底下多一条别的颜色的边；shell 里也不留 = 提示符贴着窗口底边太挤。
+  左右余量平分。
   边缘整行的底色左右铺到边，上边只铺 4px（再往上是余量，用内边距色）；其余内边距取边缘格子的主色
   并把整行有底色的边缘行（除了最后一行往下）延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
   不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
