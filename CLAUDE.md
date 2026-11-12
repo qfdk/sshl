@@ -214,7 +214,10 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   键盘 / 辅助功能「按下」（`on_a11y_action(Click)`）直接连。
   终端那个元素的角色是 `Role::Terminal`（macOS 上报告成 AXTextArea）并带「设置值」动作（收到的字按粘贴发进终端）：有角色，系统看到的焦点才落在终端上
   而不是窗口上，值才算可写——按住鼠标说话的听写工具（Voilà）靠这两点认出这里能输入。不要给它加文本内容（text runs）：加了会开放选区范围，
-  听写工具改走无障碍直接写入、写完核对不了，字就丢了。焦点节点只在窗口是键盘窗口时才报告，后台的开发版只能测命中和可写。
+  听写工具改走无障碍直接写入、写完核对不了，字就丢了。
+  还要 `main.rs` 里的 `add_focus_forwarder_to_window_class("GPUIWindow")`：GPUI 的第一响应者是它自己的视图，无障碍树（accesskit）挂在外层的内容视图上，
+  系统问「焦点元素」只问到窗口；不补转发的话焦点元素永远是 AXWindow（命中测试走视图层级，不受影响，所以只测命中会漏掉这个）。
+  焦点节点只在窗口是键盘窗口时才报告：验证要把窗口切到前台再用探针问 kAXFocusedUIElement。
 - **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
   且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
   `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标，之后的 `click` / `move` 也带着 ⌘，测 ⌘ 悬停 / 点击链接；

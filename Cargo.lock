@@ -5560,6 +5560,7 @@ name = "sshl"
 version = "0.7.1"
 dependencies = [
  "accesskit",
+ "accesskit_macos",
  "dirs",
  "futures",
  "gpui-base",

@@ -117,6 +117,10 @@ fn main() {
             app_owns_titlebar_drag: true,
             ..Default::default()
         };
+        // 系统问「焦点元素」时问的是窗口和第一响应者（GPUI 自己的视图），而无障碍树挂在外层的内容视图上，问不到：
+        // 不补这个转发，焦点元素永远是窗口，听写工具（Voilà 按住鼠标说话）认不出终端能输入。窗口类在启动时就建好了，只补一次。
+        unsafe { accesskit_macos::add_focus_forwarder_to_window_class("GPUIWindow") };
+
         let window = cx
             .open_window(options, |window, cx| {
                 let workspace = cx.new(|cx| Workspace::new(prompts.clone(), window, cx));
