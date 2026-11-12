@@ -209,6 +209,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   （填充密码由后端解密直接写通道）。
 - **无障碍**：可点击的元素给 `role` + `aria_label`（也是无头测试按名字点击的依据）。连接项鼠标双击才连，
   键盘 / 辅助功能「按下」（`on_a11y_action(Click)`）直接连。
+  终端那个元素的角色是 `Role::Terminal`（macOS 上报告成 AXTextArea）并带「设置值」动作（收到的字按粘贴发进终端）：有角色，系统看到的焦点才落在终端上
+  而不是窗口上，值才算可写——按住鼠标说话的听写工具（Voilà）靠这两点认出这里能输入。不要给它加文本内容（text runs）：加了会开放选区范围，
+  听写工具改走无障碍直接写入、写完核对不了，字就丢了。焦点节点只在窗口是键盘窗口时才报告，后台的开发版只能测命中和可写。
 - **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
   且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
   `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标，之后的 `click` / `move` 也带着 ⌘，测 ⌘ 悬停 / 点击链接；

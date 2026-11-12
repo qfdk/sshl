@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
-    App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
+    AccessibleAction, App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
@@ -928,6 +928,22 @@ impl Render for TerminalView {
             .id("terminal")
             .key_context(CONTEXT)
             .track_focus(&self.focus)
+            // 无障碍：有角色，系统看到的焦点才落在终端上（没有的话落在窗口上）。「终端」角色在 macOS 上是文本区域，
+            // 带「设置值」动作 = 值可写——按住鼠标说话这类听写工具靠这两点认出这里能输入文字。
+            // 不带文本内容：带了就会开放选区范围，听写工具改走无障碍直接写入、写完又核对不了，字就丢了。
+            .role(Role::Terminal)
+            .aria_label("终端")
+            .on_a11y_action(AccessibleAction::SetValue, {
+                let this = cx.entity().downgrade();
+                move |data, _, cx| {
+                    let Some(accesskit::ActionData::Value(text)) = data else { return };
+                    let text = text.to_string();
+                    let _ = this.update(cx, |this, cx| {
+                        this.input(Input::Paste(text));
+                        cx.notify();
+                    });
+                }
+            })
             .size_full()
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))

@@ -5559,6 +5559,7 @@ dependencies = [
 name = "sshl"
 version = "0.7.1"
 dependencies = [
+ "accesskit",
  "dirs",
  "futures",
  "gpui-base",

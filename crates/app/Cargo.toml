@@ -18,6 +18,8 @@ gpui = { package = "gpui-pre", version = "=0.3.12" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit"] }
 # 只用行为层（输入框、焦点、弹层、虚拟列表）。不用带样式的 gpui-component：它初始化时枚举全部系统字体，冷启动多 ~170ms。
 gpui-base = "=0.9.1"
+# gpui 的无障碍树用的就是它（同一版本，不多编一份）；gpui 没重新导出 ActionData，终端收「设置值」动作要用。
+accesskit = "0.24.1"
 
 # 终端模拟：Ghostty 内核 libghostty-vt（C ABI 1.0）。构建要 Zig 0.17（brew install zig）。
 libghostty-vt = { git = "https://github.com/uzaaft/libghostty-rs", rev = "768add93c54ccdba3f5c4d8763789ab6416f3151" }
