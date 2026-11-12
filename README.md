@@ -1,98 +1,101 @@
 # SSHL
 
+English | [简体中文](README.zh-CN.md)
+
 > Connect. Type. Transfer.
 
-轻量级原生 macOS SSH 客户端：终端 + SFTP 文件管理放在同一个窗口。纯 Rust：界面用 GPUI（GPU 渲染），终端模拟用 libghostty-vt（Ghostty 内核），后端 russh + russh-sftp。不用 WebView，冷启动约 0.3 秒。
+A lightweight native SSH client for macOS: terminal and SFTP file manager in one window. Pure Rust — the UI is built with GPUI (GPU-rendered), terminal emulation is libghostty-vt (the Ghostty core), and the backend is russh + russh-sftp. No WebView; cold start takes about 0.3 seconds.
 
-![终端：多标签、分组的连接列表](docs/screenshots/terminal.png)
+![Terminal: tabs and a grouped connection list](docs/screenshots/terminal.png)
 
-| 终端里查找（⌘F） | 文件管理（⌘O） |
+| Find in terminal (⌘F) | File manager (⌘O) |
 | --- | --- |
-| ![在回滚历史里查找，匹配处高亮](docs/screenshots/find.png) | ![本地 / 远程双栏文件管理](docs/screenshots/files.png) |
+| ![Search the scrollback with highlighted matches](docs/screenshots/find.png) | ![Two-pane local / remote file manager](docs/screenshots/files.png) |
 
-## 功能
+## Features
 
-**终端**
-- libghostty-vt 解析、GPU 绘制，内置 JetBrainsMono Nerd Font，图标与 Powerline 字形开箱可用
-- 中文、emoji 宽字符对齐；中文输入法组字直接在光标处
-- 字体、字号可调，可选系统字体或自定义 `fontFamily`
-- 配色可选：默认 Carbonfox，另有 Tokyo Night、Dracula、Catppuccin、Gruvbox、Nord、One Dark、Solarized、GitHub Light 等深浅主题，选了立即生效，屏幕上已有的内容也跟着换色
-- 界面深色模式：设置 › 外观里选跟随系统 / 浅色 / 深色
-- 终端出现 sudo / su 密码提示时一键填入已保存的密码，同一台机器可存多个账号
-- 本机终端（⌘N）：登录 shell，新标签沿用当前本机标签的目录；从 Finder 拖文件进来填入路径；`exit` 即关标签
-- 查找（⌘F）：搜屏幕和全部回滚历史，匹配处高亮，回车逐个跳
-- 按住 ⌘ 点击网址用浏览器打开（折行的长链接、程序标注的超链接都认）；⌘+ / ⌘- / ⌘0 调字号
-- 标签切换 ⌘1 … ⌘9、⌘⇧[ / ⌘⇧]（或 ⌃Tab / ⌃⇧Tab）；双击标签或右键可重命名
-- 终端 / 文件管理 / 系统 用 ⌘I / ⌘O / ⌘P 切换
-- 命令片段（⌘⇧P）：常用命令存起来，回车执行；可以所有服务器通用，也可以只给某一台用
-- 目录收藏（⌘⇧D）：常用目录点星星收藏，回车就 `cd` 过去（文件管理页里是直接跳转）；每台服务器一份，本机终端也有；收藏可以起名字
-- 掉线后标签和屏幕内容都留着，按回车原地重连
+**Terminal**
+- Parsed by libghostty-vt and drawn on the GPU. JetBrainsMono Nerd Font is built in, so icons and Powerline glyphs work out of the box
+- Wide characters (CJK, emoji) stay aligned; input method composition is drawn at the cursor
+- Adjustable font and font size; pick a system font or set a custom `fontFamily`
+- Color schemes: Carbonfox by default, plus Tokyo Night, Dracula, Catppuccin, Gruvbox, Nord, One Dark, Solarized, GitHub Light and more. A new scheme applies immediately, including to text already on screen
+- Dark mode for the interface: follow the system, light, or dark (Settings › Appearance)
+- Interface in English and Simplified Chinese; follows the system language by default
+- When a sudo / su password prompt appears, fill in a saved password with one click. One host can store several accounts
+- Local terminal (⌘N): a login shell. A new tab starts in the current local tab's directory, files dragged in from Finder insert their path, and `exit` closes the tab
+- Find (⌘F): searches the screen and the whole scrollback, highlights matches, Enter jumps through them
+- ⌘-click a URL to open it in the browser (wrapped long links and program-declared hyperlinks both work); ⌘+ / ⌘- / ⌘0 change the font size
+- Switch tabs with ⌘1 … ⌘9, ⌘⇧[ / ⌘⇧] (or ⌃Tab / ⌃⇧Tab); double-click or right-click a tab to rename it
+- Switch between Terminal / Files / System with ⌘I / ⌘O / ⌘P
+- Snippets (⌘⇧P): save frequent commands and run them with Enter. A snippet can be shared by all servers or belong to one
+- Directory favorites (⌘⇧D): star the directories you use often and `cd` there with Enter (in the file manager it jumps directly). Each server has its own list, and so does the local terminal; favorites can be named
+- After a disconnect the tab and its screen stay; press Enter to reconnect in place
 
-**连接管理**
-- 密码 / 私钥（含私钥密码）认证；私钥选「自动」时按 `~/.ssh/config` 和 SSH Agent 免密登录；可从 `~/.ssh/config` 导入主机
-- 快速连接（⌘K）：敲几个字母回车就连，已经开着的直接切过去
-- 分组管理，侧边栏拖拽排序、跨组移动；侧边栏可整个收起（⌘B），终端占满宽度
-- 后台预热连接池 + `TCP_NODELAY`，首次连接快，首屏输出不丢不乱序
+**Connections**
+- Password or private key authentication (including key passphrases). With the key set to "Auto", SSHL logs in through `~/.ssh/config` and the SSH agent without asking. Hosts can be imported from `~/.ssh/config`
+- Quick connect (⌘K): type a few letters and press Enter; a connection that is already open is switched to instead
+- Groups, with drag-and-drop to reorder and move between groups in the sidebar. The sidebar can be hidden entirely (⌘B) so the terminal takes the full width
+- A background pool of pre-warmed connections plus `TCP_NODELAY` make the first connection fast, and the first screen of output is never lost or reordered
 
-**文件管理**
-- 本地 / 远程双栏，拖动调整面板宽度
-- 文件与目录上传下载：排队一个一个传，显示速度和剩余时间，可以中途停止；遇到同名文件先问覆盖还是跳过
-- 跟着终端走：终端 cd 到哪，文件管理就到哪；终端里 `sudo -i` 之后，文件管理也以 root 身份操作
-- 把文件拖到终端上，直接上传到终端当前目录；常用的远程目录可以收藏（⌘D）
-- 新建远程目录，修改权限（常用权限一键选）与属主
-- SFTP 复用已建立的 SSH 会话，不额外建连
+**File manager**
+- Local and remote panes side by side; drag the divider to resize
+- Upload and download files and directories: transfers queue up one at a time, show speed and time remaining, and can be stopped midway. If a file with the same name exists, SSHL asks whether to overwrite or skip
+- Follows the terminal: wherever you `cd` in the terminal, the file manager goes too. After `sudo -i` in the terminal, the file manager also works as root
+- Drop a file onto the terminal to upload it to the terminal's current directory; star remote directories you use often (⌘D)
+- Create remote directories, change permissions (common modes in one click) and ownership
+- SFTP reuses the existing SSH session, so no extra connection is made
 
-**系统**（⌘P）
-- 负载、内存、磁盘、运行时间
-- 进程、监听端口、systemd 服务三个列表，可搜索、排序；可以结束进程、启停服务、开关开机启动
+**System** (⌘P)
+- Load, memory, disk, uptime
+- Three lists — processes, listening ports, systemd services — with search and sorting. You can kill processes, start / stop services, and toggle start-on-boot
 
-## 快速开始
+## Getting started
 
-### 下载安装
+### Download
 
-从 [Releases](https://github.com/qfdk/sshl/releases) 下载 macOS 版本，解压后拖入「应用程序」。
+Download the macOS build from [Releases](https://github.com/qfdk/sshl/releases), unzip it, and drag it into Applications.
 
-应用未签名、未公证，首次使用前在终端执行一次（清除隔离标记并本地签名）：
+The app is not signed or notarized. Before the first launch, run this once in a terminal (it clears the quarantine flag and signs the app locally):
 
 ```bash
 xattr -cr /Applications/SSHL.app
 codesign --force --deep -s - /Applications/SSHL.app
 ```
 
-连接局域网主机时 macOS 会请求「本地网络」权限，请允许；若报 `No route to host`，到 系统设置 → 隐私与安全性 → 本地网络 打开 SSHL。每次升级后重新执行上面两行。
+When you connect to a host on your local network, macOS asks for the "Local Network" permission — allow it. If you get `No route to host`, enable SSHL in System Settings → Privacy & Security → Local Network. Run the two commands above again after every upgrade.
 
-### 手动构建
+### Build from source
 
-需求：Rust（版本由 `rust-toolchain.toml` 固定，rustup 自动安装）、[Zig](https://ziglang.org) 0.17（`brew install zig`，编译 libghostty-vt 用）
+Requirements: Rust (the version is pinned in `rust-toolchain.toml`; rustup installs it automatically) and [Zig](https://ziglang.org) 0.17 (`brew install zig`, used to build libghostty-vt).
 
 ```bash
 git clone https://github.com/qfdk/sshl
 cd sshl
-cargo run -p sshl             # 开发版
-cargo test --workspace        # 测试
-scripts/bundle.sh             # 构建 SSHL.app
+cargo run -p sshl             # development build
+cargo test --workspace        # tests
+scripts/bundle.sh             # build SSHL.app
 ```
 
-产物在 `target/release/bundle/SSHL.app`。`scripts/deploy.sh` 把它装到 /Applications（本机有 Developer ID 证书时重签）。
+The app is written to `target/release/bundle/SSHL.app`. `scripts/deploy.sh` installs it into /Applications (and re-signs it if a Developer ID certificate is available on your machine).
 
-## 数据存储
+## Data storage
 
-- 连接、分组与加密后的凭据存于 SQLite（`~/.sshl/sshl.db`）
-- 凭据加密密钥单独存放在 `~/.sshl/master.key`（权限 0600）
-- 主机公钥记录在 `~/.sshl/known_hosts`；`~/.ssh/known_hosts` 里已经认可的主机直接信任（只读不写）
+- Connections, groups, and encrypted credentials live in SQLite (`~/.sshl/sshl.db`)
+- The encryption key is stored separately in `~/.sshl/master.key` (mode 0600)
+- Host keys are recorded in `~/.sshl/known_hosts`. Hosts already trusted in `~/.ssh/known_hosts` are trusted directly (that file is only read, never written)
 
-## 安全说明
+## Security
 
-- 密码与私钥密码用 AES-256-GCM 加密；密钥与数据库分离，数据库被拷走或同步也解不出密码
-- 主机密钥：首次连接时显示指纹请你确认，确认后才记录；之后密钥变了会提醒，由你决定是否信任新密钥（防中间人）
-- 自动填密码全程在后端完成，明文不经过渲染层；只有终端出现密码提示时才显示填充按钮
+- Passwords and key passphrases are encrypted with AES-256-GCM. The key is kept apart from the database, so a copied or synced database cannot be decrypted on its own
+- Host keys: on first connection SSHL shows the fingerprint and records it only after you confirm. If the key changes later, you are warned and decide whether to trust the new key (protection against man-in-the-middle attacks)
+- Password filling happens entirely in the backend; the plaintext never reaches the UI layer. The fill button only appears when the terminal shows a password prompt
 
-## 许可证
+## License
 
-[GNU General Public License v3.0](LICENSE)（GPL-3.0）——衍生作品须以相同许可证开源。
+[GNU General Public License v3.0](LICENSE) (GPL-3.0) — derivative works must be released under the same license.
 
-## 赞助
+## Sponsor
 
 <a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>
 
-本项目由 [Voilà Pro](https://voilapro.app/?ref=github-sshl) 赞助支持 —— macOS 语音输入工具。按住快捷键说话，文字直接落到光标处，中英法混说也能识别。
+This project is sponsored by [Voilà Pro](https://voilapro.app/?ref=github-sshl), a voice input tool for macOS. Hold a shortcut and speak, and the text lands at your cursor — mixed Chinese, English and French are recognized too.
