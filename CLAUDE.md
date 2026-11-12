@@ -18,7 +18,7 @@ crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件�
   src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）
 assets/               内置字体、Lucide 图标（线宽 2.5）、应用图标、Info.plist 模板
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
-scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）
+scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
 tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
 ```
 
@@ -32,6 +32,7 @@ cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键�
 cargo clippy --workspace --all-targets   # 自己的 crate 保持零警告（vendor/russh 那条不改，补丁保持最小）
 scripts/bundle.sh                  # release 构建 + 组装 target/release/bundle/SSHL.app（ad-hoc 签名）
 scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 + 自定义图标），先跑 bundle.sh
+NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签名 + 公证 + 装订，产物 target/release/SSHL-v<版本>-macos.zip
 ```
 
 ## Key invariants

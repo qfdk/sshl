@@ -28,7 +28,7 @@ ditto "$SRC" "$DST"
 
 # 本地安装用 Developer ID 重签：ad-hoc 签名每次构建身份都变，macOS「本地网络」授权随之失效，
 # 连局域网报 No route to host (os error 65)。证书从钥匙串自动查找，仓库不写证书名；
-# 发布产物（target/ 下的 bundle）不受影响，保持 ad-hoc。必须在套图标之前签，图标的 FinderInfo 会让 codesign 拒签。
+# target/ 下的 bundle 不受影响。必须在套图标之前签，图标的 FinderInfo 会让 codesign 拒签。
 SIGN_ID=$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')
 if [ -n "$SIGN_ID" ]; then
   xattr -cr "$DST"

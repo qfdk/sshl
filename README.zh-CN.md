@@ -55,14 +55,9 @@
 
 从 [Releases](https://github.com/qfdk/sshl/releases) 下载 macOS 版本，解压后拖入「应用程序」。
 
-应用未签名、未公证，首次使用前在终端执行一次（清除隔离标记并本地签名）：
+应用已用 Developer ID 签名并通过 Apple 公证，双击即可打开。
 
-```bash
-xattr -cr /Applications/SSHL.app
-codesign --force --deep -s - /Applications/SSHL.app
-```
-
-连接局域网主机时 macOS 会请求「本地网络」权限，请允许；若报 `No route to host`，到 系统设置 → 隐私与安全性 → 本地网络 打开 SSHL。每次升级后重新执行上面两行。
+连接局域网主机时 macOS 会请求「本地网络」权限，请允许；若报 `No route to host`，到 系统设置 → 隐私与安全性 → 本地网络 打开 SSHL。
 
 ### 手动构建
 

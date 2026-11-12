@@ -55,14 +55,9 @@ A lightweight native SSH client for macOS: terminal and SFTP file manager in one
 
 Download the macOS build from [Releases](https://github.com/qfdk/sshl/releases), unzip it, and drag it into Applications.
 
-The app is not signed or notarized. Before the first launch, run this once in a terminal (it clears the quarantine flag and signs the app locally):
+The app is signed with a Developer ID and notarized by Apple, so it opens with a double-click.
 
-```bash
-xattr -cr /Applications/SSHL.app
-codesign --force --deep -s - /Applications/SSHL.app
-```
-
-When you connect to a host on your local network, macOS asks for the "Local Network" permission — allow it. If you get `No route to host`, enable SSHL in System Settings → Privacy & Security → Local Network. Run the two commands above again after every upgrade.
+When you connect to a host on your local network, macOS asks for the "Local Network" permission — allow it. If you get `No route to host`, enable SSHL in System Settings → Privacy & Security → Local Network.
 
 ### Build from source
 

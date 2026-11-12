@@ -37,7 +37,7 @@ sed -e "s/__VERSION__/$VERSION/g" -e "s/__MIN_MACOS__/$MIN_MACOS/g" "$ROOT/asset
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-# ad-hoc 签名（发布产物不带个人证书）；本地安装由 scripts/deploy.sh 用 Developer ID 重签
+# 先 ad-hoc 签名；本地安装由 scripts/deploy.sh、发布包由 scripts/release.sh 用 Developer ID 重签
 codesign --force --sign - "$APP"
 codesign --verify --strict "$APP"
 
