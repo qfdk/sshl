@@ -11,7 +11,7 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
     AccessibleAction, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
-    DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
+    DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
     Role, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
@@ -1386,7 +1386,9 @@ struct Fonts {
 
 impl Fonts {
     fn new(family: &str) -> Self {
-        let regular = Font { fallbacks: Some(FontFallbacks::from_fonts(vec![crate::settings::DEFAULT_FONT_FAMILY.into(), "Apple Color Emoji".into()])), ..font(family.to_string()) };
+        // 连字关掉：`===`、`->` 一格一个字（同 Ghostty 的 `font-feature = -calt` / `-liga`）
+        let features = FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)]));
+        let regular = Font { features, fallbacks: Some(FontFallbacks::from_fonts(vec![crate::settings::DEFAULT_FONT_FAMILY.into(), "Apple Color Emoji".into()])), ..font(family.to_string()) };
         let bold = Font { weight: FontWeight::BOLD, ..regular.clone() };
         let italic = Font { style: FontStyle::Italic, ..regular.clone() };
         let bold_italic = Font { style: FontStyle::Italic, ..bold.clone() };
@@ -1589,5 +1591,17 @@ mod tests {
             assert_eq!(height - (top + 18. * f32::from(grid.rows)), TERMINAL_PADDING, "高 {height}");
         }
         assert_eq!(m.grid(size(px(8. + 8. * 80.), px(4. + 18. * 10.))).rows, 9, "上下各扣 4px：差 4px 排不下第 10 行");
+    }
+
+    /// 连字关掉（同用户的 Ghostty 配置 `-calt` / `-liga`）：`===`、`->` 一格一个字，四种字重 / 斜体都一样。
+    #[test]
+    fn terminal_fonts_have_ligatures_off() {
+        let fonts = Fonts::new("JetBrainsMono Nerd Font");
+        for font in [&fonts.regular, &fonts.bold, &fonts.italic, &fonts.bold_italic] {
+            let features = font.features.tag_value_list();
+            for tag in ["calt", "liga"] {
+                assert!(features.iter().any(|(t, v)| t == tag && *v == 0), "{tag} 没关：{features:?}");
+            }
+        }
     }
 }
