@@ -82,7 +82,7 @@ impl EventEmitter<SnippetPanelEvent> for SnippetPanel {}
 
 impl SnippetPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索命令片段…"));
+        let search = kit::input(|| tr!("搜索命令片段…"), window, cx);
         let subscription = cx.subscribe_in(&search, window, |this, _, event: &InputEvent, _, cx| {
             if let InputEvent::Change = event {
                 this.selected = 0;
@@ -136,14 +136,14 @@ impl SnippetPanel {
 
     fn delete(&mut self, snippet: Snippet, window: &mut Window, cx: &mut Context<Self>) {
         let (title, _) = snippet_lines(&snippet);
-        let answer = prompts::confirm(window, cx, Options::new("删除命令片段").message(format!("确定要删除「{title}」吗？")).confirm("删除"));
+        let answer = prompts::confirm(window, cx, Options::new(tr!("删除命令片段")).message(tr!("确定要删除「{}」吗？", title)).confirm(tr!("删除")));
         cx.spawn_in(window, async move |this, cx| {
             if !answer.await.unwrap_or(false) {
                 return;
             }
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Err(error) = config_store::delete_snippet(snippet.id) {
-                    prompts::alert_later(window, cx, Options::new("删除失败").message(error.to_string()));
+                    prompts::alert_later(window, cx, Options::new(tr!("删除失败")).message(error.to_string()));
                 }
                 this.reload();
                 let count = this.visible(cx).len();
@@ -214,13 +214,13 @@ impl SnippetPanel {
                     .flex_shrink_0()
                     .opacity(0.)
                     .group_hover("snippet-row", |s| s.opacity(1.))
-                    .child(kit::mini_button(("snippet-edit", position), Icon::Pencil, "编辑", ui::MUTED_FOREGROUND).on_click(cx.listener(
+                    .child(kit::mini_button(("snippet-edit", position), Icon::Pencil, tr!("编辑"), ui::MUTED_FOREGROUND).on_click(cx.listener(
                         move |_, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             cx.emit(SnippetPanelEvent::Edit(edit.clone()));
                         },
                     )))
-                    .child(kit::mini_button(("snippet-delete", position), Icon::Trash, "删除", ui::MUTED_FOREGROUND).on_click(cx.listener(
+                    .child(kit::mini_button(("snippet-delete", position), Icon::Trash, tr!("删除"), ui::MUTED_FOREGROUND).on_click(cx.listener(
                         move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             this.delete(delete.clone(), window, cx);
@@ -235,9 +235,9 @@ impl Render for SnippetPanel {
         let visible = self.visible(cx);
         let muted = |text: &'static str| div().px_2().py_3().text_size(px(13.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(text);
         let list = if self.snippets.is_empty() {
-            muted("还没有命令片段。点 ＋ 把常用命令存起来。").into_any_element()
+            muted(tr!("还没有命令片段。点 ＋ 把常用命令存起来。")).into_any_element()
         } else if visible.is_empty() {
-            muted("没有匹配的命令片段").into_any_element()
+            muted(tr!("没有匹配的命令片段")).into_any_element()
         } else {
             let rows: Vec<_> = visible.iter().enumerate().map(|(position, &i)| self.row(position, &self.snippets[i], cx).into_any_element()).collect();
             div().id("snippet-list").max_h(px(360.)).overflow_y_scroll().track_scroll(&self.scroll).flex().flex_col().children(rows).into_any_element()
@@ -246,7 +246,7 @@ impl Render for SnippetPanel {
             .id("snippet-panel")
             .key_context("SnippetPanel")
             .role(Role::Dialog)
-            .aria_label("命令片段")
+            .aria_label(tr!("命令片段"))
             .occlude()
             .w(px(420.))
             .p(px(6.))
@@ -274,7 +274,7 @@ impl Render for SnippetPanel {
                     .child(kit::icon_sized(Icon::Search, 14.).text_color(theme::color(ui::MUTED_FOREGROUND)))
                     .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
                     .child(
-                        kit::mini_button("snippet-new", Icon::Plus, "新建命令片段", ui::MUTED_FOREGROUND)
+                        kit::mini_button("snippet-new", Icon::Plus, tr!("新建命令片段"), ui::MUTED_FOREGROUND)
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SnippetPanelEvent::New))),
                     ),
             )
@@ -287,7 +287,7 @@ impl Render for SnippetPanel {
                         .pt(px(2.))
                         .text_size(px(11.))
                         .text_color(theme::color(ui::MUTED_FOREGROUND))
-                        .child("↵ 执行　⇧↵ 只填入"),
+                        .child(tr!("↵ 执行　⇧↵ 只填入")),
                 )
             })
     }
@@ -328,8 +328,8 @@ impl Focusable for SnippetDialog {
 impl SnippetDialog {
     /// `editing` 为 None 时新建；新建默认所有服务器通用。
     pub fn new(editing: Option<Snippet>, connection_id: String, connection_name: SharedString, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let command = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 10).placeholder("命令，可以多行"));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("名称（可选）"));
+        let command = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 10).placeholder(tr!("命令，可以多行")));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("名称（可选）")));
         let mut scope = Scope::All;
         let mut id = None;
         if let Some(snippet) = editing {
@@ -376,7 +376,7 @@ impl Render for SnippetDialog {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if self.id.is_some() { "编辑命令片段" } else { "新建命令片段" }))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if self.id.is_some() { tr!("编辑命令片段") } else { tr!("新建命令片段") }))
                     .child(
                         div()
                             .px(px(12.))
@@ -391,7 +391,7 @@ impl Render for SnippetDialog {
                     .child(kit::text_field(&self.name, false))
                     .child(kit::segmented(
                         "snippet-scope",
-                        &[(Scope::All, None, "所有服务器".into()), (Scope::ThisServer, None, self.connection_name.clone())],
+                        &[(Scope::All, None, tr!("所有服务器").into()), (Scope::ThisServer, None, self.connection_name.clone())],
                         self.scope,
                         move |scope, _, cx| {
                             let _ = this.update(cx, |this, cx| {
@@ -404,8 +404,8 @@ impl Render for SnippetDialog {
             )
             .child(
                 kit::modal_footer()
-                    .child(kit::labeled_button("snippet-cancel", Variant::Outline, None, "取消").on_click(cx.listener(|_, _, _, cx| cx.emit(SnippetDialogEvent::Close))))
-                    .child(kit::labeled_button("snippet-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save(cx)))),
+                    .child(kit::labeled_button("snippet-cancel", Variant::Outline, None, tr!("取消")).on_click(cx.listener(|_, _, _, cx| cx.emit(SnippetDialogEvent::Close))))
+                    .child(kit::labeled_button("snippet-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save(cx)))),
             );
         kit::modal("snippet-dialog", 480., body)
     }

@@ -110,6 +110,19 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   当前是不是深色记在 `theme` 的一个静态开关里，`workspace::sync_appearance` 在启动、设置变了（预览 / 保存 / 还原）、系统外观变了时重新定，
   变了就换掉 gpui-base 的 token（输入框的字、占位字、光标从那里取）并重画所有窗口。测试盯着两种外观下的文字对比度。
   devhook 的 `appearance dark|light|system` 只改内存里的外观，看深色界面用；注意别的操作触发 `settings::update` 时会把它一起写盘，测完检查设置文件。
+- **多语言**（简体中文 / English；设置 →「外观」页的「语言」，`settings.language`，默认跟随系统「语言与地区」里排在前面、我们又有的那个，都没有用英文）：
+  代码里的界面文字就写中文原文，包一层 `tr!("保存")`（带参数 `tr!("删除 {} 个项目", n)`，只认 `{}` / `{0}`，要 `{:.1}` 这类格式先自己格式化好再传）；
+  当前语言不是中文时按原文查译文表，表里没有就显示原文。机制在 `sshl_core::i18n`（core 的报错文案也要译，所以放在 core；不依赖界面框架），
+  译文表按语言分文件：后端的 `crates/core/src/i18n/en.rs`、界面的 `crates/app/src/i18n_en.rs`。加新文字 = 写 `tr!` + 在表里加一行；
+  `i18n_en.rs` 的测试扫全部源码，缺译文、参数个数对不上、表里有用不到的都会失败。加一门语言 = 加一份表 + `Lang` 一个值 + 设置里一个选项。
+  同一个词在不同地方译法不同（「端口」是列名 Port、是标签页 Ports）用 `trc!("标签页", "端口")`，表里的键是 `端口|标签页`。
+  英文单复数写在译文里：`{0} hidden {0?file|files}`。别把半句话拼起来（「正在」+ 动词 + 名字）：语序各语言不同，整句写成一个模板。
+  文字一律在画的时候取，别把译好的字存进状态（换语言后不跟着变）：存原因（`files/view.rs` 的 `RemoteEmpty`）或原始数据。
+  建的时候就定死的两处要自己跟：输入框占位字用 `ui::input(|| tr!("…"))`（盯着设置，语言变了重设）；菜单栏在 `settings::replace` 里重建（`set_menus`）。
+  `settings::replace` 先换语言再换设置，盯着设置的回调里 `tr!` 已经是新语言。语言名（简体中文 / English）用它自己的文字写，不翻译。
+  测试里语言是全局的、默认中文：断言中文文案的测试照旧；测英文用 `i18n::translate(Lang::En, …)`，不要去改全局语言（测试并行）。
+  系统的选文件面板等跟系统语言走（`Info.plist` 的 `CFBundleLocalizations`），不跟应用里的设置。
+  英文比中文长：定宽的列头、一行里带说明的勾选项都在英文下看过一遍（文件管理的权限列头用 Mode）。devhook 的 `language zh|en|system` 只改内存里的语言，看英文界面用。
 - **内置字体**：JetBrainsMono Nerd Font（非 Mono 版，图标是正常大小；Mono 版把图标压成一格，用户嫌不好看）两个字重 `include_bytes` 进二进制并在启动时注册；不要换成系统回退。
 - **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的
   text_color、不继承，别直接用。图标在 `assets.rs` 的 `icons!` 表里登记。
@@ -206,7 +219,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   点了过去、悬停的 × 直接删（不用先进那个目录）、↑↓ ↵ 可选，一敲字换成子目录补全。文件管理里不另放收藏按钮 / 菜单（顶栏那个星星是全局入口）。
   地址栏的两个下拉都包在 `deferred` 里画，否则会被后面的表头和文件行盖住。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
-- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观）。首次启动从旧版 WebView 的
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观、语言）。首次启动从旧版 WebView 的
   localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
 - **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
   （填充密码由后端解密直接写通道）。

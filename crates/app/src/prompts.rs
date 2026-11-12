@@ -39,8 +39,8 @@ impl Options {
             title: title.into(),
             message: None,
             detail: None,
-            confirm_label: "确定".into(),
-            cancel_label: "取消".into(),
+            confirm_label: tr!("确定").into(),
+            cancel_label: tr!("取消").into(),
             destructive: false,
             checkbox: None,
         }
@@ -128,7 +128,7 @@ pub fn is_open(cx: &App) -> bool {
 
 pub fn alert_later(window: &mut Window, cx: &mut App, options: Options) {
     let (tx, _rx) = oneshot::channel();
-    let options = Options { confirm_label: "知道了".into(), ..options };
+    let options = Options { confirm_label: tr!("知道了").into(), ..options };
     push(window, cx, Request { options, kind: Kind::Alert(tx) });
 }
 
@@ -298,7 +298,7 @@ impl Render for PromptHost {
                                     .flex()
                                     .flex_col()
                                     .gap(px(6.))
-                                    .child(div().text_size(px(12.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child("已保存的密码"))
+                                    .child(div().text_size(px(12.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已保存的密码")))
                                     .child(div().flex().flex_wrap().gap(px(6.)).children(choices.into_iter().enumerate().map(|(i, choice)| {
                                         let value = choice.value.clone();
                                         kit::button(("prompt-choice", i), Variant::Outline)

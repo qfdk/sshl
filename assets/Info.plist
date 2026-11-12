@@ -5,6 +5,11 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh_CN</string>
+		<string>en</string>
+	</array>
 	<key>CFBundleDisplayName</key>
 	<string>SSHL</string>
 	<key>CFBundleExecutable</key>

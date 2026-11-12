@@ -20,7 +20,7 @@ impl Outcome {
         match result {
             Some(Ok(_)) => Outcome::Ok,
             Some(Err(error)) => Outcome::Failed(error.to_string()),
-            None => Outcome::Failed("后台任务异常退出".into()),
+            None => Outcome::Failed(tr!("后台任务异常退出").into()),
         }
     }
 
@@ -89,10 +89,10 @@ pub fn sudo_error_message(error: Option<&str>) -> String {
     let full = error.unwrap_or("");
     let raw = strip_marker(full);
     match sudo_failure(error) {
-        SudoFailure::NotAllowed => format!("当前登录用户没有 sudo 权限。\n{raw}"),
-        SudoFailure::PasswordIncorrect => format!("sudo 密码不正确。\n{raw}"),
-        _ if full.contains("SUDO_TTY_REQUIRED") => format!("服务器的 sudo 要求终端（requiretty），无法在后台执行。\n{raw}"),
-        _ if raw.is_empty() => "未知错误".into(),
+        SudoFailure::NotAllowed => tr!("当前登录用户没有 sudo 权限。\n{}", raw),
+        SudoFailure::PasswordIncorrect => tr!("sudo 密码不正确。\n{}", raw),
+        _ if full.contains("SUDO_TTY_REQUIRED") => tr!("服务器的 sudo 要求终端（requiretty），无法在后台执行。\n{}", raw),
+        _ if raw.is_empty() => tr!("未知错误").into(),
         _ => raw.to_string(),
     }
 }
@@ -102,7 +102,7 @@ pub fn saved_password_choices(saved: Option<&CredList>, need_user: &str, exclude
     let mut all: Vec<(String, String, String)> = Vec::new();
     if let Some(saved) = saved {
         if saved.has_password {
-            all.push(("password".into(), "连接密码".into(), login_user.to_string()));
+            all.push(("password".into(), tr!("连接密码").into(), login_user.to_string()));
         }
         for account in &saved.accounts {
             all.push((format!("acct:{account}"), account.clone(), account.clone()));

@@ -206,6 +206,17 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             crate::settings::preview(cx, |s| s.appearance = appearance);
             Ok(())
         }
+        // language zh | en | system：只改内存里的界面语言（不写设置文件），看英文界面用
+        "language" => {
+            let language = match rest.trim() {
+                "zh" => crate::settings::Language::Zh,
+                "en" => crate::settings::Language::En,
+                "system" => crate::settings::Language::System,
+                other => return Err(format!("language {other}：只认 zh / en / system")),
+            };
+            crate::settings::preview(cx, |s| s.language = language);
+            Ok(())
+        }
         "selection" => {
             window.dispatch_action(Box::new(crate::terminal::view::LogSelection), cx);
             Ok(())

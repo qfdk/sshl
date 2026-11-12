@@ -87,19 +87,19 @@ pub fn format_rate(bytes_per_sec: f64) -> String {
 /// 剩余时间：`剩 8 秒`、`剩 3 分钟`、`剩 1 小时 5 分`。
 pub fn format_eta(secs: u64) -> String {
     match secs {
-        0..=59 => format!("剩 {} 秒", secs.max(1)),
-        60..=3599 => format!("剩 {} 分钟", secs.div_ceil(60)),
-        _ => format!("剩 {} 小时 {} 分", secs / 3600, secs % 3600 / 60),
+        0..=59 => tr!("剩 {} 秒", secs.max(1)),
+        60..=3599 => tr!("剩 {} 分钟", secs.div_ceil(60)),
+        _ => tr!("剩 {} 小时 {} 分", secs / 3600, secs % 3600 / 60),
     }
 }
 
 /// 进度文字：`正在上传 big.bin 45% · 12.3 MB/s · 剩 8 秒 · 还有 2 个`。目录多一段文件计数；速度刚开始不报。
-pub fn describe_progress(verb: &str, data: &TransferProgress, speed: Option<f64>, queued: usize) -> TransferStatus {
+pub fn describe_progress(upload: bool, data: &TransferProgress, speed: Option<f64>, queued: usize) -> TransferStatus {
     let progress = if data.total > 0 { ((data.transferred as f64 / data.total as f64) * 100.0).round().min(100.0) as u32 } else { 0 };
     let name = data.remote_path.split('/').rfind(|s| !s.is_empty()).unwrap_or("");
-    let mut parts = vec![format!("正在{verb} {name} {progress}%")];
+    let mut parts = vec![if upload { tr!("正在上传 {} {}%", name, progress) } else { tr!("正在下载 {} {}%", name, progress) }];
     if let Some(total) = data.files_total.filter(|&t| t > 0) {
-        parts.push(format!("{}/{total} 个文件", data.files_done.unwrap_or(0)));
+        parts.push(tr!("{}/{} 个文件", data.files_done.unwrap_or(0), total));
     }
     if let Some(speed) = speed.filter(|&s| s > 0.) {
         parts.push(format_rate(speed));
@@ -109,7 +109,7 @@ pub fn describe_progress(verb: &str, data: &TransferProgress, speed: Option<f64>
         }
     }
     if queued > 0 {
-        parts.push(format!("还有 {queued} 个"));
+        parts.push(tr!("还有 {} 个", queued));
     }
     TransferStatus::show(progress, parts.join(" · "))
 }
@@ -126,21 +126,21 @@ mod tests {
 
     #[test]
     fn a_file_shows_percent_speed_time_left_and_the_queue() {
-        let status = describe_progress("上传", &p("/srv/big.bin", 45 << 20, 100 << 20, None), Some((11 << 20) as f64), 2);
+        let status = describe_progress(true, &p("/srv/big.bin", 45 << 20, 100 << 20, None), Some((11 << 20) as f64), 2);
         assert_eq!(status, TransferStatus::show(45, "正在上传 big.bin 45% · 11.0 MB/s · 剩 5 秒 · 还有 2 个"));
     }
 
     #[test]
     fn directories_add_the_file_count_and_speed_waits_for_data() {
-        let status = describe_progress("下载", &p("/home/q/logs/", 300 * 1024, 1200 * 1024, Some((3, 10))), None, 0);
+        let status = describe_progress(false, &p("/home/q/logs/", 300 * 1024, 1200 * 1024, Some((3, 10))), None, 0);
         assert_eq!(status, TransferStatus::show(25, "正在下载 logs 25% · 3/10 个文件"));
     }
 
     #[test]
     fn zero_total_and_overshoot_are_clamped() {
-        assert_eq!(describe_progress("下载", &p("/e", 0, 0, Some((0, 0))), None, 0).progress, 0);
-        assert_eq!(describe_progress("下载", &p("/f", 20, 10, None), Some(5.), 0).progress, 100);
-        assert!(!describe_progress("下载", &p("/f", 10, 10, None), Some(5.), 0).info.contains('剩'), "传完了不报剩余时间");
+        assert_eq!(describe_progress(false, &p("/e", 0, 0, Some((0, 0))), None, 0).progress, 0);
+        assert_eq!(describe_progress(false, &p("/f", 20, 10, None), Some(5.), 0).progress, 100);
+        assert!(!describe_progress(false, &p("/f", 10, 10, None), Some(5.), 0).info.contains('剩'), "传完了不报剩余时间");
     }
 
     #[test]

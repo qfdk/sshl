@@ -127,20 +127,20 @@ pub struct Tried {
 pub fn failure_message(tried: &Tried) -> String {
     let mut parts = Vec::new();
     if tried.agent_keys > 0 {
-        parts.push(format!("SSH Agent 里的 {} 把密钥", tried.agent_keys));
+        parts.push(crate::tr!("SSH Agent 里的 {} 把密钥", tried.agent_keys));
     }
     if !tried.files.is_empty() {
-        parts.push(tried.files.join("、"));
+        parts.push(tried.files.join(crate::tr!("、")));
     }
     let mut message = if parts.is_empty() {
-        "免密登录没有可用的密钥：SSH Agent 里没有密钥，也没找到可用的私钥文件。".to_string()
+        crate::tr!("免密登录没有可用的密钥：SSH Agent 里没有密钥，也没找到可用的私钥文件。").to_string()
     } else {
-        format!("免密登录没有成功：服务器没有接受{}。", parts.join("和"))
+        crate::tr!("免密登录没有成功：服务器没有接受{}。", parts.join(crate::tr!("和")))
     };
     if !tried.encrypted.is_empty() {
-        message.push_str(&format!(
+        message.push_str(&crate::tr!(
             "{} 设了密码，免密用不了：可以先 ssh-add 加进 SSH Agent，或改用「私钥」方式并填写私钥密码。",
-            tried.encrypted.join("、")
+            tried.encrypted.join(crate::tr!("、"))
         ));
     }
     message

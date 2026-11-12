@@ -136,7 +136,7 @@ impl Workspace {
             .relative()
             .child(kit::segmented(
                 "main-tabs",
-                &[(MainTab::Terminal, None, "终端".into()), (MainTab::Files, None, "文件管理".into()), (MainTab::System, None, "系统".into())],
+                &[(MainTab::Terminal, None, tr!("终端").into()), (MainTab::Files, None, tr!("文件管理").into()), (MainTab::System, None, tr!("系统").into())],
                 self.main_tab,
                 move |tab, window, cx| {
                     let _ = this.update(cx, |this, cx| this.set_main_tab(tab, window, cx));
@@ -158,8 +158,8 @@ impl Workspace {
     /// 顶栏的面板按钮（命令片段 ⌘⇧P、目录收藏 ⌘⇧D）和它下面的面板。
     fn panel_button(&self, kind: TopPanel, cx: &mut Context<Self>) -> AnyElement {
         let (id, label, glyph, key, content): (&'static str, &'static str, Icon, &'static str, AnyView) = match kind {
-            TopPanel::Snippets => ("snippets", "命令片段", Icon::CodeXml, "⇧P", self.snippet_panel.clone().into()),
-            TopPanel::Favorites => ("favorites", "目录收藏", Icon::Star, "⇧D", self.favorite_panel.clone().into()),
+            TopPanel::Snippets => ("snippets", tr!("命令片段"), Icon::CodeXml, "⇧P", self.snippet_panel.clone().into()),
+            TopPanel::Favorites => ("favorites", tr!("目录收藏"), Icon::Star, "⇧D", self.favorite_panel.clone().into()),
         };
         let open = self.top_panel == Some(kind);
         let button = div()
@@ -213,7 +213,7 @@ impl Workspace {
     }
 
     fn fill_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        let label = if self.fill_feedback { "填充发送完毕" } else { "填充密码" };
+        let label = if self.fill_feedback { tr!("填充发送完毕") } else { tr!("填充密码") };
         div()
             .flex()
             .items_center()
@@ -221,7 +221,7 @@ impl Workspace {
                 div()
                     .id("fill-password")
                     .role(Role::Button)
-                    .aria_label("填充密码")
+                    .aria_label(tr!("填充密码"))
                     .h(px(34.))
                     .pl_3()
                     .pr(px(10.))
@@ -243,7 +243,7 @@ impl Workspace {
                 div()
                     .id("fill-password-menu")
                     .role(Role::Button)
-                    .aria_label("选择账号密码")
+                    .aria_label(tr!("选择账号密码"))
                     .h(px(34.))
                     .px(px(6.))
                     .flex()
@@ -280,7 +280,7 @@ impl Workspace {
                 .into_any_element()
         };
         if menu.has_password {
-            items.push(row("fill-main".into(), "连接密码".into(), "password".into(), cx));
+            items.push(row("fill-main".into(), tr!("连接密码").into(), "password".into(), cx));
         }
         for (i, account) in menu.accounts.iter().enumerate() {
             items.push(row(SharedString::from(format!("fill-acct-{i}")), account.clone().into(), format!("acct:{account}"), cx));
@@ -307,14 +307,14 @@ impl Workspace {
                     .pt_2()
                     .border_t_1()
                     .border_color(theme::color(ui::BORDER))
-                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).child("新增账号密码"))
+                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(tr!("新增账号密码")))
                     .child(kit::text_field(&menu.account, false).h(px(32.)).text_xs())
                     .child(kit::text_field(&menu.password, false).h(px(32.)).text_xs())
                     .child(
                         kit::button("fill-save", Variant::Primary)
                             .h(px(30.))
                             .text_xs()
-                            .child("保存")
+                            .child(tr!("保存"))
                             .on_click(cx.listener(|this, _, window, cx| this.save_fill_account(window, cx))),
                     ),
             );
@@ -349,7 +349,7 @@ impl Workspace {
                 };
                 let dragging = self.dragging.as_deref() == Some(id.as_str()) && cx.has_active_drag();
                 let disconnected = session.view.read(cx).is_disconnected();
-                let close_label = SharedString::from(format!("{} {name}", if session.local { "关闭" } else { "断开" }));
+                let close_label = SharedString::from(format!("{} {name}", if session.local { tr!("关闭") } else { tr!("断开") }));
                 let (click_id, close_id, drag_id, move_id, drop_name) = (id.clone(), id.clone(), id.clone(), id.clone(), name.clone());
                 let rename = self.renaming.as_ref().filter(|r| r.connection_id == id);
                 let label = match rename {
@@ -466,7 +466,7 @@ impl Workspace {
             .collect();
         controls("session-tabs")
             .role(Role::TabList)
-            .aria_label("已打开的会话")
+            .aria_label(tr!("已打开的会话"))
             .flex()
             .flex_wrap()
             .items_center()
@@ -477,7 +477,7 @@ impl Workspace {
                 div()
                     .id("tab-new")
                     .role(Role::Button)
-                    .aria_label("新建连接")
+                    .aria_label(tr!("新建连接"))
                     .size(px(34.))
                     .flex()
                     .items_center()
@@ -513,7 +513,7 @@ impl Workspace {
             .id("tab-rename")
             .key_context(RENAME_CONTEXT)
             .role(Role::TextInput)
-            .aria_label("重命名标签")
+            .aria_label(tr!("重命名标签"))
             .w(px(width))
             .h(px(26.))
             .px(px(6.))
@@ -604,7 +604,7 @@ impl Workspace {
 /// 延迟的显示：< 100ms 绿、≤ 200ms 黄、更慢或超时红。
 pub(crate) fn latency_text(rtt: Option<std::time::Duration>) -> (String, ui::Token) {
     match rtt {
-        None => ("超时".into(), ui::DESTRUCTIVE),
+        None => (tr!("超时").into(), ui::DESTRUCTIVE),
         Some(rtt) => {
             let ms = rtt.as_millis();
             let color = if ms < 100 {

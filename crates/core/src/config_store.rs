@@ -284,7 +284,7 @@ pub fn snippets(connection_id: &str) -> AppResult<Vec<Snippet>> {
 pub fn save_snippet(input: SaveSnippetInput) -> AppResult<i64> {
     let command = normalize_command(&input.command);
     if command.trim().is_empty() {
-        return Err(AppError::Config("命令不能为空".into()));
+        return Err(AppError::Config(crate::tr!("命令不能为空").into()));
     }
     let input = SaveSnippetInput { name: input.name.trim().to_string(), command, ..input };
     db::with_db(|conn| save_snippet_in(conn, &input))
@@ -402,7 +402,7 @@ pub fn cred_list(connection_id: String) -> CredList {
 pub fn cred_set(connection_id: String, account: String, password: String) -> AppResult<()> {
     let account = account.trim();
     if account.is_empty() {
-        return Err(AppError::Config("账号名不能为空".into()));
+        return Err(AppError::Config(crate::tr!("账号名不能为空").into()));
     }
     crypto_store::set(&connection_id, &format!("acct:{account}"), &password)
 }

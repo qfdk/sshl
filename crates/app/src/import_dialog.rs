@@ -98,7 +98,7 @@ impl ImportDialog {
             match config_store::save_connection(events, to_save_input(&row.candidate)) {
                 Ok(_) => imported += 1,
                 Err(error) => {
-                    self.error = Some(format!("导入 {} 失败：{error}", row.candidate.alias).into());
+                    self.error = Some(tr!("导入 {} 失败：{}", row.candidate.alias, error).into());
                     cx.notify();
                     return;
                 }
@@ -112,7 +112,7 @@ impl ImportDialog {
         let target = if c.port == 22 { format!("{}@{}", c.user, c.host) } else { format!("{}@{}:{}", c.user, c.host, c.port) };
         let key: SharedString = match &c.identity {
             Some(path) => path.rsplit('/').next().unwrap_or(path).to_string().into(),
-            None => "自动".into(),
+            None => tr!("自动").into(),
         };
         div()
             .id(("import-row", index))
@@ -143,7 +143,7 @@ impl ImportDialog {
                     .child(div().truncate().font_weight(FontWeight::MEDIUM).child(c.alias.clone()))
                     .child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(target)),
             )
-            .child(div().flex_shrink_0().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if row.exists { "已存在".into() } else { key }))
+            .child(div().flex_shrink_0().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if row.exists { tr!("已存在").into() } else { key }))
     }
 }
 
@@ -151,9 +151,9 @@ impl Render for ImportDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let checked = self.checked();
         let list: gpui::AnyElement = match &self.rows {
-            None => div().py_6().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("正在读取 ~/.ssh/config…").into_any_element(),
+            None => div().py_6().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("正在读取 ~/.ssh/config…")).into_any_element(),
             Some(rows) if rows.is_empty() => {
-                div().py_6().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child("~/.ssh/config 里没有找到主机。").into_any_element()
+                div().py_6().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("~/.ssh/config 里没有找到主机。")).into_any_element()
             }
             Some(rows) => {
                 let items: Vec<gpui::AnyElement> = rows.iter().enumerate().map(|(i, row)| self.row(i, row, cx).into_any_element()).collect();
@@ -174,15 +174,15 @@ impl Render for ImportDialog {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("从 ~/.ssh/config 导入"))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr!("从 ~/.ssh/config 导入")))
                     .child(list)
                     .when_some(self.error.clone(), |d, error| d.child(div().text_sm().text_color(theme::color(ui::DESTRUCTIVE)).child(error))),
             )
             .child(
                 kit::modal_footer()
-                    .child(kit::labeled_button("import-cancel", Variant::Outline, None, "取消").on_click(cx.listener(|_, _, _, cx| cx.emit(ImportDialogEvent::Close))))
+                    .child(kit::labeled_button("import-cancel", Variant::Outline, None, tr!("取消")).on_click(cx.listener(|_, _, _, cx| cx.emit(ImportDialogEvent::Close))))
                     .child(
-                        kit::labeled_button("import-submit", Variant::Primary, None, if checked > 0 { format!("导入 {checked} 个") } else { "导入".into() })
+                        kit::labeled_button("import-submit", Variant::Primary, None, if checked > 0 { tr!("导入 {} 个", checked) } else { tr!("导入").into() })
                             .when(checked == 0, |b| b.opacity(0.5).cursor_default())
                             .when(checked > 0, |b| b.on_click(cx.listener(|this, _, _, cx| this.import(cx)))),
                     ),

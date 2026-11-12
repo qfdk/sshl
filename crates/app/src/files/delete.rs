@@ -48,17 +48,21 @@ fn name_of(path: &str) -> &str {
 pub fn delete_prompt(items: &[(String, bool)]) -> DeletePrompt {
     if let [(path, is_directory)] = items {
         return DeletePrompt {
-            title: if *is_directory { "删除目录" } else { "删除文件" }.into(),
-            message: format!("确定要删除「{}」{}吗？\n此操作不可恢复。", name_of(path), if *is_directory { "及其所有内容" } else { "" }),
+            title: if *is_directory { tr!("删除目录") } else { tr!("删除文件") }.into(),
+            message: if *is_directory {
+                tr!("确定要删除「{}」及其所有内容吗？\n此操作不可恢复。", name_of(path))
+            } else {
+                tr!("确定要删除「{}」吗？\n此操作不可恢复。", name_of(path))
+            },
             detail: None,
-            confirm_label: "删除".into(),
+            confirm_label: tr!("删除").into(),
         };
     }
     DeletePrompt {
-        title: format!("删除 {} 个项目", items.len()),
-        message: "此操作不可恢复。".into(),
-        detail: Some(items.iter().take(PREVIEW_COUNT).map(|(path, _)| name_of(path)).collect::<Vec<_>>().join("、")),
-        confirm_label: "删除".into(),
+        title: tr!("删除 {} 个项目", items.len()),
+        message: tr!("此操作不可恢复。").into(),
+        detail: Some(items.iter().take(PREVIEW_COUNT).map(|(path, _)| name_of(path)).collect::<Vec<_>>().join(tr!("、"))),
+        confirm_label: tr!("删除").into(),
     }
 }
 

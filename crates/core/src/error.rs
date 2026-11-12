@@ -18,7 +18,7 @@ pub enum AppError {
     #[error("host key not accepted")]
     HostKeyDeclined,
     /// 用户点了停止（`sftp::cancellable`）。
-    #[error("已停止")]
+    #[error("{}", crate::tr!("已停止"))]
     Cancelled,
     #[error("{0}")]
     Other(String),

@@ -33,7 +33,7 @@ impl Render for DragPreview {
 
 /// 收起 / 展开侧栏的按钮（⌘B）：展开时在侧栏头部，收起时在顶栏红绿灯右边。
 pub(crate) fn sidebar_toggle_button(collapsed: bool, cx: &mut Context<Workspace>) -> gpui::Stateful<gpui::Div> {
-    let (label, tip) = if collapsed { ("展开侧边栏", "展开侧边栏  ⌘B") } else { ("收起侧边栏", "收起侧边栏  ⌘B") };
+    let (label, tip) = if collapsed { (tr!("展开侧边栏"), tr!("展开侧边栏  ⌘B")) } else { (tr!("收起侧边栏"), tr!("收起侧边栏  ⌘B")) };
     kit::button("toggle-sidebar", Variant::Ghost)
         .w(px(32.))
         .h(px(32.))
@@ -66,8 +66,8 @@ impl Workspace {
             .w(px(32.))
             .h(px(32.))
             .px_0()
-            .aria_label("新建连接")
-            .tooltip(|window, cx| kit::tooltip("新建连接  ⌘T".into(), window, cx))
+            .aria_label(tr!("新建连接"))
+            .tooltip(|window, cx| kit::tooltip(tr!("新建连接  ⌘T").into(), window, cx))
             .child(kit::icon(Icon::Plus))
             .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx)));
         // 设置放在标题行（原来单独占侧栏底部一行，底部状态栏去掉后那一行只剩它）
@@ -75,8 +75,8 @@ impl Workspace {
             .w(px(32.))
             .h(px(32.))
             .px_0()
-            .aria_label("设置")
-            .tooltip(|window, cx| kit::tooltip("设置  ⌘,".into(), window, cx))
+            .aria_label(tr!("设置"))
+            .tooltip(|window, cx| kit::tooltip(tr!("设置  ⌘,").into(), window, cx))
             .child(kit::icon(Icon::Settings))
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         div()
@@ -125,7 +125,7 @@ impl Workspace {
         let query = self.search.read(cx).value().to_string();
         let visible: Vec<StoredConnection> = self.connections.iter().filter(|c| groups::matches(c, &query)).cloned().collect();
         if visible.is_empty() {
-            let text = if self.connections.is_empty() { "没有保存的连接" } else { "没有匹配的连接" };
+            let text = if self.connections.is_empty() { tr!("没有保存的连接") } else { tr!("没有匹配的连接") };
             return div().p_4().text_center().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(text).into_any_element();
         }
         let refs: Vec<&StoredConnection> = visible.iter().collect();
@@ -172,7 +172,7 @@ impl Workspace {
                 .when(drop_ungrouped, |d| d.border_color(theme::color(ui::PRIMARY)).bg(theme::alpha(ui::PRIMARY, 0.1)))
                 .children(items)
                 .when(dragging && ungrouped_empty, |d| {
-                    d.child(div().px_2().py_2().text_center().text_size(px(11.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child("拖到此处移出分组"))
+                    d.child(div().px_2().py_2().text_center().text_size(px(11.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("拖到此处移出分组")))
                 }),
         );
 
@@ -422,16 +422,16 @@ impl Workspace {
             }
         };
         let local = self.session(&id).is_some_and(|s| s.local);
-        let rename = || MenuEntry::Item(MenuItem::new("重命名", action(|this, id, window, cx| this.start_rename(id, window, cx))));
+        let rename = || MenuEntry::Item(MenuItem::new(tr!("重命名"), action(|this, id, window, cx| this.start_rename(id, window, cx))));
         let entries = if on_tab && local {
             // 本机标签：没有可重连的连接和主机地址
             vec![
                 rename(),
                 MenuEntry::Separator,
                 MenuEntry::Item(
-                    MenuItem::new("关闭其他标签", action(|this, id, window, cx| this.close_other_tabs(id, window, cx))).disabled(self.sessions.len() < 2),
+                    MenuItem::new(tr!("关闭其他标签"), action(|this, id, window, cx| this.close_other_tabs(id, window, cx))).disabled(self.sessions.len() < 2),
                 ),
-                MenuEntry::Item(MenuItem::new("关闭", action(|this, id, window, cx| this.disconnect(id, window, cx)))),
+                MenuEntry::Item(MenuItem::new(tr!("关闭"), action(|this, id, window, cx| this.disconnect(id, window, cx)))),
             ]
         } else if on_tab {
             // 标签：改名、重连、复制地址、关闭其他、关闭
@@ -439,32 +439,32 @@ impl Workspace {
             let copied = host.clone().unwrap_or_default();
             vec![
                 rename(),
-                MenuEntry::Item(MenuItem::new("重新连接", action(|this, id, window, cx| this.reconnect_tab(id, window, cx))).disabled(conn.is_none())),
+                MenuEntry::Item(MenuItem::new(tr!("重新连接"), action(|this, id, window, cx| this.reconnect_tab(id, window, cx))).disabled(conn.is_none())),
                 MenuEntry::Item(
-                    MenuItem::new("复制主机地址", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))).disabled(host.is_none()),
+                    MenuItem::new(tr!("复制主机地址"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))).disabled(host.is_none()),
                 ),
                 MenuEntry::Separator,
                 MenuEntry::Item(
-                    MenuItem::new("关闭其他标签", action(|this, id, window, cx| this.close_other_tabs(id, window, cx))).disabled(self.sessions.len() < 2),
+                    MenuItem::new(tr!("关闭其他标签"), action(|this, id, window, cx| this.close_other_tabs(id, window, cx))).disabled(self.sessions.len() < 2),
                 ),
-                MenuEntry::Item(MenuItem::new("关闭", action(|this, id, window, cx| this.disconnect(id, window, cx)))),
+                MenuEntry::Item(MenuItem::new(tr!("关闭"), action(|this, id, window, cx| this.disconnect(id, window, cx)))),
             ]
         } else {
             let conn = conn?;
-            let mut entries = vec![MenuEntry::Item(MenuItem::new("连接", action(|this, id, window, cx| this.connect_to_saved(id, window, cx))))];
+            let mut entries = vec![MenuEntry::Item(MenuItem::new(tr!("连接"), action(|this, id, window, cx| this.connect_to_saved(id, window, cx))))];
             let edit_this = this.clone();
             entries.push(MenuEntry::Item(
-                MenuItem::new("编辑", move |window, cx| {
+                MenuItem::new(tr!("编辑"), move |window, cx| {
                     let editing = conn.clone();
                     let _ = edit_this.update(cx, |this, cx| this.open_connection_dialog(Some(editing), window, cx));
                 })
                 .disabled(connected),
             ));
             if connected {
-                entries.push(MenuEntry::Item(MenuItem::new("断开连接", action(|this, id, window, cx| this.disconnect(id, window, cx)))));
+                entries.push(MenuEntry::Item(MenuItem::new(tr!("断开连接"), action(|this, id, window, cx| this.disconnect(id, window, cx)))));
             }
             entries.push(MenuEntry::Separator);
-            entries.push(MenuEntry::Item(MenuItem::new("删除", action(|this, id, window, cx| this.delete_connection(id, window, cx))).destructive().disabled(connected)));
+            entries.push(MenuEntry::Item(MenuItem::new(tr!("删除"), action(|this, id, window, cx| this.delete_connection(id, window, cx))).destructive().disabled(connected)));
             entries
         };
         let panel = kit::menu_panel(entries, dismiss);

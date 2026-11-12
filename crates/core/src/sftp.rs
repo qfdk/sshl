@@ -172,7 +172,7 @@ async fn open_sftp_as(
 ) -> AppResult<Sftp> {
     let ready = if su_needs_password(via, password, login_user) {
         // 没密码就不跑 su：空密码同样会记一次认证失败
-        Err(AppError::Other(format!("SUDO_PASSWORD_REQUIRED: 需要 {user} 的密码")))
+        Err(AppError::Other(format!("SUDO_PASSWORD_REQUIRED: {}", crate::tr!("需要 {} 的密码", user))))
     } else {
         wait_for_sftp_ready(&mut channel, user, via, password).await
     };
@@ -200,7 +200,7 @@ async fn wait_for_sftp_ready(
     let (mut log, mut answered) = (String::new(), 0usize);
     loop {
         let Ok(msg) = tokio::time::timeout_at(deadline, channel.wait()).await else {
-            return Err(AppError::Other(format!("SUDO_FAILED: 切换到 {user} 超时 {}", terminal_user::clean_auth_noise(&log))));
+            return Err(AppError::Other(format!("SUDO_FAILED: {}", crate::tr!("切换到 {} 超时 {}", user, terminal_user::clean_auth_noise(&log)))));
         };
         match msg {
             Some(russh::ChannelMsg::Data { data }) | Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
@@ -213,7 +213,7 @@ async fn wait_for_sftp_ready(
                     if answered > 0 {
                         return Err(AppError::Other(format!("SUDO_PASSWORD_INCORRECT: {}", terminal_user::clean_auth_noise(&log))));
                     }
-                    let pw = password.ok_or_else(|| AppError::Other("SUDO_PASSWORD_REQUIRED: 需要密码".into()))?;
+                    let pw = password.ok_or_else(|| AppError::Other(format!("SUDO_PASSWORD_REQUIRED: {}", crate::tr!("需要密码"))))?;
                     channel.data(format!("{pw}\n").as_bytes()).await
                         .map_err(|e| AppError::Ssh(format!("exec stdin: {e}")))?;
                     answered = prompts;
@@ -221,7 +221,7 @@ async fn wait_for_sftp_ready(
             }
             Some(russh::ChannelMsg::ExitStatus { .. }) | Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => {
                 if log.contains(terminal_user::NO_SFTP_SERVER) {
-                    return Err(AppError::Other("SUDO_FAILED: 服务器上找不到 sftp-server，无法以该用户身份管理文件".into()));
+                    return Err(AppError::Other(format!("SUDO_FAILED: {}", crate::tr!("服务器上找不到 sftp-server，无法以该用户身份管理文件"))));
                 }
                 let text = terminal_user::clean_auth_noise(&log);
                 let marker = if via == Via::Sudo { sudo_failure(&text) } else { terminal_user::su_failure(&text) };
@@ -498,8 +498,8 @@ fn pick_sudo_password(
     load: impl Fn(&str, &str) -> Option<String>,
 ) -> AppResult<Option<String>> {
     if let Some(kind) = credential {
-        let cid = connection_id.ok_or_else(|| AppError::Other("当前连接未保存，没有已保存的密码".into()))?;
-        return load(cid, kind).map(Some).ok_or_else(|| AppError::Other("未找到对应的已保存密码".into()));
+        let cid = connection_id.ok_or_else(|| AppError::Other(crate::tr!("当前连接未保存，没有已保存的密码").into()))?;
+        return load(cid, kind).map(Some).ok_or_else(|| AppError::Other(crate::tr!("未找到对应的已保存密码").into()));
     }
     Ok(typed.filter(|p| !p.is_empty()))
 }
@@ -639,7 +639,7 @@ fn sudo_prepare_command(with_password: bool) -> String {
 fn staging_from_prepare(status: u32, out: &str, err: &str) -> AppResult<String> {
     let staging = out.trim();
     if status == STAGING_FAILED || (status == 0 && staging.is_empty()) {
-        return Err(AppError::Other(format!("创建暂存目录失败: {}", err.trim())));
+        return Err(AppError::Other(crate::tr!("创建暂存目录失败: {}", err.trim())));
     }
     if status != 0 {
         return Err(AppError::Other(format!("{}: {}", sudo_failure(err), err.trim())));
@@ -668,7 +668,7 @@ pub async fn file_upload_sudo(
         .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
     let sftp = sftp_for(&session).await?;
     let (dest_dir, name) = split_remote(&remote_path)
-        .ok_or_else(|| AppError::Other(format!("无效的上传路径: {remote_path}")))?;
+        .ok_or_else(|| AppError::Other(crate::tr!("无效的上传路径: {}", remote_path)))?;
     let password = pick_sudo_password(session.connection_id.as_deref(), credential.as_deref(), sudo_password, load_secret)?;
     let input = password.as_ref().map(|p| format!("{p}\n"));
     let stdin = input.as_deref().map(str::as_bytes);
@@ -890,7 +890,7 @@ struct PartFile {
 impl PartFile {
     async fn create(target: &Path) -> AppResult<(Self, tokio::fs::File)> {
         let name = target.file_name()
-            .ok_or_else(|| AppError::Other(format!("无效的下载路径: {}", target.display())))?;
+            .ok_or_else(|| AppError::Other(crate::tr!("无效的下载路径: {}", target.display())))?;
         loop {
             let mut part = std::ffi::OsString::from(".");
             part.push(name);

@@ -214,7 +214,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(prompts: Entity<prompts::PromptHost>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索连接..."));
+        let search = kit::input(|| tr!("搜索连接..."), window, cx);
         let file_manager = cx.new(|cx| FileManager::new(window, cx));
         let system_panel = cx.new(|cx| SystemPanel::new(window, cx));
         let snippet_panel = cx.new(|cx| SnippetPanel::new(window, cx));
@@ -428,7 +428,7 @@ impl Workspace {
         let area = self.terminal_area.map(|b| b.size).unwrap_or_else(|| window.viewport_size());
         let view = cx.new(|cx| TerminalView::local(cwd, metrics.grid(area), window, cx));
         if let Status::Failed(error) = view.read(cx).status.clone() {
-            prompts::alert_later(window, cx, Options::new("打开本机终端失败").message(error));
+            prompts::alert_later(window, cx, Options::new(tr!("打开本机终端失败")).message(error));
             return;
         }
         let id = format!("local:{}", self.next_local);
@@ -494,8 +494,8 @@ impl Workspace {
         if others.is_empty() {
             return;
         }
-        let message = format!("确定要关闭其他 {} 个标签吗？连着的会话会断开。", others.len());
-        let answer = prompts::confirm(window, cx, Options::new("关闭其他标签").message(message).confirm("关闭"));
+        let message = tr!("确定要关闭其他 {} 个标签吗？连着的会话会断开。", others.len());
+        let answer = prompts::confirm(window, cx, Options::new(tr!("关闭其他标签")).message(message).confirm(tr!("关闭")));
         let keep = keep.to_string();
         cx.spawn_in(window, async move |this, cx| {
             if !answer.await.unwrap_or(false) {
@@ -534,8 +534,8 @@ impl Workspace {
         };
         if conn.auth == AuthKind::Password && !crypto_store::has(&conn.id, "password") {
             let target = format!("{}@{}", conn.username, conn.host);
-            let options = Options::new(format!("连接 {}", conn.name)).message(format!("输入 {target} 的密码。")).confirm("连接");
-            let answer = prompts::password(window, cx, options, "密码", Vec::new());
+            let options = Options::new(tr!("连接 {}", conn.name)).message(tr!("输入 {} 的密码。", target)).confirm(tr!("连接"));
+            let answer = prompts::password(window, cx, options, tr!("密码"), Vec::new());
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(Some(PasswordAnswer::Password(password))) = answer.await else { return };
                 let _ = this.update_in(cx, |this, window, cx| {
@@ -602,7 +602,7 @@ impl Workspace {
                 let pending = self.pending.take().expect("pending");
                 if let Some(save) = pending.save {
                     if let Err(error) = config_store::save_connection(&backend::get().events, save) {
-                        prompts::alert_later(window, cx, Options::new("保存连接失败").message(error.to_string()));
+                        prompts::alert_later(window, cx, Options::new(tr!("保存连接失败")).message(error.to_string()));
                     }
                     self.reload_connections();
                 }
@@ -619,7 +619,7 @@ impl Workspace {
             }
             TerminalEvent::Failed(error) if is_pending => {
                 self.pending = None;
-                prompts::alert_later(window, cx, Options::new("连接失败").message(error.clone()));
+                prompts::alert_later(window, cx, Options::new(tr!("连接失败")).message(error.clone()));
                 cx.notify();
             }
             TerminalEvent::Declined if is_pending => {
@@ -640,7 +640,7 @@ impl Workspace {
                         self.fill_menu = None;
                         self.file_manager.update(cx, |files, cx| {
                             files.set_session(None, window, cx);
-                            files.show_remote_empty("连接已断开，请重新连接到服务器", Some(connection_id), window, cx);
+                            files.show_disconnected(Some(connection_id), window, cx);
                         });
                         self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
                     }
@@ -715,7 +715,7 @@ impl Workspace {
         self.file_manager.update(cx, |files, cx| {
             files.set_session(file_session, window, cx);
             if disconnected {
-                files.show_remote_empty("连接已断开，请重新连接到服务器", Some(id), window, cx);
+                files.show_disconnected(Some(id), window, cx);
             }
         });
         if self.main_tab == MainTab::Terminal
@@ -770,8 +770,8 @@ impl Workspace {
             let Some(program) = session.view.read(cx).local_busy() else {
                 return self.disconnect_now(&connection_id, window, cx);
             };
-            let message = format!("「{program}」还在运行，关闭标签会结束它。");
-            let answer = prompts::confirm(window, cx, Options::new(format!("关闭「{}」", self.tab_name(session))).message(message).confirm("关闭"));
+            let message = tr!("「{}」还在运行，关闭标签会结束它。", program);
+            let answer = prompts::confirm(window, cx, Options::new(tr!("关闭「{}」", self.tab_name(session))).message(message).confirm(tr!("关闭")));
             cx.spawn_in(window, async move |this, cx| {
                 if answer.await.unwrap_or(false) {
                     let _ = this.update_in(cx, |this, window, cx| this.disconnect_now(&connection_id, window, cx));
@@ -786,22 +786,22 @@ impl Workspace {
             return self.disconnect_now(&connection_id, window, cx);
         }
         let name = self.tab_name(session);
-        let name = if name.is_empty() { SharedString::from("这个会话") } else { name };
+        let name = if name.is_empty() { SharedString::from(tr!("这个会话")) } else { name };
         let on_files = self.main_tab == MainTab::Files && self.active.as_deref() == Some(connection_id);
         let transferring = self.file_manager.read(cx).active_transfers() > 0;
         let consequence = if transferring {
-            "正在进行的文件传输会中断。"
+            tr!("正在进行的文件传输会中断。")
         } else if on_files {
-            "文件管理会一并关闭。"
+            tr!("文件管理会一并关闭。")
         } else {
             ""
         };
-        let message = [format!("确定要断开「{name}」吗？"), consequence.to_string()]
+        let message = [tr!("确定要断开「{}」吗？", name), consequence.to_string()]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
-        let answer = prompts::confirm(window, cx, Options::new("断开连接").message(message).confirm("断开"));
+        let answer = prompts::confirm(window, cx, Options::new(tr!("断开连接")).message(message).confirm(tr!("断开")));
         let connection_id = connection_id.to_string();
         cx.spawn_in(window, async move |this, cx| {
             if !answer.await.unwrap_or(false) {
@@ -837,7 +837,7 @@ impl Workspace {
         // 关掉的是当前标签、还剩别的标签：切到相邻的那个，不要停在「点击左侧连接」的空页面上（标签明明还在）
         let remaining: Vec<String> = self.sessions.iter().map(|s| s.connection_id.clone()).collect();
         let next = if was_active { groups::tab_after_close(&remaining, index) } else { None };
-        self.session_gone(session_id.as_deref(), connection_id, was_active && next.is_none(), "连接已断开，请重新连接到服务器", window, cx);
+        self.session_gone(session_id.as_deref(), connection_id, was_active && next.is_none(), window, cx);
         if let Some(next) = next {
             self.switch_to(&next, window, cx);
         }
@@ -848,7 +848,7 @@ impl Workspace {
     }
 
     /// 会话没了（主动断开、远端关闭、失效丢弃）：清掉文件管理里它的记录；是当前会话就回到终端占位、文件管理显示空状态。
-    fn session_gone(&mut self, session_id: Option<&str>, connection_id: &str, was_active: bool, message: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn session_gone(&mut self, session_id: Option<&str>, connection_id: &str, was_active: bool, window: &mut Window, cx: &mut Context<Self>) {
         let connection_id = connection_id.to_string();
         self.file_manager.update(cx, |files, cx| {
             if let Some(session_id) = session_id {
@@ -856,7 +856,7 @@ impl Workspace {
             }
             if was_active {
                 files.set_session(None, window, cx);
-                files.show_remote_empty(message, Some(connection_id), window, cx);
+                files.show_disconnected(Some(connection_id), window, cx);
             }
         });
         if was_active {
@@ -874,7 +874,7 @@ impl Workspace {
     }
 
     pub(crate) fn delete_connection(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = prompts::confirm(window, cx, Options::new("删除连接").message("确定要删除这个连接吗？").confirm("删除"));
+        let answer = prompts::confirm(window, cx, Options::new(tr!("删除连接")).message(tr!("确定要删除这个连接吗？")).confirm(tr!("删除")));
         let id = id.to_string();
         cx.spawn_in(window, async move |this, cx| {
             if !answer.await.unwrap_or(false) {
@@ -963,7 +963,7 @@ impl Workspace {
                         self.reload_connections();
                         self.close_connection_dialog(window, cx);
                     }
-                    Err(error) => prompts::alert_later(window, cx, Options::new("编辑连接失败").message(error.to_string())),
+                    Err(error) => prompts::alert_later(window, cx, Options::new(tr!("编辑连接失败")).message(error.to_string())),
                 }
             }
         }
@@ -1032,8 +1032,8 @@ impl Workspace {
         self.fill_menu = Some(FillMenu {
             has_password: creds.has_password,
             accounts: creds.accounts,
-            account: cx.new(|cx| InputState::new(window, cx).placeholder("账号")),
-            password: cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("密码")),
+            account: kit::input(|| tr!("账号"), window, cx),
+            password: cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr!("密码"))),
         });
         cx.notify();
     }
@@ -1057,7 +1057,7 @@ impl Workspace {
                         }));
                         this.refocus(window, cx);
                     }
-                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new("填充密码失败").message(error.to_string())),
+                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new(tr!("填充密码失败")).message(error.to_string())),
                     None => {}
                 }
                 cx.notify();
@@ -1074,7 +1074,7 @@ impl Workspace {
             return;
         }
         if let Err(error) = config_store::cred_set(connection_id, account, password) {
-            prompts::alert_later(window, cx, Options::new("保存失败").message(error.to_string()));
+            prompts::alert_later(window, cx, Options::new(tr!("保存失败")).message(error.to_string()));
         }
         self.open_fill_menu(window, cx);
     }
@@ -1152,7 +1152,7 @@ impl Workspace {
     fn snippet_scope(&self) -> Option<(String, SharedString)> {
         let id = self.active.clone()?;
         if self.session(&id).is_some_and(|s| s.local) {
-            return Some((LOCAL_SCOPE.into(), "本机".into()));
+            return Some((LOCAL_SCOPE.into(), tr!("本机").into()));
         }
         let name = self
             .connection(&id)
@@ -1405,7 +1405,7 @@ fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<W
                 .child(div().flex_1().min_w_0().truncate().child(info))
                 .when(running, |row| {
                     row.child(
-                        kit::mini_button("toast-stop", crate::assets::Icon::X, "停止传输", ui::MUTED_FOREGROUND)
+                        kit::mini_button("toast-stop", crate::assets::Icon::X, tr!("停止传输"), ui::MUTED_FOREGROUND)
                             .size(px(20.))
                             .on_click(cx.listener(|this, _, _, cx| this.file_manager.update(cx, |files, cx| files.stop_transfers(cx)))),
                     )
@@ -1550,19 +1550,19 @@ impl Render for Workspace {
                                                 .justify_center()
                                                 .flex_col()
                                                 .gap_4()
-                                                .child(div().text_sm().text_color(theme::color(empty_hint)).child(if sidebar_collapsed { "按 ⌘K 快速连接，或新建连接开始使用" } else { "点击左侧连接或创建新连接开始使用" }))
+                                                .child(div().text_sm().text_color(theme::color(empty_hint)).child(if sidebar_collapsed { tr!("按 ⌘K 快速连接，或新建连接开始使用") } else { tr!("点击左侧连接或创建新连接开始使用") }))
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .gap_3()
                                                         .child(
-                                                            kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), "新建连接")
+                                                            kit::labeled_button("empty-new-connection", kit::Variant::Primary, Some(crate::assets::Icon::Plus), tr!("新建连接"))
                                                                 .h(px(32.))
                                                                 .text_size(px(13.))
                                                                 .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
                                                         )
                                                         .child(
-                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), "本机终端 ⌘N")
+                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), tr!("本机终端 ⌘N"))
                                                                 .h(px(32.))
                                                                 .text_size(px(13.))
                                                                 .on_click(cx.listener(|this, _, window, cx| this.new_local_terminal(window, cx))),
@@ -1624,13 +1624,13 @@ impl Workspace {
                     .bg(theme::color(ui::CARD))
                     .shadow_xl()
                     .child(kit::icon(crate::assets::Icon::LoaderCircle).text_color(theme::color(ui::PRIMARY)))
-                    .child("正在连接服务器...")
+                    .child(tr!("正在连接服务器..."))
                     .child(
                         kit::button("cancel-connect", kit::Variant::Outline)
                             .h(px(28.))
                             .px_2()
                             .text_size(px(12.))
-                            .child("取消")
+                            .child(tr!("取消"))
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_connect(cx))),
                     ),
             )

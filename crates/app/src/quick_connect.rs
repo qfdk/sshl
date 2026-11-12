@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, AppContext, ClickEvent, Context, Entity, EventEmitter, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding,
+    App, ClickEvent, Context, Entity, EventEmitter, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding,
     ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, actions, div,
     prelude::FluentBuilder, px,
 };
@@ -94,7 +94,7 @@ impl EventEmitter<QuickConnectEvent> for QuickConnect {}
 
 impl QuickConnect {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索连接…"));
+        let search = kit::input(|| tr!("搜索连接…"), window, cx);
         let subscription = cx.subscribe_in(&search, window, |this, _, event: &InputEvent, _, cx| {
             if let InputEvent::Change = event {
                 this.selected = 0;
@@ -218,9 +218,9 @@ impl Render for QuickConnect {
         let visible = self.visible(cx);
         let muted = |text: &'static str| div().px_2().py_3().text_size(px(13.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(text);
         let list = if self.connections.is_empty() {
-            muted("没有保存的连接").into_any_element()
+            muted(tr!("没有保存的连接")).into_any_element()
         } else if visible.is_empty() {
-            muted("没有匹配的连接").into_any_element()
+            muted(tr!("没有匹配的连接")).into_any_element()
         } else {
             let rows: Vec<_> = visible.iter().enumerate().map(|(position, &i)| self.row(position, &self.connections[i], cx).into_any_element()).collect();
             div().id("quick-connect-list").max_h(px(380.)).overflow_y_scroll().track_scroll(&self.scroll).flex().flex_col().children(rows).into_any_element()
@@ -229,7 +229,7 @@ impl Render for QuickConnect {
             .id("quick-connect")
             .key_context("QuickConnect")
             .role(Role::Dialog)
-            .aria_label("快速连接")
+            .aria_label(tr!("快速连接"))
             .occlude()
             .w(px(460.))
             .p(px(6.))

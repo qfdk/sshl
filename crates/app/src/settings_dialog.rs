@@ -14,7 +14,7 @@ use crate::assets::Icon;
 use crate::backend;
 use crate::groups::{self, Side};
 use crate::prompts::{self, Options};
-use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Settings};
+use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Language, Settings};
 use crate::sidebar::DragPreview;
 use crate::terminal::frame::Rgb;
 use crate::theme::term::{self, Theme};
@@ -22,9 +22,6 @@ use crate::theme::Appearance;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
 
-const UNGROUPED: &str = "未分组";
-const GROUP_NERD: &str = "图标字体（Nerd Font）";
-const GROUP_MONO: &str = "等宽字体";
 /// 只列非 Mono 版：Mono 版把图标压成一格宽，和正常字符大小不一样（用户不要）。
 const NERD_CANDIDATES: &[&str] = &[
     "JetBrainsMono Nerd Font", "FiraCode Nerd Font", "Hack Nerd Font", "MesloLGM Nerd Font", "Iosevka Nerd Font",
@@ -38,19 +35,31 @@ const MONO_CANDIDATES: &[&str] = &[
 
 #[derive(Clone)]
 struct Preset {
-    label: SharedString,
     family: String,
-    group: &'static str,
+    /// 带图标的（Nerd Font）一组，其余是普通等宽字体。
+    icons: bool,
+}
+
+impl Preset {
+    fn label(&self) -> SharedString {
+        if self.family == DEFAULT_FONT_FAMILY {
+            tr!("JetBrainsMono Nerd Font (内置·含图标)").into()
+        } else if self.icons {
+            tr!("{} (含图标)", self.family).into()
+        } else {
+            self.family.clone().into()
+        }
+    }
 }
 
 fn presets(installed: &[String]) -> Vec<Preset> {
     let has = |name: &str| installed.iter().any(|f| f == name);
-    let mut out = vec![Preset { label: "JetBrainsMono Nerd Font (内置·含图标)".into(), family: DEFAULT_FONT_FAMILY.into(), group: GROUP_NERD }];
+    let mut out = vec![Preset { family: DEFAULT_FONT_FAMILY.into(), icons: true }];
     for name in NERD_CANDIDATES.iter().filter(|n| has(n) && **n != DEFAULT_FONT_FAMILY) {
-        out.push(Preset { label: format!("{name} (含图标)").into(), family: (*name).into(), group: GROUP_NERD });
+        out.push(Preset { family: (*name).into(), icons: true });
     }
     for name in MONO_CANDIDATES.iter().filter(|n| has(n)) {
-        out.push(Preset { label: (*name).into(), family: (*name).into(), group: GROUP_MONO });
+        out.push(Preset { family: (*name).into(), icons: false });
     }
     out
 }
@@ -118,7 +127,7 @@ impl SettingsDialog {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let snapshot = settings::get(cx).clone();
         let custom = cx.new(|cx| InputState::new(window, cx).placeholder("Cascadia Code").default_value(snapshot.font_family.clone()));
-        let new_group = cx.new(|cx| InputState::new(window, cx).placeholder("新分组名称"));
+        let new_group = kit::input(|| tr!("新分组名称"), window, cx);
         let subscriptions = vec![
             cx.subscribe_in(&custom, window, |this, input, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event
@@ -272,7 +281,7 @@ impl SettingsDialog {
             return;
         }
         if self.groups.contains(&name) {
-            prompts::alert_later(window, cx, Options::new("无法保存分组").message("分组名称已存在。"));
+            prompts::alert_later(window, cx, Options::new(tr!("无法保存分组")).message(tr!("分组名称已存在。")));
             return;
         }
         self.groups.push(name);
@@ -318,7 +327,7 @@ impl SettingsDialog {
                 self.saved = Self::layout_of(&self.connections, &self.groups);
                 cx.emit(SettingsDialogEvent::Close);
             }
-            Err(error) => prompts::alert_later(window, cx, Options::new("保存分组失败").message(error.to_string())),
+            Err(error) => prompts::alert_later(window, cx, Options::new(tr!("保存分组失败")).message(error.to_string())),
         }
     }
 
@@ -395,8 +404,8 @@ impl Render for SettingsDialog {
                     .justify_between()
                     .border_b_1()
                     .border_color(theme::color(ui::BORDER))
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("设置"))
-                    .child(kit::icon_button("settings-close", Variant::Ghost, Icon::X, "关闭").w(px(32.)).h(px(32.)).on_click(cx.listener(|this, _, _, cx| this.close(cx)))),
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr!("设置")))
+                    .child(kit::icon_button("settings-close", Variant::Ghost, Icon::X, tr!("关闭")).w(px(32.)).h(px(32.)).on_click(cx.listener(|this, _, _, cx| this.close(cx)))),
             )
             .child(
                 div()
@@ -414,9 +423,9 @@ impl Render for SettingsDialog {
                             .rounded_bl(px(15.))
                             .border_r_1()
                             .border_color(theme::color(ui::BORDER))
-                            .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, "终端", self.tab == Tab::Font, cx))
-                            .child(tab_button("settings-tab-appearance", Tab::Appearance, Icon::Moon, "外观", self.tab == Tab::Appearance, cx))
-                            .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, "分组管理", self.tab == Tab::Groups, cx)),
+                            .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, tr!("终端"), self.tab == Tab::Font, cx))
+                            .child(tab_button("settings-tab-appearance", Tab::Appearance, Icon::Moon, tr!("外观"), self.tab == Tab::Appearance, cx))
+                            .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, tr!("分组管理"), self.tab == Tab::Groups, cx)),
                     )
                     // 窗口矮（最小 600）时「终端」这页放不下：右边这块自己滚动，标题栏和保存按钮不会被挤出窗口
                     .child(
@@ -437,19 +446,19 @@ impl Render for SettingsDialog {
 impl SettingsDialog {
     fn font_panel(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = settings::get(cx).clone();
-        let selected = self.presets.iter().find(|p| p.family == current.font_family && !self.custom_mode).map(|p| p.label.clone()).unwrap_or_else(|| "自定义…".into());
+        let selected = self.presets.iter().find(|p| p.family == current.font_family && !self.custom_mode).map(Preset::label).unwrap_or_else(|| tr!("自定义…").into());
         let family_list = self.family_open.then(|| {
             let mut rows: Vec<AnyElement> = Vec::new();
-            for group in [GROUP_NERD, GROUP_MONO] {
+            for (icons, group) in [(true, tr!("图标字体（Nerd Font）")), (false, tr!("等宽字体"))] {
                 rows.push(div().px_2().pt_2().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::color(ui::MUTED_FOREGROUND)).child(group).into_any_element());
-                for (i, preset) in self.presets.iter().enumerate().filter(|(_, p)| p.group == group) {
+                for (i, preset) in self.presets.iter().enumerate().filter(|(_, p)| p.icons == icons) {
                     let family = preset.family.clone();
                     let active = !self.custom_mode && preset.family == current.font_family;
                     rows.push(
                         div()
                             .id(("font-preset", i))
                             .role(Role::ListBoxOption)
-                            .aria_label(preset.label.clone())
+                            .aria_label(preset.label())
                             .px_2()
                             .py(px(6.))
                             .flex()
@@ -459,13 +468,13 @@ impl SettingsDialog {
                             .cursor_pointer()
                             .hover(|s| s.bg(theme::color(ui::ACCENT)))
                             .child(div().w(px(14.)).when(active, |d| d.child(kit::icon_sized(Icon::Check, 14.))))
-                            .child(preset.label.clone())
+                            .child(preset.label())
                             .on_click(cx.listener(move |this, _, window, cx| this.pick_family(Some(family.clone()), window, cx)))
                             .into_any_element(),
                     );
                 }
             }
-            rows.push(div().px_2().pt_2().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::color(ui::MUTED_FOREGROUND)).child("其他").into_any_element());
+            rows.push(div().px_2().pt_2().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("其他")).into_any_element());
             rows.push(
                 div()
                     .id("font-custom")
@@ -478,7 +487,7 @@ impl SettingsDialog {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme::color(ui::ACCENT)))
                     .child(div().w(px(14.)).when(self.custom_mode, |d| d.child(kit::icon_sized(Icon::Check, 14.))))
-                    .child("自定义…")
+                    .child(tr!("自定义…"))
                     .on_click(cx.listener(|this, _, window, cx| this.pick_family(None, window, cx)))
                     .into_any_element(),
             );
@@ -503,7 +512,7 @@ impl SettingsDialog {
         let palette = current.terminal_theme();
         // 第二行是浅灰的 ls 输出，用 7 号白；浅色主题的白在浅底上看不清，改用前景色
         let dim = if palette.is_light() { palette.foreground } else { palette.ansi[7] };
-        let preview_line = |text: &'static str, color: Rgb| div().truncate().text_color(term::hsla(color)).child(text);
+        let preview_line = |text: SharedString, color: Rgb| div().truncate().text_color(term::hsla(color)).child(text);
         div()
             .flex()
             .flex_col()
@@ -514,7 +523,7 @@ impl SettingsDialog {
                     .flex()
                     .gap_4()
                     .child(
-                        div().w(px(112.)).flex().flex_col().gap_2().child(kit::field_label("字号")).child(
+                        div().w(px(112.)).flex().flex_col().gap_2().child(kit::field_label(tr!("字号"))).child(
                             div()
                                 .h(px(40.))
                                 .flex()
@@ -523,17 +532,17 @@ impl SettingsDialog {
                                 .border_1()
                                 .border_color(theme::color(ui::BORDER))
                                 .overflow_hidden()
-                                .child(kit::button("size-down", Variant::Ghost).w(px(32.)).h_full().px_0().rounded_none().aria_label("减小").child("−").on_click(cx.listener(|this, _, _, cx| this.step_size(-1., cx))))
+                                .child(kit::button("size-down", Variant::Ghost).w(px(32.)).h_full().px_0().rounded_none().aria_label(tr!("减小")).child("−").on_click(cx.listener(|this, _, _, cx| this.step_size(-1., cx))))
                                 .child(div().flex_1().text_center().child(format!("{}", current.font_size as i32)))
-                                .child(kit::button("size-up", Variant::Ghost).w(px(32.)).h_full().px_0().rounded_none().aria_label("增大").child("+").on_click(cx.listener(|this, _, _, cx| this.step_size(1., cx)))),
+                                .child(kit::button("size-up", Variant::Ghost).w(px(32.)).h_full().px_0().rounded_none().aria_label(tr!("增大")).child("+").on_click(cx.listener(|this, _, _, cx| this.step_size(1., cx)))),
                         ),
                     )
                     .child(
-                        div().flex_1().min_w_0().flex().flex_col().gap_2().child(kit::field_label("字体")).child(
+                        div().flex_1().min_w_0().flex().flex_col().gap_2().child(kit::field_label(tr!("字体"))).child(
                             div()
                                 .id("font-family")
                                 .role(Role::ComboBox)
-                                .aria_label("字体")
+                                .aria_label(tr!("字体"))
                                 .h(px(40.))
                                 .px_3()
                                 .flex()
@@ -555,7 +564,7 @@ impl SettingsDialog {
                     .when_some(family_list, |d, list| d.child(deferred(list).with_priority(1))),
             )
             .when(self.custom_mode, |d| {
-                d.child(div().flex().flex_col().gap_2().child(kit::field_label("自定义字体")).child(kit::text_field(&self.custom, false).h(px(40.))))
+                d.child(div().flex().flex_col().gap_2().child(kit::field_label(tr!("自定义字体"))).child(kit::text_field(&self.custom, false).h(px(40.))))
             })
             .child(
                 div()
@@ -567,20 +576,20 @@ impl SettingsDialog {
                     .font_family(current.font_family.clone())
                     .text_size(px(current.font_size))
                     .line_height(px(current.font_size * 1.5))
-                    .child(preview_line("user@host:~$ ls -la /etc", palette.foreground))
-                    .child(preview_line("drwxr-xr-x  123 root  4096 May 24 10:42 .", dim))
-                    .child(preview_line("The quick brown fox 0123456789 → ✓", palette.foreground))
-                    .child(preview_line("Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文", palette.foreground))
-                    .child(preview_line("Nerd Font 图标: \u{e0b0} \u{f07b} \u{f015} \u{f120} \u{e0a0} \u{f09b} \u{f135}", palette.foreground)),
+                    .child(preview_line("user@host:~$ ls -la /etc".into(), palette.foreground))
+                    .child(preview_line("drwxr-xr-x  123 root  4096 May 24 10:42 .".into(), dim))
+                    .child(preview_line("The quick brown fox 0123456789 → ✓".into(), palette.foreground))
+                    .child(preview_line("Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文".into(), palette.foreground))
+                    .child(preview_line(format!("{} \u{e0b0} \u{f07b} \u{f015} \u{f120} \u{e0a0} \u{f09b} \u{f135}", tr!("Nerd Font 图标:")).into(), palette.foreground)),
             )
-            .child(div().flex().flex_col().gap_2().child(kit::field_label("配色")).child(self.theme_cards(palette, cx)))
+            .child(div().flex().flex_col().gap_2().child(kit::field_label(tr!("配色"))).child(self.theme_cards(palette, cx)))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(self.toggle_row("copy-on-select", "选中即复制", "拖选文字后自动复制到剪贴板", current.copy_on_select, |s| &mut s.copy_on_select, cx))
-                    .child(self.toggle_row("right-click-paste", "右键粘贴", "在终端里点右键直接粘贴（程序接收鼠标时除外）", current.right_click_paste, |s| &mut s.right_click_paste, cx)),
+                    .child(self.toggle_row("copy-on-select", tr!("选中即复制"), tr!("拖选文字后自动复制到剪贴板"), current.copy_on_select, |s| &mut s.copy_on_select, cx))
+                    .child(self.toggle_row("right-click-paste", tr!("右键粘贴"), tr!("在终端里点右键直接粘贴（程序接收鼠标时除外）"), current.right_click_paste, |s| &mut s.right_click_paste, cx)),
             )
             .child(
                 div()
@@ -589,8 +598,8 @@ impl SettingsDialog {
                     .justify_between()
                     .border_t_1()
                     .border_color(theme::color(ui::BORDER))
-                    .child(kit::labeled_button("settings-reset", Variant::Outline, None, "还原默认").on_click(cx.listener(|this, _, _, cx| this.reset_font(cx))))
-                    .child(kit::labeled_button("settings-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
+                    .child(kit::labeled_button("settings-reset", Variant::Outline, None, tr!("还原默认")).on_click(cx.listener(|this, _, _, cx| this.reset_font(cx))))
+                    .child(kit::labeled_button("settings-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
     }
@@ -625,7 +634,7 @@ impl SettingsDialog {
                 .child(div().truncate().text_xs().child(t.name))
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_theme(id, cx)))
         });
-        div().id("terminal-themes").role(Role::RadioGroup).aria_label("配色").grid().grid_cols(4).gap(px(6.)).children(cards)
+        div().id("terminal-themes").role(Role::RadioGroup).aria_label(tr!("配色")).grid().grid_cols(4).gap(px(6.)).children(cards)
     }
 
     /// 一行开关：勾选框 + 名称 + 灰色说明。和字体一样先预览，保存才写盘。
@@ -646,9 +655,9 @@ impl SettingsDialog {
             .cursor_pointer()
             .role(Role::CheckBox)
             .aria_label(label)
-            .child(kit::checkbox((id, 0usize), checked))
-            .child(div().text_sm().child(label))
-            .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint))
+            .child(kit::checkbox((id, 0usize), checked).flex_shrink_0())
+            .child(div().flex_shrink_0().text_sm().child(label))
+            .child(div().min_w_0().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint))
             .on_click(cx.listener(move |_, _, _, cx| {
                 settings::preview(cx, |s| {
                     let value = field(s);
@@ -661,11 +670,15 @@ impl SettingsDialog {
     /// 界面外观：点了立刻换（预览），保存才记住；和「终端」页共用一套保存 / 不保存还原。
     fn appearance_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = settings::get(cx).appearance;
+        let language = settings::get(cx).language;
         let entity = cx.entity();
+        let language_entity = entity.clone();
+        // 语言名用它自己的文字写，不跟着界面语言变：换错了也认得出哪个是自己的
+        let languages = [(Language::System, None, SharedString::from(tr!("跟随系统"))), (Language::Zh, None, "简体中文".into()), (Language::En, None, "English".into())];
         let options = [
-            (Appearance::System, None, SharedString::from("跟随系统")),
-            (Appearance::Light, None, "浅色".into()),
-            (Appearance::Dark, None, "深色".into()),
+            (Appearance::System, None, SharedString::from(tr!("跟随系统"))),
+            (Appearance::Light, None, tr!("浅色").into()),
+            (Appearance::Dark, None, tr!("深色").into()),
         ];
         div()
             .flex()
@@ -676,13 +689,22 @@ impl SettingsDialog {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(kit::field_label("界面外观"))
+                    .child(kit::field_label(tr!("界面外观")))
                     .child(div().w(px(300.)).child(kit::segmented("appearance", &options, current, move |value, _, cx| {
                         settings::preview(cx, |s| s.appearance = value);
                         entity.update(cx, |_, cx| cx.notify());
                     })))
-                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child("终端里的颜色不跟着变，在「终端」页的配色里选")),
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("终端里的颜色不跟着变，在「终端」页的配色里选"))),
             )
+            .child(div().flex().flex_col().gap_2().child(kit::field_label(tr!("语言"))).child(div().w(px(300.)).child(kit::segmented(
+                "language",
+                &languages,
+                language,
+                move |value, _, cx| {
+                    settings::preview(cx, |s| s.language = value);
+                    language_entity.update(cx, |_, cx| cx.notify());
+                },
+            ))))
             .child(
                 div()
                     .pt_3()
@@ -690,7 +712,7 @@ impl SettingsDialog {
                     .justify_end()
                     .border_t_1()
                     .border_color(theme::color(ui::BORDER))
-                    .child(kit::labeled_button("appearance-save", Variant::Primary, None, "保存").on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
+                    .child(kit::labeled_button("appearance-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
     }
@@ -699,7 +721,7 @@ impl SettingsDialog {
         let dirty = self.dirty();
         let refs: Vec<&StoredConnection> = self.connections.iter().collect();
         let ungrouped: Vec<StoredConnection> = groups::ungrouped(&refs).into_iter().cloned().collect();
-        let mut sections: Vec<AnyElement> = vec![self.group_section(UNGROUPED, "", ungrouped, None, cx)];
+        let mut sections: Vec<AnyElement> = vec![self.group_section(tr!("未分组"), "", ungrouped, None, cx)];
         let names = self.groups.clone();
         for name in names {
             let members: Vec<StoredConnection> = self.connections.iter().filter(|c| groups::normalize(&c.group) == name).cloned().collect();
@@ -715,15 +737,15 @@ impl SettingsDialog {
                     .flex()
                     .gap_2()
                     .child(div().flex_1().child(kit::text_field(&self.new_group, false)))
-                    .child(kit::labeled_button("group-add", Variant::Primary, Some(Icon::Plus), "添加分组").on_click(cx.listener(|this, _, window, cx| this.add_group(window, cx)))),
+                    .child(kit::labeled_button("group-add", Variant::Primary, Some(Icon::Plus), tr!("添加分组")).on_click(cx.listener(|this, _, window, cx| this.add_group(window, cx)))),
             )
             .child(
                 div()
                     .flex()
                     .items_baseline()
                     .justify_between()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("分组与机器"))
-                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child("拖动机器归组，拖动把手排序分组")),
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr!("分组与机器")))
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("拖动机器归组，拖动把手排序分组"))),
             )
             .child(div().id("group-tree").max_h(px(300.)).overflow_y_scroll().flex().flex_col().gap_1().children(sections))
             .child(
@@ -734,9 +756,9 @@ impl SettingsDialog {
                     .justify_between()
                     .border_t_1()
                     .border_color(theme::color(ui::BORDER))
-                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).when(dirty, |d| d.child("有未保存的改动")))
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).when(dirty, |d| d.child(tr!("有未保存的改动"))))
                     .child(
-                        kit::labeled_button("group-save", Variant::Primary, None, "保存")
+                        kit::labeled_button("group-save", Variant::Primary, None, tr!("保存"))
                             .when(!dirty, |b| b.opacity(0.5).cursor_default())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if this.dirty() {
@@ -815,7 +837,7 @@ impl SettingsDialog {
             })
             .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(count.to_string()))
             .when(is_named, |h| {
-                h.child(kit::mini_button(SharedString::from(format!("remove-{label}")), Icon::Trash, "删除分组（机器移到未分组）", ui::DESTRUCTIVE).on_click(cx.listener(move |this, _, window, cx| this.remove_group(&remove_group, window, cx))))
+                h.child(kit::mini_button(SharedString::from(format!("remove-{label}")), Icon::Trash, tr!("删除分组（机器移到未分组）"), ui::DESTRUCTIVE).on_click(cx.listener(move |this, _, window, cx| this.remove_group(&remove_group, window, cx))))
             })
             .on_drag_move::<DraggedMember>(cx.listener(move |this, event: &DragMoveEvent<DraggedMember>, _, cx| {
                 if event.bounds.contains(&event.event.position) && this.drop != Some(GroupDrop::Into(drop_group.clone())) {

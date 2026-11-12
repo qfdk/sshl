@@ -194,7 +194,7 @@ pub fn tab_custom_title(input: &str, default: &str) -> Option<String> {
 /// 新本机标签的名字：「本机」，已有的话「本机 2」「本机 3」…，取最小的没用过的。
 pub fn local_tab_name(existing: &[String]) -> String {
     (1..)
-        .map(|n| if n == 1 { "本机".to_string() } else { format!("本机 {n}") })
+        .map(|n| if n == 1 { tr!("本机").to_string() } else { tr!("本机 {}", n) })
         .find(|name| !existing.contains(name))
         .unwrap()
 }

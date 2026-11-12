@@ -145,7 +145,7 @@ struct DragPreview {
 
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let verb = if self.source == PaneKind::Local { "上传到" } else { "下载到" };
+        let upload = self.source == PaneKind::Local;
         div().pl(self.offset.x + px(14.)).pt(self.offset.y + px(14.)).child(
             div()
                 .max_w(px(320.))
@@ -170,9 +170,25 @@ impl Render for DragPreview {
                 .when_some(self.destination.clone(), |d, destination| {
                     let name = basename(&destination);
                     let name = if name.is_empty() || destination == "/" { "/".to_string() } else { name };
-                    d.child(div().flex_shrink_0().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{verb} {name}")))
+                    d.child(div().flex_shrink_0().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if upload { tr!("上传到 {}", name) } else { tr!("下载到 {}", name) }))
                 }),
         )
+    }
+}
+
+/// 远程栏没东西可列时的原因。存原因不存文字：换语言后提示跟着换。
+#[derive(Clone, Copy, PartialEq)]
+enum RemoteEmpty {
+    NotConnected,
+    Disconnected,
+}
+
+impl RemoteEmpty {
+    fn text(self) -> &'static str {
+        match self {
+            RemoteEmpty::NotConnected => tr!("请先连接到服务器"),
+            RemoteEmpty::Disconnected => tr!("连接已断开，请重新连接到服务器"),
+        }
     }
 }
 
@@ -293,7 +309,7 @@ pub struct FileManager {
     last_selected: Option<(PaneKind, usize)>,
     /// 最近按过的一侧：焦点不在列表上时 ⌘A 全选这一侧；都没碰过时已连接选远程，否则选本地。
     active_pane: Option<PaneKind>,
-    remote_empty: Option<SharedString>,
+    remote_empty: Option<RemoteEmpty>,
     remote_empty_connection: Option<String>,
     active: bool,
     syncing: bool,
@@ -376,7 +392,7 @@ impl FileManager {
             remote_cache: ListCache::new(50),
             last_selected: None,
             active_pane: None,
-            remote_empty: Some("请先连接到服务器".into()),
+            remote_empty: Some(RemoteEmpty::NotConnected),
             remote_empty_connection: None,
             active: false,
             syncing: false,
@@ -491,7 +507,7 @@ impl FileManager {
                 }
             }
             None => {
-                self.remote_empty = Some("请先连接到服务器".into());
+                self.remote_empty = Some(RemoteEmpty::NotConnected);
                 self.set_path(PaneKind::Remote, String::new(), window, cx);
             }
         }
@@ -499,9 +515,9 @@ impl FileManager {
     }
 
     /// 断开 / 失效后的远程空状态；带连接 id 时显示「重新连接」。
-    pub fn show_remote_empty(&mut self, message: impl Into<SharedString>, connection_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn show_disconnected(&mut self, connection_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.remote_empty_connection = connection_id;
-        self.remote_empty = Some(message.into());
+        self.remote_empty = Some(RemoteEmpty::Disconnected);
         self.remote.request += 1;
         self.remote.files.clear();
         self.remote.hidden = 0;
@@ -520,13 +536,13 @@ impl FileManager {
     }
 
     pub fn core_event(&mut self, event: &CoreEvent, cx: &mut Context<Self>) {
-        let (verb, progress) = match event {
-            CoreEvent::UploadProgress(p) => ("上传", TransferProgress::from(p)),
-            CoreEvent::DownloadProgress(p) => ("下载", TransferProgress::from(p)),
+        let (upload, progress) = match event {
+            CoreEvent::UploadProgress(p) => (true, TransferProgress::from(p)),
+            CoreEvent::DownloadProgress(p) => (false, TransferProgress::from(p)),
             CoreEvent::ConnectionsUpdated => return,
         };
         let speed = self.speed.record(std::time::Instant::now(), progress.transferred);
-        self.status = describe_progress(verb, &progress, speed, self.queue.len());
+        self.status = describe_progress(upload, &progress, speed, self.queue.len());
         cx.notify();
     }
 
@@ -650,7 +666,7 @@ impl FileManager {
         if kind == PaneKind::Remote {
             let Some(session_id) = &session_id else {
                 self.remote.files.clear();
-                self.remote_empty = Some("请先连接到服务器".into());
+                self.remote_empty = Some(RemoteEmpty::NotConnected);
                 self.set_path(PaneKind::Remote, String::new(), window, cx);
                 cx.notify();
                 return;
@@ -1232,7 +1248,7 @@ impl FileManager {
                         let sid = session_id.clone();
                         let result = backend::spawn(async move { sftp::file_shell(&backend::get().state, sid, command).await }).await;
                         if let Outcome::Failed(error) = Outcome::from_result(result) {
-                            alert(cx, "删除失败", error);
+                            alert(cx, tr!("删除失败"), error);
                         }
                     }
                 }
@@ -1245,7 +1261,7 @@ impl FileManager {
                             backend::spawn(local_fs::file_delete_local(path)).await
                         };
                         if let Outcome::Failed(error) = Outcome::from_result(result) {
-                            alert(cx, "删除失败", error);
+                            alert(cx, tr!("删除失败"), error);
                         }
                     }
                 }
@@ -1269,7 +1285,7 @@ impl FileManager {
         if self.session.is_none() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("请输入文件夹名称"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("请输入文件夹名称")));
         let focus = input.read(cx).focus_handle(cx);
         let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = event {
@@ -1290,14 +1306,14 @@ impl FileManager {
             return;
         }
         if name.contains('/') || name.contains('\\') {
-            prompts::alert_later(window, cx, Options::new("无法新建文件夹").message("文件夹名称不能包含斜杠。"));
+            prompts::alert_later(window, cx, Options::new(tr!("无法新建文件夹")).message(tr!("文件夹名称不能包含斜杠。")));
             return;
         }
         let Some(session_id) = self.session_id() else { return };
         let full = if self.remote.path == "/" { format!("/{name}") } else { format!("{}/{name}", self.remote.path) };
         let created = backend::spawn(async move { sftp::file_create_remote_directory(&backend::get().state, session_id, full).await });
         cx.spawn_in(window, async move |this, cx| match Outcome::from_result(created.await) {
-            Outcome::Failed(error) => alert(cx, "新建文件夹失败", error),
+            Outcome::Failed(error) => alert(cx, tr!("新建文件夹失败"), error),
             _ => {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.invalidate(PaneKind::Remote);
@@ -1348,7 +1364,7 @@ impl FileManager {
         let path = dialog.path.clone();
         let changed = backend::spawn(async move { sftp::file_change_permissions(&backend::get().state, session_id, path, mode).await });
         cx.spawn_in(window, async move |this, cx| match Outcome::from_result(changed.await) {
-            Outcome::Failed(error) => alert(cx, "修改权限失败", error),
+            Outcome::Failed(error) => alert(cx, tr!("修改权限失败"), error),
             _ => {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.permission = None;
@@ -1391,7 +1407,7 @@ impl FileManager {
                 }
                 match directory {
                     Some(directory) => this.upload_paths(paths, directory, window, cx),
-                    None => prompts::alert_later(window, cx, Options::new("上传失败").message("读不到终端当前目录，也拿不到远程主目录。")),
+                    None => prompts::alert_later(window, cx, Options::new(tr!("上传失败")).message(tr!("读不到终端当前目录，也拿不到远程主目录。"))),
                 }
             });
         })
@@ -1441,7 +1457,7 @@ impl FileManager {
         let Some(session) = self.session.clone().filter(|_| !path.is_empty()) else { return };
         match config_store::set_bookmarked(&session.connection_id, path, bookmarked) {
             Ok(()) => self.reload_bookmarks(),
-            Err(error) => prompts::alert_later(window, cx, Options::new("收藏失败").message(error.to_string())),
+            Err(error) => prompts::alert_later(window, cx, Options::new(tr!("收藏失败")).message(error.to_string())),
         }
         // 删掉一条后高亮可能越界
         if self.remote.highlight.is_some_and(|i| i >= self.bookmarks.len()) {
@@ -1485,7 +1501,7 @@ impl FileManager {
     /// 地址栏右端的收藏开关：当前目录已收藏是实心蓝色。
     fn bookmark_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let marked = self.is_bookmarked(&self.remote.path);
-        let (label, tip) = if marked { ("取消收藏当前目录", "取消收藏  ⌘D") } else { ("收藏当前目录", "收藏当前目录  ⌘D") };
+        let (label, tip) = if marked { (tr!("取消收藏当前目录"), tr!("取消收藏  ⌘D")) } else { (tr!("收藏当前目录"), tr!("收藏当前目录  ⌘D")) };
         div()
             .id("path-bookmark")
             .role(Role::Button)
@@ -1518,7 +1534,7 @@ impl FileManager {
         div()
             .id("bookmark-list")
             .role(Role::ListBox)
-            .aria_label("收藏的目录")
+            .aria_label(tr!("收藏的目录"))
             .absolute()
             .left_0()
             .right_0()
@@ -1583,7 +1599,7 @@ impl FileManager {
                             .child(parent),
                     )
                     .child(
-                        kit::mini_button(("bookmark-remove", index), Icon::X, "删除这个收藏", ui::MUTED_FOREGROUND)
+                        kit::mini_button(("bookmark-remove", index), Icon::X, tr!("删除这个收藏"), ui::MUTED_FOREGROUND)
                             .flex_shrink_0()
                             .opacity(if highlighted { 1. } else { 0. })
                             .group_hover(group, |s| s.opacity(1.))
@@ -1634,19 +1650,16 @@ impl FileManager {
                     let connection_id = connection_id.clone();
                     let saved = backend::spawn(async move { config_store::cred_list(connection_id) }).await;
                     let choices = saved_password_choices(saved.as_ref(), &context.need_user, &exclude, &context.login_user);
-                    let title = if retry { format!("{} 的密码不正确", context.need_user) } else { format!("以 {} 身份管理文件", context.user) };
+                    let title = if retry { tr!("{} 的密码不正确", context.need_user) } else { tr!("以 {} 身份管理文件", context.user) };
                     let message = match context.via {
-                        Via::Su => format!(
-                            "终端已切换到 {user}，文件管理也以 {user} 身份浏览、上传和下载，需要 {user} 的密码。",
-                            user = context.user
-                        ),
-                        Via::Sudo => format!(
-                            "终端用 sudo 切换到了 {user}，文件管理也以 {user} 身份浏览、上传和下载，需要 {login} 的 sudo 密码。",
-                            user = context.user,
-                            login = context.login_user
+                        Via::Su => tr!("终端已切换到 {0}，文件管理也以 {0} 身份浏览、上传和下载，需要 {0} 的密码。", context.user),
+                        Via::Sudo => tr!(
+                            "终端用 sudo 切换到了 {0}，文件管理也以 {0} 身份浏览、上传和下载，需要 {1} 的 sudo 密码。",
+                            context.user,
+                            context.login_user
                         ),
                     };
-                    ask_password(&mut ask_cx, Options::new(title).message(message).confirm("切换"), choices).await
+                    ask_password(&mut ask_cx, Options::new(title).message(message).confirm(tr!("切换")), choices).await
                 },
                 interactive,
                 record.declined.as_deref(),
@@ -1680,7 +1693,7 @@ impl FileManager {
                     SyncStatus::Failed => prompts::alert_later(
                         window,
                         cx,
-                        Options::new(format!("无法以 {terminal_user} 身份管理文件")).message(sudo_error_message(result.error.as_deref())),
+                        Options::new(tr!("无法以 {} 身份管理文件", terminal_user)).message(sudo_error_message(result.error.as_deref())),
                     ),
                     _ => {}
                 }
@@ -1751,7 +1764,7 @@ impl FileManager {
                 let _ = this.update(cx, |fm, cx| f(fm, items.clone(), window, cx));
             }
         };
-        let refresh = MenuItem::new("刷新", {
+        let refresh = MenuItem::new(tr!("刷新"), {
             let f: fn(&mut FileManager, &mut Window, &mut Context<FileManager>) = match kind {
                 PaneKind::Local => |fm, w, cx| fm.refresh(PaneKind::Local, w, cx),
                 PaneKind::Remote => |fm, w, cx| fm.refresh(PaneKind::Remote, w, cx),
@@ -1762,10 +1775,10 @@ impl FileManager {
         let connected = self.session.is_some();
         let Some(target) = &menu.target else {
             let first = match kind {
-                PaneKind::Remote => MenuItem::new("新建文件夹", on(|fm, w, cx| fm.open_new_folder(w, cx))).icon(Icon::FolderPlus).disabled(!connected),
-                PaneKind::Local => MenuItem::new("选择文件夹上传", on(|fm, w, cx| fm.select_folder_to_upload(w, cx))).icon(Icon::Upload).disabled(!connected),
+                PaneKind::Remote => MenuItem::new(tr!("新建文件夹"), on(|fm, w, cx| fm.open_new_folder(w, cx))).icon(Icon::FolderPlus).disabled(!connected),
+                PaneKind::Local => MenuItem::new(tr!("选择文件夹上传"), on(|fm, w, cx| fm.select_folder_to_upload(w, cx))).icon(Icon::Upload).disabled(!connected),
             };
-            let hidden_label = if crate::settings::get(cx).show_hidden_files { "不显示隐藏文件" } else { "显示隐藏文件" };
+            let hidden_label = if crate::settings::get(cx).show_hidden_files { tr!("不显示隐藏文件") } else { tr!("显示隐藏文件") };
             let hidden = MenuItem::new(hidden_label, on(|fm, w, cx| fm.toggle_hidden_files(w, cx)));
             return vec![MenuEntry::Item(first), MenuEntry::Item(refresh), MenuEntry::Separator, MenuEntry::Item(hidden)];
         };
@@ -1781,21 +1794,21 @@ impl FileManager {
         };
         if selected.len() > 1 {
             let count = selected.len();
-            let (verb, glyph) = if kind == PaneKind::Remote { ("下载", Icon::Download) } else { ("上传", Icon::Upload) };
+            let (label, glyph) = if kind == PaneKind::Remote { (tr!("下载 {} 个项目", count), Icon::Download) } else { (tr!("上传 {} 个项目", count), Icon::Upload) };
             return vec![
-                MenuEntry::Item(MenuItem::new(format!("{verb} {count} 个项目"), with_items(selected.clone(), transfer)).icon(glyph)),
-                MenuEntry::Item(MenuItem::new(format!("删除 {count} 个项目"), with_items(selected, delete)).icon(Icon::Trash)),
+                MenuEntry::Item(MenuItem::new(label, with_items(selected.clone(), transfer)).icon(glyph)),
+                MenuEntry::Item(MenuItem::new(tr!("删除 {} 个项目", count), with_items(selected, delete)).icon(Icon::Trash)),
                 MenuEntry::Item(refresh),
             ];
         }
         let item = selected[0].clone();
         let label = match (kind, item.is_directory) {
-            (PaneKind::Remote, true) => ("下载文件夹", Icon::Download),
-            (PaneKind::Remote, false) => ("下载文件", Icon::Download),
-            (PaneKind::Local, true) => ("上传文件夹", Icon::Upload),
-            (PaneKind::Local, false) => ("上传文件", Icon::Upload),
+            (PaneKind::Remote, true) => (tr!("下载文件夹"), Icon::Download),
+            (PaneKind::Remote, false) => (tr!("下载文件"), Icon::Download),
+            (PaneKind::Local, true) => (tr!("上传文件夹"), Icon::Upload),
+            (PaneKind::Local, false) => (tr!("上传文件"), Icon::Upload),
         };
-        let delete_label = if item.is_directory { "删除目录" } else { "删除文件" };
+        let delete_label = if item.is_directory { tr!("删除目录") } else { tr!("删除文件") };
         vec![
             MenuEntry::Item(MenuItem::new(label.0, with_items(vec![item.clone()], transfer)).icon(label.1)),
             MenuEntry::Item(refresh),
@@ -1935,12 +1948,12 @@ impl FileManager {
                     div()
                         .id(("perm", ix))
                         .role(Role::Button)
-                        .aria_label("修改权限")
+                        .aria_label(tr!("修改权限"))
                         .w(px(PERMISSIONS_WIDTH))
                         .flex_shrink_0()
                         .px_3()
                         .when(!parent, |cell| {
-                            cell.tooltip(|window, cx| kit::tooltip("点击修改权限".into(), window, cx)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            cell.tooltip(|window, cx| kit::tooltip(tr!("点击修改权限").into(), window, cx)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.open_permissions(&perm_entry, window, cx);
                             }))
@@ -1971,7 +1984,7 @@ impl FileManager {
         let identity = self.identity()?;
         if identity.elevated() {
             let user = identity.file_user.clone();
-            let title: SharedString = format!("文件管理以 {user} 身份运行（跟随终端）").into();
+            let title: SharedString = tr!("文件管理以 {} 身份运行（跟随终端）", user).into();
             return Some(
                 div()
                     .id("file-user-badge")
@@ -1993,7 +2006,7 @@ impl FileManager {
             );
         }
         let terminal = identity.terminal_user.clone().filter(|t| *t != identity.file_user)?;
-        let title: SharedString = format!("终端当前是 {terminal}，点击让文件管理也切过去").into();
+        let title: SharedString = tr!("终端当前是 {}，点击让文件管理也切过去", terminal).into();
         Some(
             div()
                 .id("file-user-switch")
@@ -2014,7 +2027,7 @@ impl FileManager {
                 .tooltip(move |window, cx| kit::tooltip(title.clone(), window, cx))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.sync_identity(true, window, cx)))
                 .child(kit::icon_sized(Icon::UserRound, 14.))
-                .child(format!("切到 {terminal}"))
+                .child(tr!("切到 {}", terminal))
                 .into_any_element(),
         )
     }
@@ -2038,21 +2051,21 @@ impl FileManager {
         let scroll = pane.scroll.clone();
         let empty: Option<AnyElement> = if loading {
             None
-        } else if remote && let (Some(connection), Some(message)) = (self.remote_empty_connection.clone(), self.remote_empty.clone()) {
+        } else if remote && let (Some(connection), Some(message)) = (self.remote_empty_connection.clone(), self.remote_empty) {
             Some(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
                     .gap_3()
-                    .child(message)
+                    .child(message.text())
                     .child(
                         kit::button("reconnect", Variant::Primary)
                             .h(px(32.))
                             .px_3()
                             .text_size(px(12.))
-                            .aria_label("重新连接")
-                            .child("重新连接")
+                            .aria_label(tr!("重新连接"))
+                            .child(tr!("重新连接"))
                             .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(FileManagerEvent::Reconnect(connection.clone())))),
                     )
                     .into_any_element(),
@@ -2060,12 +2073,12 @@ impl FileManager {
         } else {
             let message = if remote {
                 self.remote_empty
-                    .clone()
-                    .or_else(|| if self.session.is_none() { Some("请先连接到服务器".into()) } else { pane.error.clone().map(Into::into) })
+                    .map(|empty| SharedString::from(empty.text()))
+                    .or_else(|| if self.session.is_none() { Some(RemoteEmpty::NotConnected.text().into()) } else { pane.error.clone().map(Into::into) })
             } else {
                 pane.error.clone().map(Into::into)
             };
-            message.map(|m| div().child(m).into_any_element()).or_else(|| (rows == 0).then(|| div().child("目录为空").into_any_element()))
+            message.map(|m| div().child(m).into_any_element()).or_else(|| (rows == 0).then(|| div().child(tr!("目录为空")).into_any_element()))
         };
 
         let header = div()
@@ -2075,7 +2088,7 @@ impl FileManager {
             .px(px(14.))
             .pt_3()
             .pb(px(10.))
-            .child(div().mr_1().flex_shrink_0().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(if remote { "远程文件" } else { "本地文件" }))
+            .child(div().mr_1().flex_shrink_0().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(if remote { tr!("远程文件") } else { tr!("本地文件") }))
             .children(badge)
             .child(
                 div()
@@ -2124,7 +2137,7 @@ impl FileManager {
                             div()
                                 .id(("suggestions", kind as usize))
                                 .role(Role::ListBox)
-                                .aria_label("子目录")
+                                .aria_label(tr!("子目录"))
                                 .absolute()
                                 .left_0()
                                 .right_0()
@@ -2168,12 +2181,12 @@ impl FileManager {
                     }),
             )
             .child(if remote {
-                self.pane_button(("pane-go", 1), Icon::ChevronRight, "转到路径", disabled, move |this, w, cx| this.load(PaneKind::Remote, None, true, w, cx), cx).into_any_element()
+                self.pane_button(("pane-go", 1), Icon::ChevronRight, tr!("转到路径"), disabled, move |this, w, cx| this.load(PaneKind::Remote, None, true, w, cx), cx).into_any_element()
             } else {
-                self.pane_button(("pane-browse", 0), Icon::FolderOpen, "选择目录", false, |this, w, cx| this.browse_local(w, cx), cx).into_any_element()
+                self.pane_button(("pane-browse", 0), Icon::FolderOpen, tr!("选择目录"), false, |this, w, cx| this.browse_local(w, cx), cx).into_any_element()
             })
-            .child(self.pane_button(("pane-home", kind as usize), Icon::House, "主目录", disabled, move |this, w, cx| this.go_home(kind, w, cx), cx))
-            .child(self.pane_button(("pane-refresh", kind as usize), Icon::RefreshCw, "刷新", disabled, move |this, w, cx| this.refresh(kind, w, cx), cx));
+            .child(self.pane_button(("pane-home", kind as usize), Icon::House, tr!("主目录"), disabled, move |this, w, cx| this.go_home(kind, w, cx), cx))
+            .child(self.pane_button(("pane-refresh", kind as usize), Icon::RefreshCw, tr!("刷新"), disabled, move |this, w, cx| this.refresh(kind, w, cx), cx));
 
         let columns = div()
             .h(px(32.))
@@ -2185,11 +2198,11 @@ impl FileManager {
             .text_color(theme::color(ui::MUTED_FOREGROUND))
             .border_b_1()
             .border_color(theme::color(ui::BORDER))
-            .child(div().flex_1().min_w_0().px(px(14.)).child("名称"))
-            .when(shown.size, |c| c.child(div().w(px(SIZE_WIDTH)).flex_shrink_0().px_3().flex().justify_end().child("大小")))
-            .when(shown.date, |c| c.child(div().w(px(DATE_WIDTH)).flex_shrink_0().px_3().child("修改日期")))
-            .when(shown.owner, |c| c.child(div().w(px(OWNER_WIDTH)).flex_shrink_0().px_3().child("所有者")))
-            .when(shown.permissions, |c| c.child(div().w(px(PERMISSIONS_WIDTH)).flex_shrink_0().px_3().child("权限")));
+            .child(div().flex_1().min_w_0().px(px(14.)).child(tr!("名称")))
+            .when(shown.size, |c| c.child(div().w(px(SIZE_WIDTH)).flex_shrink_0().px_3().flex().justify_end().child(tr!("大小"))))
+            .when(shown.date, |c| c.child(div().w(px(DATE_WIDTH)).flex_shrink_0().px_3().child(tr!("修改日期"))))
+            .when(shown.owner, |c| c.child(div().w(px(OWNER_WIDTH)).flex_shrink_0().px_3().child(tr!("所有者"))))
+            .when(shown.permissions, |c| c.child(div().w(px(PERMISSIONS_WIDTH)).flex_shrink_0().px_3().child(tr!("权限"))));
 
         let list = div()
             .id(("file-list", kind as usize))
@@ -2232,11 +2245,11 @@ impl FileManager {
                         .text_size(px(12.))
                         .text_color(theme::color(ui::MUTED_FOREGROUND))
                         .role(Role::Button)
-                        .aria_label("显示隐藏文件")
+                        .aria_label(tr!("显示隐藏文件"))
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
-                        .child(format!("已隐藏 {hidden} 个隐藏文件"))
-                        .child(div().text_color(theme::color(ui::PRIMARY)).child("显示  ⌘⇧."))
+                        .child(tr!("已隐藏 {} 个隐藏文件", hidden))
+                        .child(div().text_color(theme::color(ui::PRIMARY)).child(tr!("显示  ⌘⇧.")))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_hidden_files(window, cx))),
                 )
             })
@@ -2339,7 +2352,7 @@ impl FileManager {
             )
             .when(self.current.is_some(), |d| {
                 d.child(
-                    kit::mini_button("transfer-stop", Icon::X, "停止传输", ui::MUTED_FOREGROUND)
+                    kit::mini_button("transfer-stop", Icon::X, tr!("停止传输"), ui::MUTED_FOREGROUND)
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop_transfers(cx))),
                 )
             })
@@ -2348,8 +2361,8 @@ impl FileManager {
 
     fn render_permission_dialog(&self, dialog: &PermissionDialog, cx: &mut Context<Self>) -> AnyElement {
         let valid = valid_octal(&dialog.value);
-        let groups = ["所有者", "组", "其他用户"];
-        let bits = ["读取", "写入", "执行"];
+        let groups = [tr!("所有者"), tr!("组"), tr!("其他用户")];
+        let bits = [tr!("读取"), tr!("写入"), tr!("执行")];
         let body = div()
             .child(
                 div()
@@ -2363,7 +2376,7 @@ impl FileManager {
                             .flex_col()
                             .gap(px(6.))
                             .min_w_0()
-                            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("修改文件权限"))
+                            .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr!("修改文件权限")))
                             .child(div().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).truncate().child(dialog.path.clone())),
                     )
                     .child(
@@ -2371,7 +2384,7 @@ impl FileManager {
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("八进制权限"))
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(tr!("八进制权限")))
                             .child(div().w(px(80.)).font_family(MONO_FONT).child(kit::text_field(&dialog.input, false)))
                             .child(div().font_family(MONO_FONT).text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("= {}", readable_permissions(&dialog.value)))),
                     )
@@ -2381,7 +2394,7 @@ impl FileManager {
                             .flex_wrap()
                             .items_center()
                             .gap_2()
-                            .child(div().mr_2().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child("常用权限:"))
+                            .child(div().mr_2().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("常用权限:")))
                             .children(["755", "644", "777", "600"].into_iter().enumerate().map(|(index, value)| {
                                 kit::button(("perm-preset", index), Variant::Outline)
                                     .h(px(32.))
@@ -2418,15 +2431,15 @@ impl FileManager {
             .child(
                 kit::modal_footer()
                     .child(
-                        kit::button("perm-cancel", Variant::Outline).aria_label("取消").child("取消").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        kit::button("perm-cancel", Variant::Outline).aria_label(tr!("取消")).child(tr!("取消")).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.permission = None;
                             cx.notify();
                         })),
                     )
                     .child(
                         kit::button("perm-apply", Variant::Primary)
-                            .aria_label("应用")
-                            .child("应用")
+                            .aria_label(tr!("应用"))
+                            .child(tr!("应用"))
                             .when(!valid, |b| b.opacity(0.5).cursor_default())
                             .when(valid, |b| b.on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.apply_permissions(window, cx)))),
                     ),
@@ -2442,13 +2455,13 @@ impl FileManager {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("新建文件夹"))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr!("新建文件夹")))
                     .child(kit::text_field(&dialog.input, true)),
             )
             .child(
                 kit::modal_footer()
                     .child(
-                        kit::button("folder-cancel", Variant::Outline).aria_label("取消").child("取消").on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        kit::button("folder-cancel", Variant::Outline).aria_label(tr!("取消")).child(tr!("取消")).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                             this.new_folder = None;
                             window.focus(&this.focus, cx);
                             cx.notify();
@@ -2456,8 +2469,8 @@ impl FileManager {
                     )
                     .child(
                         kit::button("folder-create", Variant::Primary)
-                            .aria_label("新建")
-                            .child("新建")
+                            .aria_label(tr!("新建"))
+                            .child(tr!("新建"))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_folder(window, cx))),
                     ),
             );
@@ -2592,7 +2605,7 @@ impl Render for FileManager {
                             .cursor_col_resize()
                             .hover(|s| s.bg(theme::alpha(ui::PRIMARY, 0.15)))
                             .when(resizing, |d| d.bg(theme::alpha(ui::PRIMARY, 0.15)))
-                            .tooltip(|window, cx| kit::tooltip("拖动调整面板宽度".into(), window, cx))
+                            .tooltip(|window, cx| kit::tooltip(tr!("拖动调整面板宽度").into(), window, cx))
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| this.start_resize(event.position, cx))),
                     )
                     .child(
@@ -2637,10 +2650,20 @@ enum Op {
 impl Op {
     fn verb(self) -> &'static str {
         match self {
-            Op::UploadFile => "上传",
-            Op::UploadDir => "上传文件夹",
-            Op::DownloadFile => "下载",
-            Op::DownloadDir => "下载文件夹",
+            Op::UploadFile => tr!("上传"),
+            Op::UploadDir => tr!("上传文件夹"),
+            Op::DownloadFile => tr!("下载"),
+            Op::DownloadDir => tr!("下载文件夹"),
+        }
+    }
+
+    /// 「正在……」后面接的那个词：中文和 `verb` 一样，英文是进行时。
+    fn doing(self) -> &'static str {
+        match self {
+            Op::UploadFile => trc!("进行中", "上传"),
+            Op::UploadDir => trc!("进行中", "上传文件夹"),
+            Op::DownloadFile => trc!("进行中", "下载"),
+            Op::DownloadDir => trc!("进行中", "下载文件夹"),
         }
     }
 
@@ -2660,8 +2683,8 @@ impl Op {
 
 /// 目标已有同名的时问的话：（标题，说明，复选框）。`merge` = 文件夹传到已有的同名文件夹；还有排队的才给复选框。
 fn conflict_text(name: &str, merge: bool, queued: usize) -> (String, &'static str, Option<&'static str>) {
-    let message = if merge { "覆盖会合并进原来的文件夹，同名的文件被替换。" } else { "覆盖会替换原来的文件。" };
-    (format!("{name} 已存在"), message, (queued > 0).then_some("后面再遇到同名的也这样处理"))
+    let message = if merge { tr!("覆盖会合并进原来的文件夹，同名的文件被替换。") } else { tr!("覆盖会替换原来的文件。") };
+    (tr!("{} 已存在", name), message, (queued > 0).then_some(tr!("后面再遇到同名的也这样处理")))
 }
 
 /// 目标在不在：None = 不在（或看不到，照常传），Some(是不是目录)。上传看服务器（以文件管理当前身份），下载看本地。
@@ -2678,9 +2701,13 @@ async fn destination_exists(session: &FileSession, op: Op, destination: &str) ->
 /// 传完的提示写明落在哪个目录：从终端拖文件上传时，看这一句就知道传到哪了。
 /// 一次排了好几个时说一共几个（`count` = 这一轮传完的个数，含这一个）。
 fn finished_message(op: Op, destination: &str, count: usize) -> String {
-    let place = if op.is_upload() { "已上传到" } else { "已下载到" };
-    let what = if count > 1 { format!("{count} 个") } else { format!("{} ", basename(destination)) };
-    format!("{what}{place} {}", parent_path(destination, op.target_side()))
+    let place = parent_path(destination, op.target_side());
+    match (op.is_upload(), count > 1) {
+        (true, true) => tr!("{} 个已上传到 {}", count, place),
+        (true, false) => tr!("{} 已上传到 {}", basename(destination), place),
+        (false, true) => tr!("{} 个已下载到 {}", count, place),
+        (false, false) => tr!("{} 已下载到 {}", basename(destination), place),
+    }
 }
 
 async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContext, job: Job) -> Outcome {
@@ -2693,8 +2720,8 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
         this.current = Some(stop.clone());
         this.speed.reset();
         this.hide_status = None;
-        let queued = if this.queue.is_empty() { String::new() } else { format!(" · 还有 {} 个", this.queue.len()) };
-        this.status = TransferStatus::show(0, format!("正在{verb} {name}{queued}"));
+        let queued = if this.queue.is_empty() { String::new() } else { tr!(" · 还有 {} 个", this.queue.len()) };
+        this.status = TransferStatus::show(0, tr!("正在{} {}{}", op.doing(), name, queued));
         cx.notify();
     });
     if started.is_err() {
@@ -2707,7 +2734,7 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
             Some(choice) => choice,
             None => {
                 let (title, message, checkbox) = conflict_text(&name, op.is_dir() && existing_dir, queued);
-                let mut options = Options::new(title).detail(parent_path(&destination, op.target_side())).message(message).confirm("覆盖").cancel("跳过");
+                let mut options = Options::new(title).detail(parent_path(&destination, op.target_side())).message(message).confirm(tr!("覆盖")).cancel(tr!("跳过"));
                 options.destructive = true;
                 if let Some(label) = checkbox {
                     options = options.checkbox(label);
@@ -2723,7 +2750,7 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
         if !overwrite {
             let _ = this.update(cx, |this, cx| {
                 this.current = None;
-                this.status = TransferStatus::show(0, format!("已跳过 {name}"));
+                this.status = TransferStatus::show(0, tr!("已跳过 {}", name));
                 this.hide_status_later(cx);
                 cx.notify();
             });
@@ -2758,19 +2785,19 @@ async fn run_transfer(this: &WeakEntity<FileManager>, cx: &mut AsyncWindowContex
                 this.transfer_finished(op, window, cx);
             }
             // 用户在 sudo 确认或密码框里取消：不算失败，不弹报错
-            Outcome::Cancelled => this.status = TransferStatus::show(0, format!("已取消{verb}")),
+            Outcome::Cancelled => this.status = TransferStatus::show(0, tr!("已取消{}", verb)),
             // 停在中途：目录传输已经传完的文件留着，刷新一下目标那边
             Outcome::Stopped => {
-                this.status = TransferStatus::show(0, format!("已停止{verb}"));
+                this.status = TransferStatus::show(0, tr!("已停止{}", verb));
                 this.transfer_finished(op, window, cx);
             }
             Outcome::Failed(error) => {
-                this.status = TransferStatus::show(0, format!("{verb}失败"));
+                this.status = TransferStatus::show(0, tr!("{}失败", verb));
                 // 会话没了：同一会话后面排队的也传不了，别一个个弹框
                 if error.contains("session not found") {
                     this.queue.retain(|job| job.session.session_id != session.session_id);
                 }
-                prompts::alert_later(window, cx, Options::new(format!("{verb}失败")).message(error.clone()));
+                prompts::alert_later(window, cx, Options::new(tr!("{}失败", verb)).message(error.clone()));
             }
         }
         this.hide_status_later(cx);
@@ -2834,10 +2861,10 @@ async fn upload_with_sudo(
             )
         },
         async move || {
-            let options = Options::new("没有写入权限")
-                .message("当前登录用户不能写入这个目录。要用 sudo 上传吗？文件会归目录的所有者。")
+            let options = Options::new(tr!("没有写入权限"))
+                .message(tr!("当前登录用户不能写入这个目录。要用 sudo 上传吗？文件会归目录的所有者。"))
                 .detail(parent)
-                .confirm("用 sudo 上传");
+                .confirm(tr!("用 sudo 上传"));
             let Ok(answer) = confirm_cx.update(|window, cx| prompts::confirm(window, cx, options)) else { return false };
             answer.await.unwrap_or(false)
         },
@@ -2852,9 +2879,9 @@ async fn upload_with_sudo(
             let connection_id = connection_id.clone();
             let saved = backend::spawn(async move { config_store::cred_list(connection_id) }).await;
             let choices = saved_password_choices(saved.as_ref(), &user, &exclude, &user);
-            let title = if retry { "sudo 密码不正确" } else { "需要 sudo 密码" };
-            let who = if user.is_empty() { String::new() } else { format!(" {user} ") };
-            ask_password(&mut ask_cx, Options::new(title).message(format!("sudo 要的是当前登录用户{who}的密码。")).confirm("上传"), choices).await
+            let title = if retry { tr!("sudo 密码不正确") } else { tr!("需要 sudo 密码") };
+            let message = if user.is_empty() { tr!("sudo 要的是当前登录用户的密码。").to_string() } else { tr!("sudo 要的是当前登录用户 {} 的密码。", user) };
+            ask_password(&mut ask_cx, Options::new(title).message(message).confirm(tr!("上传")), choices).await
         },
         elevated,
     )
@@ -2875,7 +2902,7 @@ fn split_secret(secret: Option<Secret>) -> (Option<String>, Option<String>) {
 
 /// 密码框：确定 → 手输的密码，点选已保存的 → 它的标识（密码不经过界面），取消 → None。
 async fn ask_password(cx: &mut AsyncWindowContext, options: Options, choices: Vec<(String, String)>) -> Option<Secret> {
-    let placeholder = if choices.is_empty() { "输入密码" } else { "或输入密码" };
+    let placeholder = if choices.is_empty() { tr!("输入密码") } else { tr!("或输入密码") };
     let choices = choices.into_iter().map(|(value, label)| Choice { value, label: label.into() }).collect();
     let answer = cx.update(|window, cx| prompts::password(window, cx, options, placeholder, choices)).ok()?;
     match answer.await.ok().flatten()? {
@@ -2889,7 +2916,7 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
     let listing = backend::spawn(async move {
         match kind {
             PaneKind::Remote => {
-                let Some(session_id) = session_id else { return Err("请先连接到服务器".to_string()) };
+                let Some(session_id) = session_id else { return Err(tr!("请先连接到服务器").to_string()) };
                 sftp::file_list(&backend::get().state, session_id, path)
                     .await
                     .map(|files| files.into_iter().map(FileEntry::from).collect())
@@ -2901,7 +2928,7 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
                 .map_err(|e| e.to_string()),
         }
     });
-    async move { listing.await.unwrap_or_else(|| Err("获取文件列表失败".into())) }
+    async move { listing.await.unwrap_or_else(|| Err(tr!("获取文件列表失败").into())) }
 }
 
 #[cfg(test)]

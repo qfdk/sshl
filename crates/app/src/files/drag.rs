@@ -62,7 +62,7 @@ pub fn drag_items(entry: &FileEntry, selected: &std::collections::HashSet<String
 pub fn drag_label(items: &[FileEntry]) -> String {
     match items {
         [only] => only.name.clone(),
-        _ => format!("{} 个项目", items.len()),
+        _ => tr!("{} 个项目", items.len()),
     }
 }
 

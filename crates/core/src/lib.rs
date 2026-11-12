@@ -7,6 +7,7 @@ pub mod crypto_store;
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod i18n;
 pub mod known_hosts;
 pub mod local_fs;
 pub mod local_shell;

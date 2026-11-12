@@ -184,6 +184,27 @@ pub fn text_field(state: &Entity<InputState>, focused: bool) -> Div {
         .child(div().flex_1().min_w_0().child(Input::new(state)))
 }
 
+/// 带占位字的输入框。占位字是建的时候定的，所以传的是「取当前语言文字」的函数：语言换了（设置变了）再取一次换上。
+pub fn input(placeholder: fn() -> &'static str, window: &mut Window, cx: &mut App) -> Entity<InputState> {
+    let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder()));
+    localize(&input, placeholder, window, cx);
+    input
+}
+
+/// 让已有输入框的占位字跟着语言变（见 `input`）。
+pub fn localize(input: &Entity<InputState>, placeholder: fn() -> &'static str, window: &Window, cx: &mut App) {
+    let shown = std::cell::Cell::new(placeholder());
+    input.update(cx, |_, cx| {
+        cx.observe_global_in::<crate::settings::Settings>(window, move |state, window, cx| {
+            let text = placeholder();
+            if shown.replace(text) != text {
+                state.set_placeholder(text, window, cx);
+            }
+        })
+        .detach();
+    });
+}
+
 pub fn field_label(text: impl Into<SharedString>) -> Div {
     div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(text.into())
 }

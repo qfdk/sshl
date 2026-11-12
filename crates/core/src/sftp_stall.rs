@@ -267,8 +267,8 @@ impl<S: AsyncRead + Unpin> AsyncRead for StallGuard<S> {
                     });
                     return Poll::Ready(Ok(()));
                 }
-                Poll::Ready(Ok(())) => this.fail(io::ErrorKind::ConnectionAborted, "SFTP 通道已关闭".into()),
-                Poll::Ready(Err(e)) => this.fail(io::ErrorKind::ConnectionAborted, format!("SFTP 通道出错: {e}")),
+                Poll::Ready(Ok(())) => this.fail(io::ErrorKind::ConnectionAborted, crate::tr!("SFTP 通道已关闭").into()),
+                Poll::Ready(Err(e)) => this.fail(io::ErrorKind::ConnectionAborted, crate::tr!("SFTP 通道出错: {}", e)),
                 Poll::Pending => {
                     this.park_reader(cx);
                     if this.waiting.is_empty() {
@@ -282,7 +282,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for StallGuard<S> {
                         return Poll::Pending;
                     }
                     let secs = this.stall.as_secs();
-                    this.fail(io::ErrorKind::TimedOut, format!("SFTP 通道 {secs} 秒没有收到任何数据"));
+                    this.fail(io::ErrorKind::TimedOut, crate::tr!("SFTP 通道 {} 秒没有收到任何数据", secs));
                 }
             }
         }
@@ -300,7 +300,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for StallGuard<S> {
             match ready!(Pin::new(&mut this.inner).poll_write(cx, buf)) {
                 Ok(n) => n,
                 Err(e) => {
-                    this.fail(io::ErrorKind::ConnectionAborted, format!("SFTP 通道出错: {e}"));
+                    this.fail(io::ErrorKind::ConnectionAborted, crate::tr!("SFTP 通道出错: {}", e));
                     buf.len()
                 }
             }

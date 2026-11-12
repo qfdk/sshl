@@ -92,7 +92,7 @@ impl EventEmitter<FavoritePanelEvent> for FavoritePanel {}
 
 impl FavoritePanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索收藏的目录…"));
+        let search = kit::input(|| tr!("搜索收藏的目录…"), window, cx);
         let subscription = cx.subscribe_in(&search, window, |this, _, event: &InputEvent, _, cx| {
             if let InputEvent::Change = event {
                 this.selected = 0;
@@ -188,7 +188,7 @@ impl FavoritePanel {
         if commit && let Some(scope) = &self.scope {
             let name = bookmark_name(&rename.input.read(cx).value(), &rename.path);
             if let Err(error) = config_store::rename_bookmark(scope, &rename.path, &name) {
-                prompts::alert_later(window, cx, Options::new("改名失败").message(error.to_string()));
+                prompts::alert_later(window, cx, Options::new(tr!("改名失败")).message(error.to_string()));
             }
             self.reload();
             cx.emit(FavoritePanelEvent::Changed);
@@ -203,7 +203,7 @@ impl FavoritePanel {
     fn set_bookmarked(&mut self, path: &str, bookmarked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(scope) = &self.scope else { return };
         if let Err(error) = config_store::set_bookmarked(scope, path, bookmarked) {
-            prompts::alert_later(window, cx, Options::new("收藏失败").message(error.to_string()));
+            prompts::alert_later(window, cx, Options::new(tr!("收藏失败")).message(error.to_string()));
         }
         self.reload();
         let count = self.visible(cx).len();
@@ -217,9 +217,9 @@ impl FavoritePanel {
         let path = self.current.clone()?;
         let marked = self.is_bookmarked(&path);
         let (glyph, title, color) = if marked {
-            (Icon::StarFilled, format!("取消收藏 {path}"), ui::PRIMARY)
+            (Icon::StarFilled, tr!("取消收藏 {}", path), ui::PRIMARY)
         } else {
-            (Icon::Star, format!("收藏当前目录 {path}"), ui::MUTED_FOREGROUND)
+            (Icon::Star, tr!("收藏当前目录 {}", path), ui::MUTED_FOREGROUND)
         };
         Some(
             kit::mini_button("favorite-current", glyph, title, color)
@@ -310,13 +310,13 @@ impl FavoritePanel {
                         .flex_shrink_0()
                         .opacity(0.)
                         .group_hover("favorite-row", |s| s.opacity(1.))
-                        .child(kit::mini_button(("favorite-rename", position), Icon::Pencil, "改名", ui::MUTED_FOREGROUND).on_click(cx.listener(
+                        .child(kit::mini_button(("favorite-rename", position), Icon::Pencil, tr!("改名"), ui::MUTED_FOREGROUND).on_click(cx.listener(
                             move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.start_rename(&edit, window, cx);
                             },
                         )))
-                        .child(kit::mini_button(("favorite-remove", position), Icon::X, "删除这个收藏", ui::MUTED_FOREGROUND).on_click(cx.listener(
+                        .child(kit::mini_button(("favorite-remove", position), Icon::X, tr!("删除这个收藏"), ui::MUTED_FOREGROUND).on_click(cx.listener(
                             move |this, _: &ClickEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.set_bookmarked(&remove, false, window, cx);
@@ -332,9 +332,9 @@ impl Render for FavoritePanel {
         let visible = self.visible(cx);
         let muted = |text: &'static str| div().px_2().py_3().text_size(px(13.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(text);
         let list = if self.bookmarks.is_empty() {
-            muted("还没有收藏的目录。进到常用的目录，点右上角的星星收藏。").into_any_element()
+            muted(tr!("还没有收藏的目录。进到常用的目录，点右上角的星星收藏。")).into_any_element()
         } else if visible.is_empty() {
-            muted("没有匹配的目录").into_any_element()
+            muted(tr!("没有匹配的目录")).into_any_element()
         } else {
             let rows: Vec<_> = visible.iter().enumerate().map(|(position, &i)| self.row(position, &self.bookmarks[i], cx).into_any_element()).collect();
             div().id("favorite-list").max_h(px(360.)).overflow_y_scroll().track_scroll(&self.scroll).flex().flex_col().children(rows).into_any_element()
@@ -343,7 +343,7 @@ impl Render for FavoritePanel {
             .id("favorite-panel")
             .key_context("FavoritePanel")
             .role(Role::Dialog)
-            .aria_label("目录收藏")
+            .aria_label(tr!("目录收藏"))
             .occlude()
             .w(px(380.))
             .p(px(6.))

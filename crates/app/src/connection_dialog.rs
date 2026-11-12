@@ -96,14 +96,14 @@ impl ConnectionDialog {
     pub fn new(editing: Option<StoredConnection>, groups: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let value = |f: &dyn Fn(&StoredConnection) -> String| editing.as_ref().map(f).unwrap_or_default();
         let fields = [
-            (Field::Name, value(&|c| c.name.clone()), "不填就用主机地址", false),
-            (Field::Group, value(&|c| c.group.clone()), "选择或输入新分组", false),
-            (Field::Host, value(&|c| c.host.clone()), "example.com 或 192.168.1.1", false),
+            (Field::Name, value(&|c| c.name.clone()), tr!("不填就用主机地址"), false),
+            (Field::Group, value(&|c| c.group.clone()), tr!("选择或输入新分组"), false),
+            (Field::Host, value(&|c| c.host.clone()), tr!("example.com 或 192.168.1.1"), false),
             (Field::Port, editing.as_ref().map_or("22".into(), |c| c.port.to_string()), "", false),
             (Field::Username, value(&|c| c.username.clone()), "root", false),
-            (Field::Password, String::new(), "密码", true),
+            (Field::Password, String::new(), tr!("密码"), true),
             (Field::PrivateKey, value(&|c| c.private_key.clone().unwrap_or_default()), DEFAULT_KEY, false),
-            (Field::Passphrase, String::new(), "私钥密码（可选）", true),
+            (Field::Passphrase, String::new(), tr!("私钥密码（可选）"), true),
         ];
         let mut inputs = Vec::new();
         let mut subscriptions = Vec::new();
@@ -179,18 +179,18 @@ impl ConnectionDialog {
         let name = connection_name(&self.text(Field::Name, cx), &host);
         let username = self.text(Field::Username, cx);
         if host.trim().is_empty() {
-            return Err("请填写主机".into());
+            return Err(tr!("请填写主机").into());
         }
         if username.trim().is_empty() {
-            return Err("请填写用户名".into());
+            return Err(tr!("请填写用户名").into());
         }
         let port = match self.text(Field::Port, cx).trim().parse::<u16>() {
             Ok(port) if port > 0 => port,
-            _ => return Err("端口应为 1–65535".into()),
+            _ => return Err(tr!("端口应为 1–65535").into()),
         };
         let private_key = self.text(Field::PrivateKey, cx);
         if self.auth == AuthKind::Key && private_key.trim().is_empty() {
-            return Err("请选择私钥文件".into());
+            return Err(tr!("请选择私钥文件").into());
         }
         Ok(ConnectionForm {
             name,
@@ -333,8 +333,8 @@ impl ConnectionDialog {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(chip("ssh-key-auto", AuthKind::Auto, Icon::Zap, "自动", "自动选择私钥（免密）"))
-            .child(chip("ssh-key-file", AuthKind::Key, Icon::FileText, "指定文件", "指定私钥文件"))
+            .child(chip("ssh-key-auto", AuthKind::Auto, Icon::Zap, tr!("自动"), tr!("自动选择私钥（免密）")))
+            .child(chip("ssh-key-file", AuthKind::Key, Icon::FileText, tr!("指定文件"), tr!("指定私钥文件")))
     }
 
     fn browse_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -405,7 +405,7 @@ impl ConnectionDialog {
             );
         }
         if let Some(name) = &choices.create {
-            let label = format!("新建分组「{name}」");
+            let label = tr!("新建分组「{}」", name);
             rows.push(
                 row(choices.existing.len())
                     .aria_label(label.clone())
@@ -417,7 +417,7 @@ impl ConnectionDialog {
             div()
                 .id("connection-group-list")
                 .role(Role::ListBox)
-                .aria_label("分组")
+                .aria_label(tr!("分组"))
                 .absolute()
                 .left_0()
                 .right_0()
@@ -459,7 +459,7 @@ impl ConnectionDialog {
             )
             // 延后到最上层画：不然被下面几行输入框压住
             .when_some(list, |d, list| d.child(deferred(list).with_priority(1)));
-        self.labeled("分组", Some("（可选）"), control)
+        self.labeled(tr!("分组"), Some(tr!("（可选）")), control)
     }
 }
 
@@ -498,19 +498,19 @@ impl Render for ConnectionDialog {
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if editing { "编辑连接" } else { "新建连接" }))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if editing { tr!("编辑连接") } else { tr!("新建连接") }))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(div().flex().gap_3().child(self.field("名称", Some("（可选）"), Field::Name)).child(self.group_field(cx)))
-                            .child(div().flex().gap_3().child(self.field("主机", None, Field::Host)).child(div().w(px(96.)).child(self.field("端口", None, Field::Port))))
-                            .child(self.field("用户名", None, Field::Username))
+                            .child(div().flex().gap_3().child(self.field(tr!("名称"), Some(tr!("（可选）")), Field::Name)).child(self.group_field(cx)))
+                            .child(div().flex().gap_3().child(self.field(tr!("主机"), None, Field::Host)).child(div().w(px(96.)).child(self.field(tr!("端口"), None, Field::Port))))
+                            .child(self.field(tr!("用户名"), None, Field::Username))
                             .child(
-                                div().flex().flex_col().gap(px(6.)).child(kit::field_label("认证方式")).child(kit::segmented(
+                                div().flex().flex_col().gap(px(6.)).child(kit::field_label(tr!("认证方式"))).child(kit::segmented(
                                     "auth-type",
-                                    &[(false, Some(Icon::Lock), "密码".into()), (true, Some(Icon::KeyRound), "私钥".into())],
+                                    &[(false, Some(Icon::Lock), tr!("密码").into()), (true, Some(Icon::KeyRound), tr!("私钥").into())],
                                     self.auth != AuthKind::Password,
                                     move |use_key, _, cx| {
                                         let _ = this.update(cx, |this, cx| this.set_use_key(use_key, cx));
@@ -529,7 +529,7 @@ impl Render for ConnectionDialog {
                                             .map(|d| {
                                                 if auth == AuthKind::Auto {
                                                     d.child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(
-                                                        "依次尝试 SSH Agent 和 ~/.ssh 里的私钥，遵循 ~/.ssh/config",
+                                                        tr!("依次尝试 SSH Agent 和 ~/.ssh 里的私钥，遵循 ~/.ssh/config"),
                                                     ))
                                                 } else {
                                                     d.child(
@@ -538,7 +538,7 @@ impl Render for ConnectionDialog {
                                                             .gap_2()
                                                             .child(div().flex_1().min_w_0().child(kit::text_field(self.input(Field::PrivateKey), self.focused == Some(Field::PrivateKey))))
                                                             .child(
-                                                                kit::labeled_button("browse-key", Variant::Outline, Some(Icon::FolderOpen), "浏览")
+                                                                kit::labeled_button("browse-key", Variant::Outline, Some(Icon::FolderOpen), tr!("浏览"))
                                                                     .on_click(cx.listener(|this, _, window, cx| this.browse_key(window, cx))),
                                                             ),
                                                     )
@@ -560,7 +560,7 @@ impl Render for ConnectionDialog {
                                         div()
                                             .id("save-password-label")
                                             .cursor_pointer()
-                                            .child(if self.auth == AuthKind::Key { "保存私钥密码" } else { "保存密码" })
+                                            .child(if self.auth == AuthKind::Key { tr!("保存私钥密码") } else { tr!("保存密码") })
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.save_password = !this.save_password;
                                                 cx.notify();
@@ -580,20 +580,20 @@ impl Render for ConnectionDialog {
                                 .flex()
                                 .items_center()
                                 .role(gpui::Role::Button)
-                                .aria_label("从 ~/.ssh/config 导入")
+                                .aria_label(tr!("从 ~/.ssh/config 导入"))
                                 .text_sm()
                                 .text_color(theme::color(ui::PRIMARY))
                                 .cursor_pointer()
-                                .child("从 ~/.ssh/config 导入")
+                                .child(tr!("从 ~/.ssh/config 导入"))
                                 .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectionDialogEvent::Import))),
                         )
                     })
                     .child(
-                        kit::labeled_button("connection-cancel", Variant::Outline, None, "取消")
+                        kit::labeled_button("connection-cancel", Variant::Outline, None, tr!("取消"))
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectionDialogEvent::Cancel))),
                     )
                     .child(
-                        kit::labeled_button("connection-submit", Variant::Primary, None, if editing { "保存" } else { "连接" })
+                        kit::labeled_button("connection-submit", Variant::Primary, None, if editing { tr!("保存") } else { tr!("连接") })
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
             );

@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     HighlightStyle, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role,
     ScrollStrategy, SharedString, StatefulInteractiveElement, StyledText, Styled, Task, UniformListScrollHandle, Window,
     anchored, deferred, div, prelude::FluentBuilder, px, uniform_list,
@@ -153,9 +153,9 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn format_uptime(secs: u64) -> String {
     let (days, hours, minutes) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
     match (days, hours) {
-        (0, 0) => format!("{} 分钟", minutes.max(1)),
-        (0, _) => format!("{hours} 小时 {minutes} 分"),
-        _ => format!("{days} 天 {hours} 小时"),
+        (0, 0) => tr!("{} 分钟", minutes.max(1)),
+        (0, _) => tr!("{} 小时 {} 分", hours, minutes),
+        _ => tr!("{} 天 {} 小时", days, hours),
     }
 }
 
@@ -215,9 +215,9 @@ pub fn filter_ports<'a>(ports: &'a [PortInfo], query: &str, sort: (PortSortKey, 
 pub fn kill_error_message(error: &str) -> String {
     let lower = error.to_lowercase();
     if lower.contains("not permitted") || lower.contains("permission") {
-        "没有权限结束这个进程。在终端里 sudo -i（或 su）切到 root 后再试，这里会跟着用 root 身份。".into()
+        tr!("没有权限结束这个进程。在终端里 sudo -i（或 su）切到 root 后再试，这里会跟着用 root 身份。").into()
     } else if lower.contains("no such process") {
-        "进程已经不在了。".into()
+        tr!("进程已经不在了。").into()
     } else {
         error.trim().to_string()
     }
@@ -260,14 +260,14 @@ pub fn filter_services<'a>(services: &'a [ServiceInfo], query: &str, sort: (Serv
 /// 服务的状态文字和颜色。
 pub fn service_status(service: &ServiceInfo) -> (&'static str, ui::Token) {
     match (service.active.as_str(), service.sub.as_str()) {
-        ("failed", _) => ("失败", ui::DESTRUCTIVE),
+        ("failed", _) => (tr!("失败"), ui::DESTRUCTIVE),
         // 一次性服务（防火墙规则、AppArmor）跑完退出但仍算启用
-        ("active", "exited") => ("已生效", ui::SUCCESS),
-        ("active", _) => ("运行中", ui::SUCCESS),
-        ("activating", _) => ("启动中", ui::WARNING),
-        ("deactivating", _) => ("停止中", ui::WARNING),
-        ("reloading", _) => ("重载中", ui::WARNING),
-        _ => ("已停止", ui::MUTED_FOREGROUND),
+        ("active", "exited") => (tr!("已生效"), ui::SUCCESS),
+        ("active", _) => (tr!("运行中"), ui::SUCCESS),
+        ("activating", _) => (tr!("启动中"), ui::WARNING),
+        ("deactivating", _) => (tr!("停止中"), ui::WARNING),
+        ("reloading", _) => (tr!("重载中"), ui::WARNING),
+        _ => (tr!("已停止"), ui::MUTED_FOREGROUND),
     }
 }
 
@@ -333,18 +333,18 @@ pub fn command_parts(command: &str) -> (&str, &str, &str) {
 /// 读列表失败的说明：没权限时说怎么办。
 pub fn list_error_message(error: &str) -> String {
     if services::needs_root(error) {
-        return "没有权限：在终端里 sudo -i 后再看。".into();
+        return tr!("没有权限：在终端里 sudo -i 后再看。").into();
     }
-    format!("读取失败：{}", error.trim())
+    tr!("读取失败：{}", error.trim())
 }
 
 fn action_label(action: ServiceAction) -> &'static str {
     match action {
-        ServiceAction::Start => "启动",
-        ServiceAction::Stop => "停止",
-        ServiceAction::Restart => "重启",
-        ServiceAction::Enable => "设为开机启动",
-        ServiceAction::Disable => "取消开机启动",
+        ServiceAction::Start => tr!("启动"),
+        ServiceAction::Stop => tr!("停止"),
+        ServiceAction::Restart => tr!("重启"),
+        ServiceAction::Enable => tr!("设为开机启动"),
+        ServiceAction::Disable => tr!("取消开机启动"),
     }
 }
 
@@ -352,7 +352,7 @@ fn action_label(action: ServiceAction) -> &'static str {
 
 impl SystemPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索…"));
+        let search = kit::input(|| tr!("搜索…"), window, cx);
         let subscription = cx.subscribe_in(&search, window, |this, _, event: &InputEvent, _, cx| match event {
             InputEvent::Change => {
                 this.scroll.scroll_to_item(0, ScrollStrategy::Top);
@@ -515,11 +515,11 @@ impl SystemPanel {
         self.menu = None;
         let Some(session_id) = self.session_id.clone() else { return };
         let (title, detail) = if force {
-            (format!("强制结束 {name}？"), format!("PID {pid} · kill -9：进程来不及收尾（不保存、不清理），只在普通结束不管用时用。"))
+            (tr!("强制结束 {}？", name), tr!("PID {} · kill -9：进程来不及收尾（不保存、不清理），只在普通结束不管用时用。", pid))
         } else {
-            (format!("结束 {name}？"), format!("PID {pid} · 发送 TERM，进程可以先收尾再退出。"))
+            (tr!("结束 {}？", name), tr!("PID {} · 发送 TERM，进程可以先收尾再退出。", pid))
         };
-        let mut options = Options::new(title).message(detail).confirm(if force { "强制结束" } else { "结束进程" });
+        let mut options = Options::new(title).message(detail).confirm(if force { tr!("强制结束") } else { tr!("结束进程") });
         options.destructive = true;
         let answer = prompts::confirm(window, cx, options);
         cx.spawn_in(window, async move |this, cx| {
@@ -534,9 +534,9 @@ impl SystemPanel {
                     Some(Ok(())) => {}
                     Some(Err(error)) if services::needs_root(&error.to_string()) => {
                         let command = format!("sudo {}", server_info::kill_command(pid, force));
-                        this.offer_sudo(format!("结束 {name} 需要 root 权限"), None, command, window, cx);
+                        this.offer_sudo(tr!("结束 {} 需要 root 权限", name), None, command, window, cx);
                     }
-                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new(format!("没能结束 {name}")).message(kill_error_message(&error.to_string()))),
+                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new(tr!("没能结束 {}", name)).message(kill_error_message(&error.to_string()))),
                     None => {}
                 }
                 this.refresh(cx);
@@ -547,7 +547,7 @@ impl SystemPanel {
 
     /// 没权限：问要不要改在终端里用 sudo 执行（终端里输密码，或点「填充密码」）。
     fn offer_sudo(&mut self, title: String, note: Option<&str>, command: String, window: &mut Window, cx: &mut Context<Self>) {
-        let mut options = Options::new(title).detail(command.clone()).confirm("在终端里用 sudo 执行");
+        let mut options = Options::new(title).detail(command.clone()).confirm(tr!("在终端里用 sudo 执行"));
         if let Some(note) = note {
             options = options.message(note.to_string());
         }
@@ -566,7 +566,7 @@ impl SystemPanel {
         let Some(session_id) = self.session_id.clone() else { return };
         let name = service.name().to_string();
         let confirm = matches!(action, ServiceAction::Stop | ServiceAction::Restart).then(|| {
-            let mut options = Options::new(format!("{}{name}？", action_label(action))).confirm(action_label(action));
+            let mut options = Options::new(tr!("{}{}？", action_label(action), name)).confirm(action_label(action));
             if !service.description.is_empty() {
                 options = options.message(service.description.clone());
             }
@@ -591,9 +591,9 @@ impl SystemPanel {
                     Some(Ok(())) | None => {}
                     Some(Err(error)) if services::needs_root(&error.to_string()) => {
                         let command = services::terminal_command(action, &service.unit);
-                        this.offer_sudo(format!("{} {name} 需要 root 权限", action_label(action)), None, command, window, cx);
+                        this.offer_sudo(tr!("{} {} 需要 root 权限", action_label(action), name), None, command, window, cx);
                     }
-                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new(format!("没能{}{name}", action_label(action))).message(error.to_string().trim().to_string())),
+                    Some(Err(error)) => prompts::alert_later(window, cx, Options::new(tr!("没能{}{}", action_label(action), name)).message(error.to_string().trim().to_string())),
                 }
                 this.refresh(cx);
             });
@@ -680,18 +680,18 @@ impl SystemPanel {
         };
         let dash = || "—".to_string();
         let load = o.load.map(|l| format!("{:.2}  {:.2}  {:.2}", l[0], l[1], l[2])).unwrap_or_else(dash);
-        let cpus = o.cpus.map(|c| format!("{c} 核"));
+        let cpus = o.cpus.map(|c| tr!("{} 核", c));
         let load_ratio = o.load.zip(o.cpus).map(|(l, c)| l[0] / c.max(1) as f32);
         let (memory, memory_sub, memory_ratio) = match (o.mem_total, o.mem_available) {
             (Some(total), Some(available)) => {
                 let used = total.saturating_sub(available);
-                (format_bytes(used), Some(format!("共 {}", format_bytes(total))), Some(used as f32 / total.max(1) as f32))
+                (format_bytes(used), Some(tr!("共 {}", format_bytes(total))), Some(used as f32 / total.max(1) as f32))
             }
-            (Some(total), None) => (format_bytes(total), Some("总量".into()), None),
+            (Some(total), None) => (format_bytes(total), Some(tr!("总量").into()), None),
             _ => (dash(), None, None),
         };
         let (disk, disk_sub, disk_ratio) = match (o.disk_total, o.disk_used) {
-            (Some(total), Some(used)) => (format_bytes(used), Some(format!("共 {} · /", format_bytes(total))), Some(used as f32 / total.max(1) as f32)),
+            (Some(total), Some(used)) => (format_bytes(used), Some(tr!("共 {} · /", format_bytes(total))), Some(used as f32 / total.max(1) as f32)),
             _ => (dash(), None, None),
         };
         let uptime = o.uptime_secs.map(format_uptime).unwrap_or_else(dash);
@@ -699,10 +699,10 @@ impl SystemPanel {
             .flex()
             .gap_3()
             .flex_shrink_0()
-            .child(card(Icon::Gauge, ui::PRIMARY, "负载（1 / 5 / 15 分钟）", load, cpus, load_ratio))
-            .child(card(Icon::MemoryStick, ui::VIOLET, "内存已用", memory, memory_sub, memory_ratio))
-            .child(card(Icon::HardDrive, ui::TEAL, "磁盘已用", disk, disk_sub, disk_ratio))
-            .child(card(Icon::Clock, ui::SUCCESS, "已运行", uptime, None, None))
+            .child(card(Icon::Gauge, ui::PRIMARY, tr!("负载（1 / 5 / 15 分钟）"), load, cpus, load_ratio))
+            .child(card(Icon::MemoryStick, ui::VIOLET, tr!("内存已用"), memory, memory_sub, memory_ratio))
+            .child(card(Icon::HardDrive, ui::TEAL, tr!("磁盘已用"), disk, disk_sub, disk_ratio))
+            .child(card(Icon::Clock, ui::SUCCESS, tr!("已运行"), uptime, None, None))
     }
 
     fn header_cell(&self, label: &'static str, key: Option<SortColumn>, width: Option<f32>, align: Align, cx: &mut Context<Self>) -> AnyElement {
@@ -733,7 +733,7 @@ impl SystemPanel {
             .child(format!("{label}{arrow}"))
             .when_some(key, |d, key| {
                 d.role(Role::Button)
-                    .aria_label(SharedString::from(format!("按{label}排序")))
+                    .aria_label(SharedString::from(tr!("按{}排序", label)))
                     .cursor_pointer()
                     .hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_sort(key, cx)))
@@ -745,7 +745,7 @@ impl SystemPanel {
         div()
             .id(id)
             .role(Role::Button)
-            .aria_label(SharedString::from(format!("结束 {name}")))
+            .aria_label(SharedString::from(tr!("结束 {}", name)))
             .px_2()
             .py(px(2.))
             .rounded(px(6.))
@@ -755,7 +755,7 @@ impl SystemPanel {
             .group_hover("system-row", |s| s.opacity(1.))
             .hover(|s| s.bg(theme::alpha(ui::DESTRUCTIVE, 0.1)))
             .cursor_pointer()
-            .child("结束")
+            .child(tr!("结束"))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 this.kill(pid, name.clone(), false, window, cx);
@@ -868,8 +868,8 @@ impl SystemPanel {
                             .child(div().min_w_0().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(p.address.clone()))
                             .map(|d| match address_scope(&p.address) {
                                 // 所有地址 = 对外开放，橙色提醒；只听本机的灰色
-                                AddressScope::All => d.child(pill(ui::WARNING_FOREGROUND, theme::alpha(ui::WARNING, 0.12)).child("所有地址")),
-                                AddressScope::Loopback => d.child(pill(ui::MUTED_FOREGROUND, theme::color(ui::MUTED)).child("本机")),
+                                AddressScope::All => d.child(pill(ui::WARNING_FOREGROUND, theme::alpha(ui::WARNING, 0.12)).child(tr!("所有地址"))),
+                                AddressScope::Loopback => d.child(pill(ui::MUTED_FOREGROUND, theme::color(ui::MUTED)).child(trc!("监听地址", "本机"))),
                                 AddressScope::Specific => d,
                             }),
                     )
@@ -881,7 +881,7 @@ impl SystemPanel {
                             .px_3()
                             .truncate()
                             .when(p.pid.is_none(), |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
-                            .child(if p.pid.is_some() { name.clone() } else { "看不到进程（需要 root）".into() }),
+                            .child(if p.pid.is_some() { name.clone() } else { tr!("看不到进程（需要 root）").into() }),
                     )
                     .child(div().w(px(64.)).flex_shrink_0().flex().justify_center().when_some(p.pid, |d, pid| d.child(self.kill_button(("kill-port", ix), pid, name.clone(), cx))))
                     .into_any_element()
@@ -919,7 +919,7 @@ impl SystemPanel {
                 let ix = range.start + i;
                 let name = service.name().to_string();
                 let busy = self.busy.as_deref() == Some(service.unit.as_str());
-                let (status, color) = if busy { ("处理中…", ui::WARNING) } else { service_status(&service) };
+                let (status, color) = if busy { (tr!("处理中…"), ui::WARNING) } else { service_status(&service) };
                 let running = service.is_running();
                 let button = |id: &'static str, action: ServiceAction, color: ui::Token, cx: &mut Context<Self>| {
                     let target = service.clone();
@@ -939,7 +939,7 @@ impl SystemPanel {
                     .justify_end()
                     .pr_2()
                     .when(!busy, |d| {
-                        d.child(Self::hover_button(("service-logs", ix), "日志", format!("{name} 的日志"), ui::MUTED_FOREGROUND).on_click(cx.listener(
+                        d.child(Self::hover_button(("service-logs", ix), tr!("日志"), tr!("{} 的日志", name), ui::MUTED_FOREGROUND).on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
                                 cx.stop_propagation();
                                 this.service_logs(&logs_target, cx);
@@ -991,7 +991,7 @@ impl SystemPanel {
                             .text_color(theme::color(ui::MUTED_FOREGROUND))
                             .map(|d| match service.enabled.as_str() {
                                 e if e.starts_with("enabled") => d.child(kit::icon_sized(Icon::Check, 14.).text_color(theme::color(ui::SUCCESS_FOREGROUND))),
-                                "masked" => d.child("已屏蔽"),
+                                "masked" => d.child(tr!("已屏蔽")),
                                 _ => d,
                             }),
                     )
@@ -1060,9 +1060,9 @@ impl Render for SystemPanel {
             .child(kit::segmented(
                 "system-view",
                 &[
-                    (View::Processes, None, tab_label("进程", process_count)),
-                    (View::Ports, None, tab_label("端口", port_count)),
-                    (View::Services, None, tab_label("服务", service_count)),
+                    (View::Processes, None, tab_label(trc!("标签页", "进程"), process_count)),
+                    (View::Ports, None, tab_label(trc!("标签页", "端口"), port_count)),
+                    (View::Services, None, tab_label(trc!("标签页", "服务"), service_count)),
                 ],
                 self.view,
                 move |view, _, cx| {
@@ -1084,10 +1084,10 @@ impl Render for SystemPanel {
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
                 .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(76.), Align::End, cx))
-                .child(self.header_cell("用户", Some(SortColumn::Process(SortKey::User)), Some(110.), Align::Start, cx))
+                .child(self.header_cell(tr!("用户"), Some(SortColumn::Process(SortKey::User)), Some(110.), Align::Start, cx))
                 .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), Align::End, cx))
-                .child(self.header_cell("内存", Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), Align::End, cx))
-                .child(self.header_cell("命令", Some(SortColumn::Process(SortKey::Command)), None, Align::Start, cx))
+                .child(self.header_cell(tr!("内存"), Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), Align::End, cx))
+                .child(self.header_cell(tr!("命令"), Some(SortColumn::Process(SortKey::Command)), None, Align::Start, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Ports => div()
                 .h(px(32.))
@@ -1099,11 +1099,11 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("协议", Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), Align::Start, cx))
-                .child(self.header_cell("端口", Some(SortColumn::Port(PortSortKey::Port)), Some(86.), Align::End, cx))
-                .child(self.header_cell("地址", Some(SortColumn::Port(PortSortKey::Address)), Some(ADDRESS_WIDTH), Align::Start, cx))
+                .child(self.header_cell(tr!("协议"), Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), Align::Start, cx))
+                .child(self.header_cell(tr!("端口"), Some(SortColumn::Port(PortSortKey::Port)), Some(86.), Align::End, cx))
+                .child(self.header_cell(tr!("地址"), Some(SortColumn::Port(PortSortKey::Address)), Some(ADDRESS_WIDTH), Align::Start, cx))
                 .child(self.header_cell("PID", Some(SortColumn::Port(PortSortKey::Pid)), Some(80.), Align::End, cx))
-                .child(self.header_cell("进程", Some(SortColumn::Port(PortSortKey::Process)), None, Align::Start, cx))
+                .child(self.header_cell(tr!("进程"), Some(SortColumn::Port(PortSortKey::Process)), None, Align::Start, cx))
                 .child(div().w(px(64.)).flex_shrink_0()),
             View::Services => div()
                 .h(px(32.))
@@ -1115,24 +1115,24 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .border_b_1()
                 .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("状态", Some(SortColumn::Service(ServiceSortKey::Status)), Some(STATUS_WIDTH), Align::Start, cx))
-                .child(self.header_cell("服务", Some(SortColumn::Service(ServiceSortKey::Name)), Some(220.), Align::Start, cx))
-                .child(self.header_cell("说明", Some(SortColumn::Service(ServiceSortKey::Description)), None, Align::Start, cx))
-                .child(self.header_cell("开机启动", Some(SortColumn::Service(ServiceSortKey::Boot)), Some(BOOT_WIDTH), Align::Center, cx))
+                .child(self.header_cell(tr!("状态"), Some(SortColumn::Service(ServiceSortKey::Status)), Some(STATUS_WIDTH), Align::Start, cx))
+                .child(self.header_cell(tr!("服务"), Some(SortColumn::Service(ServiceSortKey::Name)), Some(220.), Align::Start, cx))
+                .child(self.header_cell(tr!("说明"), Some(SortColumn::Service(ServiceSortKey::Description)), None, Align::Start, cx))
+                .child(self.header_cell(tr!("开机启动"), Some(SortColumn::Service(ServiceSortKey::Boot)), Some(BOOT_WIDTH), Align::Center, cx))
                 .child(div().w(px(150.)).flex_shrink_0()),
         };
 
         let view_is_services = self.view == View::Services;
         let empty: Option<SharedString> = if self.session_id.is_none() {
-            Some("连接服务器后显示它的进程、端口和服务".into())
+            Some(tr!("连接服务器后显示它的进程、端口和服务").into())
         } else if let Some(error) = &self.error {
             Some(list_error_message(error).into())
         } else if !loaded {
-            Some("正在读取…".into())
+            Some(tr!("正在读取…").into())
         } else if view_is_services && self.no_systemd {
-            Some("这台服务器没有 systemd".into())
+            Some(tr!("这台服务器没有 systemd").into())
         } else if count == 0 {
-            Some(if query.trim().is_empty() { "没有内容".into() } else { "没有匹配的结果".into() })
+            Some(if query.trim().is_empty() { tr!("没有内容").into() } else { tr!("没有匹配的结果").into() })
         } else {
             None
         };
@@ -1174,13 +1174,13 @@ impl Render for SystemPanel {
                         }
                     };
                     let mut entries = vec![
-                        MenuEntry::Item(MenuItem::new("结束进程", action(false)).destructive()),
-                        MenuEntry::Item(MenuItem::new("强制结束（kill -9）", action(true)).destructive()),
+                        MenuEntry::Item(MenuItem::new(tr!("结束进程"), action(false)).destructive()),
+                        MenuEntry::Item(MenuItem::new(tr!("强制结束（kill -9）"), action(true)).destructive()),
                         MenuEntry::Separator,
-                        MenuEntry::Item(MenuItem::new("复制 PID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(pid.to_string())))),
+                        MenuEntry::Item(MenuItem::new(tr!("复制 PID"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(pid.to_string())))),
                     ];
                     if let Some(command) = command {
-                        entries.push(MenuEntry::Item(MenuItem::new("复制命令", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(command.clone())))));
+                        entries.push(MenuEntry::Item(MenuItem::new(tr!("复制命令"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(command.clone())))));
                     }
                     entries
                 }
@@ -1202,10 +1202,10 @@ impl Render for SystemPanel {
                         MenuEntry::Item(item(ServiceAction::Stop).disabled(!running).destructive()),
                         MenuEntry::Separator,
                         MenuEntry::Item(item(boot).disabled(!switchable)),
-                        MenuEntry::Item(MenuItem::new("在终端里看日志", move |_, cx| {
+                        MenuEntry::Item(MenuItem::new(tr!("在终端里看日志"), move |_, cx| {
                             let _ = logs_weak.update(cx, |this, cx| this.service_logs(&logs_service, cx));
                         })),
-                        MenuEntry::Item(MenuItem::new("复制名称", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(unit.clone())))),
+                        MenuEntry::Item(MenuItem::new(tr!("复制名称"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(unit.clone())))),
                     ]
                 }
             };

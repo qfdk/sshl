@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate sshl_core;
+
 mod assets;
 mod backend;
 mod connection_dialog;
@@ -6,6 +9,7 @@ mod devhook;
 mod favorites;
 mod files;
 mod groups;
+mod i18n_en;
 mod import_dialog;
 mod prompts;
 mod quick_connect;
@@ -73,6 +77,7 @@ fn main() {
         gpui_base::init(cx);
         gpui_base::Theme::global_mut(cx).tokens = theme::base_tokens(false);
         let prompts = prompts::init(cx);
+        sshl_core::i18n::register_en(i18n_en::TABLE);
         settings::init(cx);
         cx.text_system()
             .add_fonts(vec![
@@ -86,29 +91,7 @@ fn main() {
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-        cx.set_menus(vec![
-            Menu {
-                name: "SSHL".into(),
-                items: vec![
-                    MenuItem::action("隐藏 SSHL", Hide),
-                    MenuItem::action("隐藏其他", HideOthers),
-                    MenuItem::action("全部显示", ShowAll),
-                    MenuItem::separator(),
-                    MenuItem::action("退出 SSHL", Quit),
-                ],
-                disabled: false,
-            },
-            Menu {
-                name: "编辑".into(),
-                items: vec![
-                    MenuItem::action("拷贝", terminal::view::Copy),
-                    MenuItem::action("粘贴", terminal::view::Paste),
-                    MenuItem::action("全选", terminal::view::SelectAll),
-                ],
-                disabled: false,
-            },
-            Menu { name: "窗口".into(), items: vec![MenuItem::action("最小化", workspace::Minimize)], disabled: false },
-        ]);
+        set_menus(cx);
 
         // 主窗口直接按主屏可用区域创建
         // 主窗口开在鼠标所在的屏幕上，铺满那块屏幕的可用区域（只让出菜单栏和 Dock），不进原生全屏
@@ -167,6 +150,33 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// 菜单栏。文字在建的时候就定了，所以换语言后要重建一次（`settings::replace`）。
+pub fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "SSHL".into(),
+            items: vec![
+                MenuItem::action(tr!("隐藏 SSHL"), Hide),
+                MenuItem::action(tr!("隐藏其他"), HideOthers),
+                MenuItem::action(tr!("全部显示"), ShowAll),
+                MenuItem::separator(),
+                MenuItem::action(tr!("退出 SSHL"), Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: tr!("编辑").into(),
+            items: vec![
+                MenuItem::action(tr!("拷贝"), terminal::view::Copy),
+                MenuItem::action(tr!("粘贴"), terminal::view::Paste),
+                MenuItem::action(tr!("全选"), terminal::view::SelectAll),
+            ],
+            disabled: false,
+        },
+        Menu { name: tr!("窗口").into(), items: vec![MenuItem::action(tr!("最小化"), workspace::Minimize)], disabled: false },
+    ]);
 }
 
 fn bind_keys(cx: &mut App) {

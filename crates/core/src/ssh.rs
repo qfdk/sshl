@@ -652,10 +652,10 @@ pub async fn fill_password(state: &AppState, session_id: &str, kind: Option<Stri
     let session = state.get(session_id).await
         .ok_or_else(|| AppError::SessionNotFound(session_id.to_string()))?;
     let cid = session.connection_id.clone()
-        .ok_or_else(|| AppError::Ssh("当前连接未保存，无密码可填充".into()))?;
+        .ok_or_else(|| AppError::Ssh(crate::tr!("当前连接未保存，无密码可填充").into()))?;
     let kind = kind.unwrap_or_else(|| "password".into());
     let password = load_secret(&cid, &kind)
-        .ok_or_else(|| AppError::Ssh("未找到对应的已保存密码".into()))?;
+        .ok_or_else(|| AppError::Ssh(crate::tr!("未找到对应的已保存密码").into()))?;
     let mut bytes = password.into_bytes();
     bytes.push(b'\r');
     session.shell.write(bytes);

@@ -4,11 +4,34 @@ use std::path::PathBuf;
 
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
+use sshl_core::i18n::{self, Lang};
 
 use crate::theme::{Appearance, term};
 
 pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
+
+/// 设置里的「语言」。不认识的值（以后加的语言、手改的）按跟随系统。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    Zh,
+    En,
+    /// 跟随系统「语言与地区」里排在前面的那个。
+    #[default]
+    #[serde(other)]
+    System,
+}
+
+impl Language {
+    pub fn resolve(self) -> Lang {
+        match self {
+            Language::System => i18n::system(),
+            Language::Zh => Lang::Zh,
+            Language::En => Lang::En,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -30,6 +53,8 @@ pub struct Settings {
     pub terminal_theme: String,
     /// 界面外观：跟随系统 / 浅色 / 深色（终端里的颜色归 `terminal_theme` 管）。
     pub appearance: Appearance,
+    /// 界面语言：跟随系统 / 简体中文 / English。
+    pub language: Language,
 }
 
 impl Default for Settings {
@@ -45,6 +70,7 @@ impl Default for Settings {
             right_click_paste: false,
             terminal_theme: term::DEFAULT_ID.into(),
             appearance: Appearance::System,
+            language: Language::System,
         }
     }
 }
@@ -67,6 +93,7 @@ fn path() -> Option<PathBuf> {
 
 pub fn init(cx: &mut App) {
     let settings = load();
+    i18n::set(settings.language.resolve());
     cx.set_global(settings);
 }
 
@@ -88,11 +115,14 @@ pub fn preview(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     if settings.font_family.trim().is_empty() {
         settings.font_family = DEFAULT_FONT_FAMILY.into();
     }
-    cx.set_global(settings);
-    cx.refresh_windows();
+    replace(cx, settings);
 }
 
+/// 先换语言再换设置：盯着设置的地方（输入框的占位字）被叫到时，`tr!` 已经是新语言了。菜单栏的文字是建的时候定的，语言变了重建。
 pub fn replace(cx: &mut App, settings: Settings) {
+    if i18n::set(settings.language.resolve()) {
+        crate::set_menus(cx);
+    }
     cx.set_global(settings);
     cx.refresh_windows();
 }
@@ -201,6 +231,18 @@ fn find_file(dir: &std::path::Path, name: &str, depth: usize) -> Option<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_defaults_to_system_and_survives_unknown_values() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert_eq!(old.language, Language::System, "旧设置里没有这一项：跟随系统");
+        let english: Settings = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
+        assert_eq!((english.language, english.language.resolve()), (Language::En, Lang::En));
+        assert!(serde_json::to_string(&english).unwrap().contains(r#""language":"en""#));
+        let unknown: Settings = serde_json::from_str(r#"{"language":"fr","fontSize":14}"#).unwrap();
+        assert_eq!((unknown.language, unknown.font_size), (Language::System, 14.0), "不认识的语言按跟随系统，别的设置不能跟着丢");
+        assert_eq!(Language::Zh.resolve(), Lang::Zh);
+    }
 
     #[test]
     fn legacy_values_are_migrated() {

@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
-    AccessibleAction, App, AppContext, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
+    AccessibleAction, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
@@ -177,7 +177,7 @@ fn drop_hint() -> impl IntoElement {
                 .text_color(theme::color(theme::ui::FOREGROUND))
                 .text_size(px(14.))
                 .shadow_md()
-                .child("松开上传到终端当前目录"),
+                .child(tr!("松开上传到终端当前目录")),
         )
 }
 
@@ -209,19 +209,17 @@ fn host_key_prompt(window: &mut Window, cx: &mut Context<TerminalView>) -> HostK
 
 fn host_key_options(question: &HostKeyQuestion) -> Options {
     let host = if question.port == 22 { question.host.clone() } else { format!("{}:{}", question.host, question.port) };
-    let fingerprint = format!("{} 密钥指纹\n{}", question.key_type, question.fingerprint);
+    let fingerprint = tr!("{} 密钥指纹\n{}", question.key_type, question.fingerprint);
     if question.changed {
-        let mut options = Options::new(format!("{host} 的主机密钥变了"))
-            .message(format!(
-                "和上次记录的不一样。可能是服务器重装或换了密钥，也可能有人在冒充它（中间人攻击）。不确定就取消，先问问服务器管理员。\n\n{fingerprint}"
-            ))
-            .confirm("信任新密钥");
+        let mut options = Options::new(tr!("{} 的主机密钥变了", host))
+            .message(tr!("和上次记录的不一样。可能是服务器重装或换了密钥，也可能有人在冒充它（中间人攻击）。不确定就取消，先问问服务器管理员。\n\n{}", fingerprint))
+            .confirm(tr!("信任新密钥"));
         options.destructive = true;
         options
     } else {
-        Options::new(format!("第一次连接 {host}"))
-            .message(format!("请核对服务器的密钥指纹，确认无误再连接。\n\n{fingerprint}"))
-            .confirm("信任并连接")
+        Options::new(tr!("第一次连接 {}", host))
+            .message(tr!("请核对服务器的密钥指纹，确认无误再连接。\n\n{}", fingerprint))
+            .confirm(tr!("信任并连接"))
     }
 }
 
@@ -334,7 +332,7 @@ impl TerminalView {
                             cx.emit(TerminalEvent::Closed);
                         } else if matches!(view.status, Status::Connected { .. }) {
                             view.status = Status::Closed;
-                            view.notice("连接已断开 · 按 Enter 重新连接");
+                            view.notice(tr!("连接已断开 · 按 Enter 重新连接"));
                             cx.emit(TerminalEvent::Closed);
                             cx.notify();
                         }
@@ -382,7 +380,7 @@ impl TerminalView {
         })
         .detach();
 
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("查找"));
+        let search = crate::ui::input(|| tr!("查找"), window, cx);
         let search_subscription = cx.subscribe(&search, |view, search, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) && view.search_open {
                 view.handle.send(Input::Search(search.read(cx).value().to_string()));
@@ -464,19 +462,19 @@ impl TerminalView {
                         cx.emit(TerminalEvent::Connected);
                     }
                     Some(Err(AppError::HostKeyDeclined)) => {
-                        view.status = Status::Failed("未信任主机".into());
-                        view.notice("没有信任主机密钥 · 按 Enter 重试");
+                        view.status = Status::Failed(tr!("未信任主机").into());
+                        view.notice(tr!("没有信任主机密钥 · 按 Enter 重试"));
                         cx.emit(TerminalEvent::Declined);
                     }
                     Some(Err(error)) => {
                         let message = error.to_string();
-                        view.notice(&format!("连接失败：{message} · 按 Enter 重试"));
+                        view.notice(&tr!("连接失败：{} · 按 Enter 重试", message));
                         view.status = Status::Failed(message.clone());
                         cx.emit(TerminalEvent::Failed(message));
                     }
                     None => {
-                        view.status = Status::Failed("后台任务异常退出".into());
-                        cx.emit(TerminalEvent::Failed("后台任务异常退出".into()));
+                        view.status = Status::Failed(tr!("后台任务异常退出").into());
+                        cx.emit(TerminalEvent::Failed(tr!("后台任务异常退出").into()));
                     }
                 }
                 cx.notify();
@@ -493,7 +491,7 @@ impl TerminalView {
         self.shell.close();
         self.shell = shell.clone();
         self.handle.send(Input::Rebind(shell));
-        self.notice("正在重新连接…");
+        self.notice(tr!("正在重新连接…"));
         self.start_connection(details, shell_rx, window, cx);
         cx.notify();
     }
@@ -722,7 +720,7 @@ impl TerminalView {
             .id("terminal-search")
             .key_context(SEARCH_CONTEXT)
             .role(Role::Search)
-            .aria_label("在终端里查找")
+            .aria_label(tr!("在终端里查找"))
             .absolute()
             .top(px(8.))
             .right(px(12.))
@@ -755,15 +753,15 @@ impl TerminalView {
                     .child(label),
             )
             .child(
-                kit::mini_button("terminal-search-prev", Icon::ChevronUp, "上一个（↵）", theme::ui::MUTED_FOREGROUND)
+                kit::mini_button("terminal-search-prev", Icon::ChevronUp, tr!("上一个（↵）"), theme::ui::MUTED_FOREGROUND)
                     .on_click(cx.listener(|this, _, _, _| this.find_step(true))),
             )
             .child(
-                kit::mini_button("terminal-search-next", Icon::ChevronDown, "下一个（⇧↵）", theme::ui::MUTED_FOREGROUND)
+                kit::mini_button("terminal-search-next", Icon::ChevronDown, tr!("下一个（⇧↵）"), theme::ui::MUTED_FOREGROUND)
                     .on_click(cx.listener(|this, _, _, _| this.find_step(false))),
             )
             .child(
-                kit::mini_button("terminal-search-close", Icon::X, "关闭（Esc）", theme::ui::MUTED_FOREGROUND)
+                kit::mini_button("terminal-search-close", Icon::X, tr!("关闭（Esc）"), theme::ui::MUTED_FOREGROUND)
                     .on_click(cx.listener(|this, _, window, cx| this.find_close(&FindClose, window, cx))),
             )
     }
@@ -932,7 +930,7 @@ impl Render for TerminalView {
             // 带「设置值」动作 = 值可写——按住鼠标说话这类听写工具靠这两点认出这里能输入文字。
             // 不带文本内容：带了就会开放选区范围，听写工具改走无障碍直接写入、写完又核对不了，字就丢了。
             .role(Role::Terminal)
-            .aria_label("终端")
+            .aria_label(tr!("终端"))
             .on_a11y_action(AccessibleAction::SetValue, {
                 let this = cx.entity().downgrade();
                 move |data, _, cx| {
@@ -1071,10 +1069,10 @@ impl EntityInputHandler for TerminalView {
 fn search_label(needle: &str, info: Option<&SearchInfo>) -> String {
     let Some(info) = info.filter(|_| !needle.is_empty()) else { return String::new() };
     match (info.total, info.selected) {
-        (0, _) if info.searching => "查找中…".into(),
-        (0, _) => "无结果".into(),
+        (0, _) if info.searching => tr!("查找中…").into(),
+        (0, _) => tr!("无结果").into(),
         (total, Some(index)) => format!("{}/{total}", index + 1),
-        (total, None) => format!("{total} 个"),
+        (total, None) => tr!("{} 个", total),
     }
 }
 

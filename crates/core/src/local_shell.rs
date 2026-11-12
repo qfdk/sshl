@@ -51,7 +51,7 @@ impl LocalShell {
         if fg == self.pid {
             return None;
         }
-        Some(process_name(fg).unwrap_or_else(|| "程序".into()))
+        Some(process_name(fg).unwrap_or_else(|| crate::tr!("程序").into()))
     }
 
     /// 前台进程（在提示符下就是 shell 自己）的当前目录：新开的本机标签从这里开始。
