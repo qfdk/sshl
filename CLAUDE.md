@@ -52,6 +52,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   只放展开按钮（新建连接不重复放，标签栏末尾有 +）。收起时焦点在搜索框里就交回内容区——直接问焦点句柄，
   不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。
   关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock 走 `on_reopen` 显示；⌘Q 退出。
+  ⌘Q 开着标签时先确认（`Workspace::request_quit`，用户手滑按到过，所有会话一起没了），没有标签直接退。按住 ⌘Q 会连发：确认框开着时后面几次不叠框、也不算确认。
+  这个动作要由工作区的元素接（`.on_action`），不能在全局处理函数里 `window.update`：按键分发途中窗口正被占着，拿不到，会落进「直接退」的兜底。
 - **终端线程模型**：libghostty-vt 的类型都是 `!Send`，每个会话一个终端线程独占它（`terminal/engine.rs`）。
   SSH 输出、键鼠、改尺寸都以 `Input` 消息进来；界面只拿 `Frame` 快照来画，行是 `Arc<Row>`，没变的行沿用。
   每轮先处理控制消息（按键、^C 不排在积压输出后面），输出按 64KB 切片解析，刷屏时最多 16ms 出一帧。

@@ -87,6 +87,7 @@ fn main() {
             .expect("load bundled terminal font");
 
         bind_keys(cx);
+        // ⌘Q 先到工作区（开着标签时要确认，见 Workspace::request_quit）；没有窗口接的时候才到这里
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());

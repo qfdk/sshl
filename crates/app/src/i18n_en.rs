@@ -414,6 +414,9 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("点击左侧连接或创建新连接开始使用", "Click a connection on the left, or create a new one to get started"),
     ("本机终端 ⌘N", "Local terminal ⌘N"),
     ("正在连接服务器...", "Connecting to the server..."),
+    ("退出 SSHL？", "Quit SSHL?"),
+    ("退出", "Quit"),
+    ("开着的 {} 个标签会关闭，连着的会话会断开。", "The {0} open {0?tab|tabs} will be closed and connected sessions disconnected."),
 ];
 
 #[cfg(test)]

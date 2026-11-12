@@ -208,6 +208,8 @@ pub struct Workspace {
     pub(crate) latency: Option<(String, Option<std::time::Duration>)>,
     /// 下一个本机标签的编号（标签 id 用，不显示）。
     next_local: u64,
+    /// 退出的确认框正开着：按住 ⌘Q 会连发，后面几次不能再叠一个框，更不能当成确认。
+    quit_asking: bool,
     _latency_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -279,6 +281,7 @@ impl Workspace {
             main_tab: MainTab::Terminal,
             search,
             search_focused: false,
+            quit_asking: false,
             terminal_area: None,
             menu: None,
             drop_target: None,
@@ -1282,6 +1285,29 @@ impl Workspace {
         }
     }
 
+    /// ⌘Q / 菜单「退出 SSHL」：开着标签就先问（手滑按到 ⌘Q 会把所有会话一起关掉），没有标签直接退。
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(message) = quit_question(self.sessions.len()) else {
+            cx.quit();
+            return;
+        };
+        if std::mem::replace(&mut self.quit_asking, true) {
+            return;
+        }
+        self.finish_rename(true, window, cx);
+        let answer = prompts::confirm(window, cx, Options::new(tr!("退出 SSHL？")).message(message).confirm(tr!("退出")));
+        cx.spawn_in(window, async move |this, cx| {
+            let quit = answer.await.unwrap_or(false);
+            let _ = this.update(cx, |this, cx| {
+                this.quit_asking = false;
+                if quit {
+                    cx.quit();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn minimize(&mut self, _: &Minimize, window: &mut Window, _: &mut Context<Self>) {
         window.minimize_window();
     }
@@ -1482,6 +1508,7 @@ impl Render for Workspace {
                 }
             })
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(|this, _: &crate::Quit, window, cx| this.request_quit(window, cx)))
             .on_action(cx.listener(Self::minimize))
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.show_main_tab(MainTab::Terminal, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.show_main_tab(MainTab::Files, window, cx)))
@@ -1638,6 +1665,11 @@ impl Workspace {
     }
 }
 
+/// 退出前要不要问：开着标签时问（返回要说的话），没有标签不问。
+fn quit_question(tabs: usize) -> Option<String> {
+    (tabs > 0).then(|| tr!("开着的 {} 个标签会关闭，连着的会话会断开。", tabs))
+}
+
 /// 按设置和系统外观定界面是浅色还是深色。变了才动：换掉 gpui-base 的颜色（输入框的字、光标）并重画。
 fn sync_appearance(window: &Window, cx: &mut App) {
     let dark = settings::get(cx).appearance.is_dark(window.appearance());
@@ -1652,6 +1684,13 @@ mod tests {
     use gpui::{Action, KeyContext, Keymap, Keystroke};
 
     use super::*;
+
+    #[test]
+    fn quitting_asks_only_when_tabs_are_open() {
+        assert_eq!(quit_question(0), None, "没有标签：直接退");
+        assert_eq!(quit_question(3).as_deref(), Some("开着的 3 个标签会关闭，连着的会话会断开。"));
+        assert!(quit_question(1).is_some());
+    }
 
     #[test]
     fn cmd_numbers_switch_tabs_and_cmd_letters_switch_views() {
