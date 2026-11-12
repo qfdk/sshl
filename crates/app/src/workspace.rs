@@ -91,13 +91,15 @@ pub enum MainTab {
 pub struct Session {
     /// 保存的连接 id；本机终端是 `local:<n>`。
     pub connection_id: String,
-    /// 会话建立时的名称（连接被删后标签仍用它）。
+    /// 会话建立时的名称（连接被删后标签仍用它）。本机标签不用它，名字按 `local_number` 在显示时取。
     pub name: SharedString,
     /// 标签的自定义名字（双击标签 / 右键「重命名」）；None 用默认名字。只跟着这个打开的标签，不存库、重启不留。
     pub custom_title: Option<SharedString>,
     pub view: Entity<TerminalView>,
     /// 本机终端（没有文件管理 / 系统页 / 填充密码）。
     pub local: bool,
+    /// 本机标签的序号（「本机」「本机 2」…）；远程会话是 0。
+    pub local_number: usize,
     _subscription: Subscription,
 }
 
@@ -360,6 +362,9 @@ impl Workspace {
 
     /// 标签的默认名字：保存的连接名（连接被删了用会话建立时的名字；本机标签是「本机」「本机 2」…）。
     pub(crate) fn default_tab_name(&self, session: &Session) -> SharedString {
+        if session.local {
+            return groups::local_tab_name(session.local_number).into();
+        }
         self.connection(&session.connection_id).map(|c| SharedString::from(c.name.clone())).unwrap_or_else(|| session.name.clone())
     }
 
@@ -436,14 +441,15 @@ impl Workspace {
         }
         let id = format!("local:{}", self.next_local);
         self.next_local += 1;
-        let names: Vec<String> = self.sessions.iter().filter(|s| s.local).map(|s| s.name.to_string()).collect();
+        let numbers: Vec<usize> = self.sessions.iter().filter(|s| s.local).map(|s| s.local_number).collect();
         let subscription = cx.subscribe_in(&view, window, Self::terminal_event);
         self.sessions.push(Session {
             connection_id: id.clone(),
-            name: groups::local_tab_name(&names).into(),
+            name: SharedString::default(),
             custom_title: None,
             view,
             local: true,
+            local_number: groups::local_tab_number(&numbers),
             _subscription: subscription,
         });
         self.activate(&id, window, cx);
@@ -616,6 +622,7 @@ impl Workspace {
                     custom_title: None,
                     view: pending.view,
                     local: false,
+                    local_number: 0,
                     _subscription: subscription,
                 });
                 self.activate(&pending.connection_id, window, cx);

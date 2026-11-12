@@ -191,12 +191,14 @@ pub fn tab_custom_title(input: &str, default: &str) -> Option<String> {
     (!title.is_empty() && title != default).then(|| title.to_string())
 }
 
-/// 新本机标签的名字：「本机」，已有的话「本机 2」「本机 3」…，取最小的没用过的。
-pub fn local_tab_name(existing: &[String]) -> String {
-    (1..)
-        .map(|n| if n == 1 { tr!("本机").to_string() } else { tr!("本机 {}", n) })
-        .find(|name| !existing.contains(name))
-        .unwrap()
+/// 新本机标签的序号：1、2、3…，取最小的没用过的。
+pub fn local_tab_number(existing: &[usize]) -> usize {
+    (1..).find(|n| !existing.contains(n)).unwrap()
+}
+
+/// 本机标签的名字：「本机」「本机 2」「本机 3」…。会话里只存序号，名字在显示时取（换语言后跟着变）。
+pub fn local_tab_name(number: usize) -> String {
+    if number <= 1 { tr!("本机").to_string() } else { tr!("本机 {}", number) }
 }
 
 #[cfg(test)]
@@ -252,10 +254,12 @@ mod tests {
 
     #[test]
     fn local_tabs_take_the_smallest_free_number() {
-        assert_eq!(local_tab_name(&[]), "本机");
-        assert_eq!(local_tab_name(&["本机".into()]), "本机 2");
-        assert_eq!(local_tab_name(&["本机".into(), "本机 3".into()]), "本机 2");
-        assert_eq!(local_tab_name(&["本机 2".into()]), "本机");
+        assert_eq!(local_tab_number(&[]), 1);
+        assert_eq!(local_tab_number(&[1]), 2);
+        assert_eq!(local_tab_number(&[1, 3]), 2);
+        assert_eq!(local_tab_number(&[2]), 1);
+        assert_eq!(local_tab_name(1), "本机");
+        assert_eq!(local_tab_name(2), "本机 2");
     }
 
     fn conn(id: &str, group: &str) -> StoredConnection {
