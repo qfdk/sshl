@@ -67,7 +67,7 @@ impl Workspace {
             .h(px(32.))
             .px_0()
             .aria_label("新建连接")
-            .tooltip(|window, cx| kit::tooltip("新建连接  ⌘N".into(), window, cx))
+            .tooltip(|window, cx| kit::tooltip("新建连接  ⌘T".into(), window, cx))
             .child(kit::icon(Icon::Plus))
             .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx)));
         // 设置放在标题行（原来单独占侧栏底部一行，底部状态栏去掉后那一行只剩它）

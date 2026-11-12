@@ -167,7 +167,7 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
-- **本机终端**（⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
+- **本机终端**（⌘N——用户开终端的第一反应是它；新建连接是 ⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
   接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
   TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上

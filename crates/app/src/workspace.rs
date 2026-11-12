@@ -54,12 +54,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-p", ShowSystem, Some("Workspace")),
         KeyBinding::new("cmd-shift-p", ShowSnippets, Some("Workspace")),
         KeyBinding::new("cmd-shift-d", ShowFavorites, Some("Workspace")),
-        KeyBinding::new("cmd-n", NewConnection, Some("Workspace")),
+        KeyBinding::new("cmd-t", NewConnection, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
         KeyBinding::new("cmd-k", OpenQuickConnect, Some("Workspace")),
-        // 本机终端和标签切换：同 Ghostty / Terminal / 浏览器
-        KeyBinding::new("cmd-t", NewLocalTerminal, Some("Workspace")),
+        // 本机终端是 ⌘N（用户开终端的第一反应是它），新建连接让到 ⌘T；标签切换同 Ghostty / Terminal / 浏览器
+        KeyBinding::new("cmd-n", NewLocalTerminal, Some("Workspace")),
         KeyBinding::new("cmd-}", NextTab, Some("Workspace")),
         KeyBinding::new("cmd-{", PrevTab, Some("Workspace")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
@@ -319,7 +319,7 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
         this.reload_connections();
-        // 启动时就有焦点：否则 ⌘N、⌘, 等工作区快捷键要先随便点一下才生效
+        // 启动时就有焦点：否则 ⌘T、⌘, 等工作区快捷键要先随便点一下才生效
         window.focus(&this.focus, cx);
         this
     }
@@ -417,9 +417,9 @@ impl Workspace {
         self.reconnect_in_place(id, window, cx);
     }
 
-    /// ⌘T：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
+    /// ⌘N：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
     pub(crate) fn new_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 对话框 / 提示框开着时 ⌘T 不在背后开标签
+        // 对话框 / 提示框开着时 ⌘N 不在背后开标签
         if self.modal_open(cx) {
             return;
         }
@@ -1562,7 +1562,7 @@ impl Render for Workspace {
                                                                 .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
                                                         )
                                                         .child(
-                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), "本机终端 ⌘T")
+                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), "本机终端 ⌘N")
                                                                 .h(px(32.))
                                                                 .text_size(px(13.))
                                                                 .on_click(cx.listener(|this, _, window, cx| this.new_local_terminal(window, cx))),
@@ -1674,6 +1674,8 @@ mod tests {
         assert_eq!(name("cmd-p"), Some("workspace::ShowSystem"));
         assert_eq!(name("cmd-shift-p"), Some("workspace::ShowSnippets"));
         assert_eq!(name("cmd-shift-d"), Some("workspace::ShowFavorites"));
+        assert_eq!(name("cmd-n"), Some("workspace::NewLocalTerminal"), "⌘N 开本机终端（用户开终端的第一反应）");
+        assert_eq!(name("cmd-t"), Some("workspace::NewConnection"), "⌘T 是新建连接");
         assert_eq!(name("cmd-0"), Some("terminal::ZoomReset"), "⌘0 还是终端的字号复原，不是标签");
     }
 
