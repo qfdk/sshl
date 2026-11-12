@@ -31,6 +31,22 @@ use workspace::Workspace;
 
 actions!(sshl, [Quit, Hide, HideOthers, ShowAll]);
 
+/// 无障碍树是懒建的：第一次有人来问才开始建，那一次答的是一棵空树（没有焦点元素），下一帧才有真的。
+/// 听写工具每次按住只问一次，不提前建的话每次启动后头几次按住都落空。这里自己先问一次，等于把它提前打开。
+fn warm_accessibility() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut AnyObject = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for index in 0..count {
+            let window: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+            let _: *mut AnyObject = msg_send![window, accessibilityFocusedUIElement];
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -127,6 +143,7 @@ fn main() {
                 cx.new(|cx| gpui_base::Root::new(workspace, window, cx))
             })
             .expect("open main window");
+        warm_accessibility();
 
         // 关窗口（红点 / ⌘W 没有标签时）只隐藏应用，会话、预热连接、界面都留着
         let _ = window.update(cx, |_, window, cx| {

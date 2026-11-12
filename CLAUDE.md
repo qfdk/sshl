@@ -218,6 +218,8 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   还要 `main.rs` 里的 `add_focus_forwarder_to_window_class("GPUIWindow")`：GPUI 的第一响应者是它自己的视图，无障碍树（accesskit）挂在外层的内容视图上，
   系统问「焦点元素」只问到窗口；不补转发的话焦点元素永远是 AXWindow（命中测试走视图层级，不受影响，所以只测命中会漏掉这个）。
   焦点节点只在窗口是键盘窗口时才报告：验证要把窗口切到前台再用探针问 kAXFocusedUIElement。
+  无障碍树是懒建的（第一次有人问才激活，那次答的是空树、没有焦点元素，之后的帧才有真树），`main.rs` 的 `warm_accessibility` 开窗后自己问一次提前激活：
+  不然每次启动后头几次按住说话都落空（「时灵时不灵」）。验证要用刚启动、还没被任何探针问过的进程，第一次问就要答 AXTextArea。
 - **devhook 测试口**：debug 构建、或带 `--features devhook` 的构建里才编进去（`#[cfg(any(debug_assertions, feature = "devhook"))]`），
   且要设了 `SSHL_DEV_SOCKET=/tmp/xxx.sock` 才启用（`devhook.rs`）。经 Unix 套接字注入按键（`keys ctrl-c enter` /
   `type echo hi`；`mods cmd` / `mods none` 按住 / 松开 ⌘，测快捷键角标，之后的 `click` / `move` 也带着 ⌘，测 ⌘ 悬停 / 点击链接；

@@ -22,6 +22,8 @@ gpui-base = "=0.9.1"
 accesskit = "0.24.1"
 # 给 GPUI 的窗口类补「焦点元素」转发（见 main.rs）；同 gpui 用的那一版。
 accesskit_macos = "0.26.3"
+# 启动时自己问一次窗口的焦点元素，把无障碍树提前建好（见 main.rs）；gpui 已经带着这一版。
+objc2 = "0.6"
 
 # 终端模拟：Ghostty 内核 libghostty-vt（C ABI 1.0）。构建要 Zig 0.17（brew install zig）。
 libghostty-vt = { git = "https://github.com/uzaaft/libghostty-rs", rev = "768add93c54ccdba3f5c4d8763789ab6416f3151" }
