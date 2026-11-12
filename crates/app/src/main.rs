@@ -103,6 +103,8 @@ fn main() {
             .as_ref()
             .map(|display| display.visible_bounds())
             .unwrap_or_else(|| Bounds::centered(None, gpui::size(px(1280.), px(800.)), cx));
+        #[cfg(any(debug_assertions, feature = "devhook"))]
+        let bounds = devhook::size_override().map_or(bounds, |size| Bounds::centered(display.as_ref().map(|display| display.id()), size, cx));
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             display_id: display.map(|display| display.id()),

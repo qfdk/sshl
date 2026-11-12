@@ -27,6 +27,13 @@ pub fn display_override(cx: &App) -> Option<std::rc::Rc<dyn gpui::PlatformDispla
     cx.displays().into_iter().find(|d| Some(d.id()) != primary)
 }
 
+/// `SSHL_DEV_SIZE=1440x900`：窗口按这个大小（逻辑像素）开在屏幕中间，不铺满（截图要固定尺寸）。
+pub fn size_override() -> Option<gpui::Size<gpui::Pixels>> {
+    let value = std::env::var("SSHL_DEV_SIZE").ok()?;
+    let (width, height) = value.split_once('x')?;
+    Some(gpui::size(px(width.parse().ok()?), px(height.parse().ok()?)))
+}
+
 pub fn start(window: AnyWindowHandle, cx: &mut App) {
     let Ok(path) = std::env::var("SSHL_DEV_SOCKET") else { return };
     let _ = std::fs::remove_file(&path);

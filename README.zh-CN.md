@@ -6,11 +6,11 @@
 
 轻量级原生 macOS SSH 客户端：终端 + SFTP 文件管理放在同一个窗口。纯 Rust：界面用 GPUI（GPU 渲染），终端模拟用 libghostty-vt（Ghostty 内核），后端 russh + russh-sftp。不用 WebView，冷启动约 0.3 秒。
 
-![终端：多标签、分组的连接列表](docs/screenshots/terminal.png)
+![终端：多标签、分组的连接列表](docs/screenshots/zh/terminal.png)
 
 | 终端里查找（⌘F） | 文件管理（⌘O） |
 | --- | --- |
-| ![在回滚历史里查找，匹配处高亮](docs/screenshots/find.png) | ![本地 / 远程双栏文件管理](docs/screenshots/files.png) |
+| ![在回滚历史里查找，匹配处高亮](docs/screenshots/zh/find.png) | ![本地 / 远程双栏文件管理](docs/screenshots/zh/files.png) |
 
 ## 功能
 
