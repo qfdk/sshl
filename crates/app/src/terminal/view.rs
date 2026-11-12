@@ -10,7 +10,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
-    AccessibleAction, App, AppContext, BorderStyle, Bounds, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
+    AccessibleAction, App, AppContext, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
     DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontStyle, FontWeight, GlobalElementId,
     InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
@@ -595,7 +595,7 @@ impl TerminalView {
     }
 
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        if let Some(text) = clipboard_paste(cx.read_from_clipboard().as_ref()) {
             self.input(Input::Paste(text));
         }
     }
@@ -1437,6 +1437,13 @@ fn text_run(cell: &super::frame::Cell, len: usize, fonts: &Fonts) -> TextRun {
     }
 }
 
+/// ⌘V 要贴进终端的字。剪贴板里没有文字但有图片时是空串：程序收到一次空的括号粘贴，
+/// Claude Code 这类程序据此自己去读剪贴板里的图（和它的 Ctrl+V 一样）；图片本身不经过终端。
+fn clipboard_paste(item: Option<&ClipboardItem>) -> Option<String> {
+    let item = item?;
+    item.text().or_else(|| item.entries().iter().any(|entry| matches!(entry, ClipboardEntry::Image(_))).then(String::new))
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{KeyContext, Keymap, Keystroke};
@@ -1448,6 +1455,16 @@ mod tests {
     fn resolve(keymap: &Keymap, key: &'static str) -> usize {
         let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0.len()
+    }
+
+    /// ⌘V：有文字贴文字；没文字但有图片 = 一次空粘贴（程序自己去读图）；什么都没有就不发。
+    #[test]
+    fn pasting_an_image_only_clipboard_sends_an_empty_paste() {
+        let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![1, 2, 3]);
+        assert_eq!(clipboard_paste(Some(&ClipboardItem::new_string("ls -la".into()))), Some("ls -la".to_string()));
+        assert_eq!(clipboard_paste(Some(&ClipboardItem::new_image(&image))), Some(String::new()));
+        assert_eq!(clipboard_paste(Some(&ClipboardItem::new_string(String::new()))), None);
+        assert_eq!(clipboard_paste(None), None);
     }
 
     #[test]

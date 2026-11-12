@@ -60,6 +60,9 @@ scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 
   结束后按最新的出帧，最长 1s 超时。不认的话擦掉重写的中间状态会被画出来，整块闪。
   键盘 / 鼠标 / 粘贴 / 焦点的编码都交给 libghostty（应用光标键、Kitty 键盘协议、括号粘贴）；
   普通字符走 GPUI 的输入法通道（`EntityInputHandler`），中文输入法组字画在光标处。
+  粘贴图片（⌘V / 右键粘贴，`view.rs` 的 `clipboard_paste`）：剪贴板里没有文字但有图片时发一次空粘贴——开了括号粘贴的程序收到一对空括号，
+  Claude Code 在 macOS 上据此自己去读剪贴板里的图（同它的 Ctrl+V）；图片不经过终端，没开括号粘贴的程序什么都收不到。只对本机终端有用，
+  SSH 那头的程序读不到这台机器的剪贴板。
 - **终端里查找**（⌘F，`terminal/view.rs` 的搜索条 + `engine.rs` 的 `SearchDriver`）：用 libghostty 的 `Search`，搜回滚历史和屏幕（ASCII 字母不分大小写）。
   终端线程每轮最多搜 4ms（`SEARCH_SLICE`），结果（总数、第几个、屏幕上看得见的匹配按行切好的 `MatchSpan`）放进帧的 `search`；
   界面画淡黄底黑字、当前选中的橙底。一敲词就选中最新（最靠下）的那个，↵ / ⌘G 往更早的、⇧↵ / ⌘⇧G 往回，Esc 关（屏幕停在找到的地方）。

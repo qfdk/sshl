@@ -590,15 +590,9 @@ impl Engine {
 
     fn paste(&mut self, text: String) {
         let bracketed = self.term.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
-        let mut data = text.into_bytes();
-        let mut out = vec![0u8; data.len() + 16];
-        match libghostty_vt::paste::encode(&mut data, bracketed, &mut out) {
-            Ok(len) => {
-                out.truncate(len);
-                self.scroll_to_bottom();
-                self.shell.lock().unwrap().write(out);
-            }
-            Err(error) => tracing::warn!("paste encode failed: {error}"),
+        if let Some(out) = encode_paste(text, bracketed) {
+            self.scroll_to_bottom();
+            self.shell.lock().unwrap().write(out);
         }
     }
 
@@ -1160,6 +1154,22 @@ fn flag(on: bool, bit: u16) -> u16 {
     if on { bit } else { 0 }
 }
 
+/// 粘贴发给程序的字节；没有要发的是 None。
+fn encode_paste(text: String, bracketed: bool) -> Option<Vec<u8>> {
+    let mut data = text.into_bytes();
+    let mut out = vec![0u8; data.len() + 16];
+    match libghostty_vt::paste::encode(&mut data, bracketed, &mut out) {
+        Ok(len) => {
+            out.truncate(len);
+            (!out.is_empty()).then_some(out)
+        }
+        Err(error) => {
+            tracing::warn!("paste encode failed: {error}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,6 +1186,15 @@ mod tests {
         engine.term.vt_write(bytes);
         engine.paint().unwrap();
         shared.frame.lock().unwrap().cursor.unwrap().x
+    }
+
+    /// 空粘贴（剪贴板里只有图片时的 ⌘V）：开了括号粘贴的程序收到一对空括号，没开的什么都收不到。
+    #[test]
+    fn an_empty_paste_is_a_bare_bracket_pair_only_in_bracketed_mode() {
+        assert_eq!(encode_paste(String::new(), true).as_deref(), Some(&b"\x1b[200~\x1b[201~"[..]));
+        assert_eq!(encode_paste(String::new(), false), None);
+        assert_eq!(encode_paste("ls".into(), true).as_deref(), Some(&b"\x1b[200~ls\x1b[201~"[..]));
+        assert_eq!(encode_paste("ls".into(), false).as_deref(), Some(&b"ls"[..]));
     }
 
     /// 只移动光标（← →、Home / End）不改任何格子，帧里的光标位置也要跟上。
