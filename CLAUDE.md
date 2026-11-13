@@ -11,7 +11,7 @@ libghostty-vt（Ghostty 内核），后端是 Rust（russh + russh-sftp）。不
 
 ```
 Cargo.toml            workspace（版本号在 [workspace.package]）
-rust-toolchain.toml   Rust 1.98.1（只在本仓库固定）
+rust-toolchain.toml   Rust 1.100.0（只在本仓库固定）
 crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框架
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
@@ -29,7 +29,7 @@ brew install zig                   # Zig 0.17：libghostty-vt 构建用
 cargo run -p sshl                  # 开发版（debug；libghostty-vt 也是 Zig Debug，刷屏很慢，测性能用 release）
 cargo test -p sshl-core            # 后端单元测试（集成测试 #[ignore]，要 SSHL_SFTP_IT / SSHL_SUDO_IT 指向测试容器）
 cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键位、设置迁移、文件管理逻辑）
-cargo clippy --workspace --all-targets   # 自己的 crate 保持零警告（vendor/russh 那条不改，补丁保持最小）
+cargo clippy --workspace --all-targets   # 自己的 crate 保持零警告（vendor/russh 的 3 条不改：一条没用的 import、两条弃用的 std::u32::MAX / u8::MAX，补丁保持最小）
 scripts/bundle.sh                  # release 构建 + 组装 target/release/bundle/SSHL.app（ad-hoc 签名）
 scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 + 自定义图标），先跑 bundle.sh
 NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签名 + 公证 + 装订，产物 target/release/SSHL-v<版本>-macos.zip

@@ -1,5 +1,5 @@
 # GPUI（gpui-pre 0.3.x）用了 Rust 1.94 之后才稳定的 std API。只在本仓库固定，不改本机默认工具链。
 [toolchain]
-channel = "1.98.1"
+channel = "1.100.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
