@@ -12,11 +12,18 @@
 | --- | --- |
 | ![在回滚历史里查找，匹配处高亮](docs/screenshots/zh/find.png) | ![本地 / 远程双栏文件管理](docs/screenshots/zh/files.png) |
 
+## 赞助
+
+<a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>
+
+本项目由 [Voilà Pro](https://voilapro.app/?ref=github-sshl) 赞助支持 —— macOS 语音输入工具。按住快捷键说话，文字直接落到光标处，中英法混说也能识别。
+
 ## 功能
 
 **终端**
 - libghostty-vt 解析、GPU 绘制，内置 JetBrainsMono Nerd Font，图标与 Powerline 字形开箱可用
 - 中文、emoji 宽字符对齐；中文输入法组字直接在光标处
+- 可以配合按住说话的听写工具：终端向 macOS 报告自己是可输入的文本区，[Voilà Pro](https://voilapro.app/?ref=github-sshl) 这类工具能把说的话直接输进终端
 - 字体、字号可调，可选系统字体或自定义 `fontFamily`
 - 配色可选：默认 Carbonfox，另有 Tokyo Night、Dracula、Catppuccin、Gruvbox、Nord、One Dark、Solarized、GitHub Light 等深浅主题，选了立即生效，屏幕上已有的内容也跟着换色
 - 界面深色模式：设置 › 外观里选跟随系统 / 浅色 / 深色
@@ -88,9 +95,3 @@ scripts/bundle.sh             # 构建 SSHL.app
 ## 许可证
 
 [GNU General Public License v3.0](LICENSE)（GPL-3.0）——衍生作品须以相同许可证开源。
-
-## 赞助
-
-<a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>
-
-本项目由 [Voilà Pro](https://voilapro.app/?ref=github-sshl) 赞助支持 —— macOS 语音输入工具。按住快捷键说话，文字直接落到光标处，中英法混说也能识别。

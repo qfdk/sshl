@@ -12,11 +12,18 @@ A lightweight native SSH client for macOS: terminal and SFTP file manager in one
 | --- | --- |
 | ![Search the scrollback with highlighted matches](docs/screenshots/find.png) | ![Two-pane local / remote file manager](docs/screenshots/files.png) |
 
+## Sponsor
+
+<a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>
+
+This project is sponsored by [Voilà Pro](https://voilapro.app/?ref=github-sshl), a voice input tool for macOS. Hold a shortcut and speak, and the text lands at your cursor — mixed Chinese, English and French are recognized too.
+
 ## Features
 
 **Terminal**
 - Parsed by libghostty-vt and drawn on the GPU. JetBrainsMono Nerd Font is built in, so icons and Powerline glyphs work out of the box
 - Wide characters (CJK, emoji) stay aligned; input method composition is drawn at the cursor
+- Works with hold-to-talk dictation: the terminal reports itself to macOS as an editable text area, so tools like [Voilà Pro](https://voilapro.app/?ref=github-sshl) can speak commands and prompts straight into it
 - Adjustable font and font size; pick a system font or set a custom `fontFamily`
 - Color schemes: Carbonfox by default, plus Tokyo Night, Dracula, Catppuccin, Gruvbox, Nord, One Dark, Solarized, GitHub Light and more. A new scheme applies immediately, including to text already on screen
 - Dark mode for the interface: follow the system, light, or dark (Settings › Appearance)
@@ -88,9 +95,3 @@ The app is written to `target/release/bundle/SSHL.app`. `scripts/deploy.sh` inst
 ## License
 
 [GNU General Public License v3.0](LICENSE) (GPL-3.0) — derivative works must be released under the same license.
-
-## Sponsor
-
-<a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>
-
-This project is sponsored by [Voilà Pro](https://voilapro.app/?ref=github-sshl), a voice input tool for macOS. Hold a shortcut and speak, and the text lands at your cursor — mixed Chinese, English and French are recognized too.
