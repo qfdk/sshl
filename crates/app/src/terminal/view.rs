@@ -37,32 +37,18 @@ use crate::ui as kit;
 
 actions!(terminal, [Copy, Paste, SelectAll, Find, FindNext, FindPrev, FindClose, ZoomIn, ZoomOut, ZoomReset]);
 
-const CONTEXT: &str = "Terminal";
+pub(crate) const CONTEXT: &str = "Terminal";
 /// 搜索条（⌘F）。它和终端是并排的兄弟，不在终端的上下文里：在里面敲的字不会被终端的按键处理发给远端。
-const SEARCH_CONTEXT: &str = "TerminalSearch";
+pub(crate) const SEARCH_CONTEXT: &str = "TerminalSearch";
 
-/// 终端里的按键绑定。Tab / Shift-Tab 被 gpui-base 的 Root 绑去切换焦点，在终端里压掉，
-/// 让它们落到 key_down 编码给远端（补全、反向补全）。
+/// 终端里写死的按键绑定（拷贝、查找、字号这些能在设置里改，在 `keymap.rs`）。Tab / Shift-Tab 被 gpui-base 的 Root 绑去切换焦点，
+/// 在终端里压掉，让它们落到 key_down 编码给远端（补全、反向补全）。
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
-        KeyBinding::new("cmd-v", Paste, Some(CONTEXT)),
-        KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
-        KeyBinding::new("cmd-f", Find, Some(CONTEXT)),
-        KeyBinding::new("cmd-g", FindNext, Some(CONTEXT)),
-        KeyBinding::new("cmd-shift-g", FindPrev, Some(CONTEXT)),
-        KeyBinding::new("cmd-f", Find, Some(SEARCH_CONTEXT)),
-        KeyBinding::new("cmd-g", FindNext, Some(SEARCH_CONTEXT)),
-        KeyBinding::new("cmd-shift-g", FindPrev, Some(SEARCH_CONTEXT)),
         // 绑在比 gpui-base 输入框更深的上下文里，压过它自己的回车 / Esc
         KeyBinding::new("enter", FindNext, Some("TerminalSearch > Input")),
         KeyBinding::new("shift-enter", FindPrev, Some("TerminalSearch > Input")),
         KeyBinding::new("escape", FindClose, Some("TerminalSearch > Input")),
-        // 字号：美式键盘上 ⌘⇧= 报成 cmd-+，不按 Shift 的 ⌘= 也算放大（同浏览器）
-        KeyBinding::new("cmd-=", ZoomIn, Some(CONTEXT)),
-        KeyBinding::new("cmd-+", ZoomIn, Some(CONTEXT)),
-        KeyBinding::new("cmd--", ZoomOut, Some(CONTEXT)),
-        KeyBinding::new("cmd-0", ZoomReset, Some(CONTEXT)),
         KeyBinding::new("tab", NoAction, Some(CONTEXT)),
         KeyBinding::new("shift-tab", NoAction, Some(CONTEXT)),
     ]
@@ -1510,7 +1496,7 @@ mod tests {
             KeyBinding::new("tab", FocusNext, Some("Root")),
             KeyBinding::new("shift-tab", FocusNext, Some("Root")),
         ]);
-        keymap.add_bindings(key_bindings());
+        keymap.add_bindings(crate::keymap::default_bindings());
         assert_eq!(resolve(&keymap, "tab"), 0);
         assert_eq!(resolve(&keymap, "shift-tab"), 0);
         assert_eq!(resolve(&keymap, "cmd-c"), 1);
@@ -1519,7 +1505,7 @@ mod tests {
     #[test]
     fn zoom_keys_change_the_font_size_in_the_terminal() {
         let mut keymap = Keymap::new(Vec::new());
-        keymap.add_bindings(key_bindings());
+        keymap.add_bindings(crate::keymap::default_bindings());
         let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let first = |key: &'static str| {
             let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
@@ -1572,7 +1558,7 @@ mod tests {
             KeyBinding::new("enter", InputEnter, Some("Input")),
             KeyBinding::new("escape", InputEscape, Some("Input")),
         ]);
-        keymap.add_bindings(key_bindings());
+        keymap.add_bindings(crate::keymap::default_bindings());
         let stack: Vec<KeyContext> = ["Root", "Workspace", SEARCH_CONTEXT, "Input"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let first = |key: &'static str| {
             let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;

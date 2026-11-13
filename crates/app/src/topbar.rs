@@ -9,6 +9,7 @@ use gpui_base::input::{Input, InputEvent, InputState};
 
 use crate::assets::Icon;
 use crate::groups::{self, Side};
+use crate::keymap;
 use crate::settings;
 use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
@@ -150,17 +151,20 @@ impl Workspace {
                     .p(px(3.))
                     .flex()
                     .gap(px(2.))
-                    .children(["I", "O", "P"].map(|key| div().relative().flex_1().h_full().child(hint(key, hints)))),
+                    .children(["show-terminal", "show-files", "show-system"].map(|id| {
+                        div().relative().flex_1().h_full().when_some(keymap::hint(cx, id), |slot, key| slot.child(hint(key, hints)))
+                    })),
             )
             .into_any_element()
     }
 
     /// 顶栏的面板按钮（命令片段 ⌘⇧P、目录收藏 ⌘⇧D）和它下面的面板。
     fn panel_button(&self, kind: TopPanel, cx: &mut Context<Self>) -> AnyElement {
-        let (id, label, glyph, key, content): (&'static str, &'static str, Icon, &'static str, AnyView) = match kind {
-            TopPanel::Snippets => ("snippets", tr!("命令片段"), Icon::CodeXml, "⇧P", self.snippet_panel.clone().into()),
-            TopPanel::Favorites => ("favorites", tr!("目录收藏"), Icon::Star, "⇧D", self.favorite_panel.clone().into()),
+        let (id, label, glyph, command, content): (&'static str, &'static str, Icon, &'static str, AnyView) = match kind {
+            TopPanel::Snippets => ("snippets", tr!("命令片段"), Icon::CodeXml, "show-snippets", self.snippet_panel.clone().into()),
+            TopPanel::Favorites => ("favorites", tr!("目录收藏"), Icon::Star, "show-favorites", self.favorite_panel.clone().into()),
         };
+        let key = keymap::hint(cx, command);
         let open = self.top_panel == Some(kind);
         let button = div()
             .id(id)
@@ -179,7 +183,7 @@ impl Workspace {
             .when(!self.hint_visible, |b| b.tooltip(move |window, cx| kit::tooltip(label.into(), window, cx)))
             .child(kit::icon_sized(glyph, 16.))
             // 和「终端 / 文件管理 / 系统」的 I / O / P 同一个基准：分段控件里的选项内缩 3px，角标相对选项定位
-            .child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint(key, self.hint_visible))))
+            .when_some(key, |b, key| b.child(div().absolute().inset(px(3.)).child(div().relative().size_full().child(hint(key, self.hint_visible)))))
             .on_hover(cx.listener(move |this, hovered: &bool, _, _| {
                 // 从一个按钮滑到另一个：前一个的「移出」可能晚到，别把后一个的记号清掉
                 if *hovered {
@@ -333,6 +337,7 @@ impl Workspace {
             return div().into_any_element();
         }
         let hints = self.hint_visible;
+        let tab_keys: Vec<Option<String>> = (1..=9).map(|n| keymap::hint(cx, &format!("select-tab-{n}"))).collect();
         let tabs: Vec<AnyElement> = self
             .sessions
             .iter()
@@ -413,9 +418,9 @@ impl Workspace {
                                 this.disconnect(&close_id, window, cx);
                             })),
                     )
-                    // ⌘ 角标：前 9 个标签浮出序号（⌘1 … ⌘9）；正在改名的不显示。延后画：gpui 的边框画在子元素之后，
-                    // 不延后的话当前标签的边框线会压在角标上
-                    .when(index < 9 && rename.is_none(), |t| t.child(gpui::deferred(hint((index + 1).to_string(), hints))));
+                    // ⌘ 角标：前 9 个标签浮出切过去的快捷键（默认 ⌘1 … ⌘9，设置里改过的照改的）；正在改名的不显示。
+                    // 延后画：gpui 的边框画在子元素之后，不延后的话当前标签的边框线会压在角标上
+                    .when_some(tab_keys.get(index).cloned().flatten().filter(|_| rename.is_none()), |t, key| t.child(gpui::deferred(hint(key, hints))));
                 // 改名中：不接单击 / 双击 / 右键 / 拖动，在输入框里点、拖选文字只归输入框
                 if rename.is_some() {
                     return tab.into_any_element();
@@ -634,8 +639,7 @@ mod tests {
             KeyBinding::new("enter", InputEnter, Some("Input")),
             KeyBinding::new("escape", InputEscape, Some("Input")),
         ]);
-        keymap.add_bindings(crate::workspace::key_bindings());
-        keymap.add_bindings(key_bindings());
+        keymap.add_bindings(crate::keymap::default_bindings());
         let stack: Vec<KeyContext> = ["Root", "Workspace", RENAME_CONTEXT, "Input"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let first = |key: &'static str| {
             let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;

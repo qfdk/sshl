@@ -9,6 +9,7 @@ use sshl_core::config_store::StoredConnection;
 
 use crate::assets::{APP_ICON, APP_ICON_SIZE, Icon};
 use crate::groups::{self, Side};
+use crate::keymap;
 use crate::settings;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
@@ -33,13 +34,13 @@ impl Render for DragPreview {
 
 /// 收起 / 展开侧栏的按钮（⌘B）：展开时在侧栏头部，收起时在顶栏红绿灯右边。
 pub(crate) fn sidebar_toggle_button(collapsed: bool, cx: &mut Context<Workspace>) -> gpui::Stateful<gpui::Div> {
-    let (label, tip) = if collapsed { (tr!("展开侧边栏"), tr!("展开侧边栏  ⌘B")) } else { (tr!("收起侧边栏"), tr!("收起侧边栏  ⌘B")) };
+    let label = if collapsed { tr!("展开侧边栏") } else { tr!("收起侧边栏") };
     kit::button("toggle-sidebar", Variant::Ghost)
         .w(px(32.))
         .h(px(32.))
         .px_0()
         .aria_label(label)
-        .tooltip(move |window, cx| kit::tooltip(tip.into(), window, cx))
+        .tooltip(move |window, cx| kit::tooltip(keymap::with_shortcut(cx, label, "toggle-sidebar"), window, cx))
         .child(kit::icon(Icon::PanelLeft))
         .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)))
 }
@@ -67,7 +68,7 @@ impl Workspace {
             .h(px(32.))
             .px_0()
             .aria_label(tr!("新建连接"))
-            .tooltip(|window, cx| kit::tooltip(tr!("新建连接  ⌘T").into(), window, cx))
+            .tooltip(|window, cx| kit::tooltip(keymap::with_shortcut(cx, tr!("新建连接"), "new-connection"), window, cx))
             .child(kit::icon(Icon::Plus))
             .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx)));
         // 设置放在标题行（原来单独占侧栏底部一行，底部状态栏去掉后那一行只剩它）
@@ -76,7 +77,7 @@ impl Workspace {
             .h(px(32.))
             .px_0()
             .aria_label(tr!("设置"))
-            .tooltip(|window, cx| kit::tooltip(tr!("设置  ⌘,").into(), window, cx))
+            .tooltip(|window, cx| kit::tooltip(keymap::with_shortcut(cx, tr!("设置"), "open-settings"), window, cx))
             .child(kit::icon(Icon::Settings))
             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)));
         div()

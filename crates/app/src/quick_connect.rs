@@ -19,14 +19,14 @@ use crate::ui as kit;
 
 actions!(quick_connect, [QuickPrev, QuickNext, QuickOpen, QuickClose]);
 
-pub fn bind_keys(cx: &mut App) {
+pub fn key_bindings() -> Vec<KeyBinding> {
     // 绑在比 gpui-base 输入框更深的上下文里，压过它自己的 上 / 下 / 回车 / Esc
-    cx.bind_keys([
+    vec![
         KeyBinding::new("up", QuickPrev, Some("QuickConnect > Input")),
         KeyBinding::new("down", QuickNext, Some("QuickConnect > Input")),
         KeyBinding::new("enter", QuickOpen, Some("QuickConnect > Input")),
         KeyBinding::new("escape", QuickClose, Some("QuickConnect > Input")),
-    ]);
+    ]
 }
 
 // ---------------------------------------------------------------- 纯逻辑

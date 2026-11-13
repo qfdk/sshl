@@ -11,6 +11,7 @@ mod files;
 mod groups;
 mod i18n_en;
 mod import_dialog;
+mod keymap;
 mod prompts;
 mod quick_connect;
 mod screen;
@@ -29,7 +30,7 @@ use std::borrow::Cow;
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
-use gpui::{App, AppContext, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions, point, px};
+use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions, point, px};
 
 use workspace::Workspace;
 
@@ -86,7 +87,8 @@ fn main() {
             ])
             .expect("load bundled terminal font");
 
-        bind_keys(cx);
+        // 快捷键：gpui-base 的、设置里能改的、写死的，一次建好（键盘布局变了、设置改了会重建）
+        keymap::init(cx);
         // ⌘Q 先到工作区（开着标签时要确认，见 Workspace::request_quit）；没有窗口接的时候才到这里
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &Hide, cx| cx.hide());
@@ -180,21 +182,4 @@ pub fn set_menus(cx: &mut App) {
         },
         Menu { name: tr!("窗口").into(), items: vec![MenuItem::action(tr!("最小化"), workspace::Minimize)], disabled: false },
     ]);
-}
-
-fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-h", Hide, None),
-        KeyBinding::new("cmd-alt-h", HideOthers, None),
-        KeyBinding::new("cmd-m", workspace::Minimize, None),
-    ]);
-    cx.bind_keys(terminal::view::key_bindings());
-    workspace::bind_keys(cx);
-    // 晚于 gpui-base：同一节点上后绑的优先，面板里的上下 / 回车 / Esc 归片段列表，标签改名框里的回车 / Esc 归改名，分组框里的上下 / Esc 归分组下拉
-    snippets::bind_keys(cx);
-    favorites::bind_keys(cx);
-    quick_connect::bind_keys(cx);
-    cx.bind_keys(topbar::key_bindings());
-    cx.bind_keys(connection_dialog::key_bindings());
 }

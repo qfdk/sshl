@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -101,18 +101,9 @@ fn columns_for(kind: PaneKind, width: Option<f32>) -> Columns {
 }
 const MONO_FONT: &str = "Menlo";
 
-fn bind_keys(cx: &mut App) {
-    static BOUND: Once = Once::new();
-    // 晚于 gpui-base 绑定：同一节点上后绑的优先，地址栏里的方向键 / Tab / Esc 先给补全
-    BOUND.call_once(|| cx.bind_keys(key_bindings()));
-}
-
-fn key_bindings() -> Vec<KeyBinding> {
+/// 写死的按键（⌘A / ⌘⇧. / ⌘D 能在设置里改，在 `keymap.rs`）。要晚于 gpui-base 绑：同一节点上后绑的优先，地址栏里的方向键 / Tab / Esc 先给补全。
+pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("cmd-a", SelectAllFiles, Some("FileManager")),
-        // ⌘⇧.：macOS 把 Shift 并进字符送来「⌘>」，写 cmd-shift-. 匹配不上
-        KeyBinding::new("cmd->", ToggleHiddenFiles, Some("FileManager")),
-        KeyBinding::new("cmd-d", ToggleBookmark, Some("FileManager")),
         KeyBinding::new("escape", ClearFileSelection, Some("FileManager")),
         KeyBinding::new("down", PathNext, Some("FilePathBar > Input")),
         KeyBinding::new("up", PathPrev, Some("FilePathBar > Input")),
@@ -374,7 +365,6 @@ type AfterSync = Box<dyn FnOnce(&mut FileManager, &mut Window, &mut Context<File
 
 impl FileManager {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        bind_keys(cx);
         let local = Pane::new(PaneKind::Local, window, cx);
         let remote = Pane::new(PaneKind::Remote, window, cx);
         remote.input.update(cx, |input, cx| input.set_disabled(true, cx));
@@ -1501,7 +1491,8 @@ impl FileManager {
     /// 地址栏右端的收藏开关：当前目录已收藏是实心蓝色。
     fn bookmark_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let marked = self.is_bookmarked(&self.remote.path);
-        let (label, tip) = if marked { (tr!("取消收藏当前目录"), tr!("取消收藏  ⌘D")) } else { (tr!("收藏当前目录"), tr!("收藏当前目录  ⌘D")) };
+        let label = if marked { tr!("取消收藏当前目录") } else { tr!("收藏当前目录") };
+        let tip = if marked { tr!("取消收藏") } else { tr!("收藏当前目录") };
         div()
             .id("path-bookmark")
             .role(Role::Button)
@@ -1519,7 +1510,7 @@ impl FileManager {
                 let s = s.bg(theme::alpha(ui::FOREGROUND, 0.06));
                 if marked { s } else { s.text_color(theme::color(ui::FOREGROUND)) }
             })
-            .tooltip(move |window, cx| kit::tooltip(tip.into(), window, cx))
+            .tooltip(move |window, cx| kit::tooltip(crate::keymap::with_shortcut(cx, tip, "files-toggle-bookmark"), window, cx))
             // 点开关不弹收藏列表（地址栏按下会弹）
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_bookmark(window, cx)))
@@ -2249,7 +2240,7 @@ impl FileManager {
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
                         .child(tr!("已隐藏 {} 个隐藏文件", hidden))
-                        .child(div().text_color(theme::color(ui::PRIMARY)).child(tr!("显示  ⌘⇧.")))
+                        .child(div().text_color(theme::color(ui::PRIMARY)).child(crate::keymap::with_shortcut(cx, tr!("显示"), "files-toggle-hidden")))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_hidden_files(window, cx))),
                 )
             })
@@ -2935,7 +2926,7 @@ fn list_directory(kind: PaneKind, session_id: Option<String>, path: String) -> i
 mod tests {
     use gpui::{KeyContext, Keymap, Keystroke, Modifiers};
 
-    use super::{Columns, NAME_MIN_WIDTH, Op, PaneKind, ToggleHiddenFiles, columns_for, conflict_text, finished_message, key_bindings};
+    use super::{Columns, NAME_MIN_WIDTH, Op, PaneKind, ToggleHiddenFiles, columns_for, conflict_text, finished_message};
 
     #[test]
     fn narrow_panes_drop_columns_before_the_name_disappears() {
@@ -2961,7 +2952,7 @@ mod tests {
     /// 绑定写成 cmd-shift-. 永远对不上。
     #[test]
     fn cmd_shift_period_toggles_hidden_files() {
-        let keymap = Keymap::new(key_bindings());
+        let keymap = Keymap::new(crate::keymap::default_bindings());
         let stack: Vec<KeyContext> = ["Root", "Workspace", "FileManager"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let typed = Keystroke { modifiers: Modifiers::command(), key: ">".into(), key_char: None };
         let (bindings, _) = keymap.bindings_for_input(&[typed], &stack);

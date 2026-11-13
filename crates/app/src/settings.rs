@@ -6,6 +6,7 @@ use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
 use sshl_core::i18n::{self, Lang};
 
+use crate::keymap::Overrides;
 use crate::theme::{Appearance, term};
 
 pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
@@ -55,6 +56,8 @@ pub struct Settings {
     pub appearance: Appearance,
     /// 界面语言：跟随系统 / 简体中文 / English。
     pub language: Language,
+    /// 改过的快捷键（命令 id → 快捷键，空 = 不要快捷键）；没改过的不存，用默认的（`keymap::COMMANDS`）。
+    pub key_bindings: Overrides,
 }
 
 impl Default for Settings {
@@ -71,6 +74,7 @@ impl Default for Settings {
             terminal_theme: term::DEFAULT_ID.into(),
             appearance: Appearance::System,
             language: Language::System,
+            key_bindings: Overrides::new(),
         }
     }
 }
@@ -118,12 +122,18 @@ pub fn preview(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     replace(cx, settings);
 }
 
-/// 先换语言再换设置：盯着设置的地方（输入框的占位字）被叫到时，`tr!` 已经是新语言了。菜单栏的文字是建的时候定的，语言变了重建。
+/// 先换语言再换设置：盯着设置的地方（输入框的占位字）被叫到时，`tr!` 已经是新语言了。
+/// 快捷键改了就重建键位表。菜单栏的文字和快捷键是建的时候定的，语言或快捷键变了都重建菜单。
 pub fn replace(cx: &mut App, settings: Settings) {
-    if i18n::set(settings.language.resolve()) {
+    let language_changed = i18n::set(settings.language.resolve());
+    let keys_changed = cx.global::<Settings>().key_bindings != settings.key_bindings;
+    cx.set_global(settings);
+    if keys_changed {
+        crate::keymap::apply(cx);
+    }
+    if language_changed || keys_changed {
         crate::set_menus(cx);
     }
-    cx.set_global(settings);
     cx.refresh_windows();
 }
 
@@ -305,6 +315,18 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""appearance":"dark""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn changed_shortcuts_round_trip_and_old_settings_have_none() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert!(old.key_bindings.is_empty(), "旧设置里没有这一项：全用默认");
+        let mut s = Settings::default();
+        s.key_bindings.insert("quick-connect".into(), vec!["ctrl-alt-k".into()]);
+        s.key_bindings.insert("show-system".into(), Vec::new());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""keyBindings":{"quick-connect":["ctrl-alt-k"],"show-system":[]}"#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
     }
 
     #[test]

@@ -20,14 +20,14 @@ use crate::ui as kit;
 
 actions!(favorites, [FavoritePrev, FavoriteNext, FavoriteGo, FavoriteClose]);
 
-pub fn bind_keys(cx: &mut App) {
+pub fn key_bindings() -> Vec<KeyBinding> {
     // 绑在比 gpui-base 输入框更深的上下文里，压过它自己的 上 / 下 / 回车 / Esc
-    cx.bind_keys([
+    vec![
         KeyBinding::new("up", FavoritePrev, Some("FavoritePanel > Input")),
         KeyBinding::new("down", FavoriteNext, Some("FavoritePanel > Input")),
         KeyBinding::new("enter", FavoriteGo, Some("FavoritePanel > Input")),
         KeyBinding::new("escape", FavoriteClose, Some("FavoritePanel > Input")),
-    ]);
+    ]
 }
 
 // ---------------------------------------------------------------- 纯逻辑

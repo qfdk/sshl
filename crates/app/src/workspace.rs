@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseMoveEvent, ParentElement, Pixels, PlatformInput, Point, Render, SharedString,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseMoveEvent, ParentElement, Pixels, PlatformInput, Point, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, Window, actions, canvas, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
@@ -37,41 +37,10 @@ actions!(
     [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, ShowFavorites, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
 );
 
-/// ⌘1 … ⌘9：切到第 n 个标签（从 1 数，标签栏从左到右，本机标签也算）。
+/// ⌘1 … ⌘9：切到第 n 个标签（从 1 数，标签栏从左到右，本机标签也算）。快捷键都在 `keymap.rs`。
 #[derive(Clone, PartialEq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
 pub struct SelectTab(pub usize);
-
-/// ⌘1 … ⌘9 依次对应第 1 … 9 个标签（KeyBinding 要 'static 的按键串）。
-const TAB_KEYS: [&str; 9] = ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"];
-
-pub fn key_bindings() -> Vec<KeyBinding> {
-    let mut bindings = vec![
-        KeyBinding::new("cmd-w", CloseTab, None),
-        // 视图：终端 / 文件管理 / 系统，顺序同顶栏（系统不常用，放最后）；数字键留给切标签
-        KeyBinding::new("cmd-i", ShowTerminal, Some("Workspace")),
-        KeyBinding::new("cmd-o", ShowFiles, Some("Workspace")),
-        KeyBinding::new("cmd-p", ShowSystem, Some("Workspace")),
-        KeyBinding::new("cmd-shift-p", ShowSnippets, Some("Workspace")),
-        KeyBinding::new("cmd-shift-d", ShowFavorites, Some("Workspace")),
-        KeyBinding::new("cmd-t", NewConnection, Some("Workspace")),
-        KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
-        KeyBinding::new("cmd-b", ToggleSidebar, Some("Workspace")),
-        KeyBinding::new("cmd-k", OpenQuickConnect, Some("Workspace")),
-        // 本机终端是 ⌘N（用户开终端的第一反应是它），新建连接让到 ⌘T；标签切换同 Ghostty / Terminal / 浏览器
-        KeyBinding::new("cmd-n", NewLocalTerminal, Some("Workspace")),
-        KeyBinding::new("cmd-}", NextTab, Some("Workspace")),
-        KeyBinding::new("cmd-{", PrevTab, Some("Workspace")),
-        KeyBinding::new("ctrl-tab", NextTab, Some("Workspace")),
-        KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Workspace")),
-    ];
-    bindings.extend(TAB_KEYS.into_iter().zip(1..).map(|(key, n)| KeyBinding::new(key, SelectTab(n), Some("Workspace"))));
-    bindings
-}
-
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys(key_bindings());
-}
 
 /// 连接遮罩延迟出现：预热池命中时整个连接 <300ms，像本地终端一样直接出终端，不闪一层遮罩。
 const LOADING_DELAY: Duration = Duration::from_millis(300);
@@ -1584,7 +1553,7 @@ impl Render for Workspace {
                                                 .justify_center()
                                                 .flex_col()
                                                 .gap_4()
-                                                .child(div().text_sm().text_color(theme::color(empty_hint)).child(if sidebar_collapsed { tr!("按 ⌘K 快速连接，或新建连接开始使用") } else { tr!("点击左侧连接或创建新连接开始使用") }))
+                                                .child(div().text_sm().text_color(theme::color(empty_hint)).child(empty_page_hint(sidebar_collapsed, crate::keymap::shortcut(cx, "quick-connect"))))
                                                 .child(
                                                     div()
                                                         .flex()
@@ -1596,7 +1565,7 @@ impl Render for Workspace {
                                                                 .on_click(cx.listener(|this, _, window, cx| this.open_connection_dialog(None, window, cx))),
                                                         )
                                                         .child(
-                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), tr!("本机终端 ⌘N"))
+                                                            kit::labeled_button("empty-local-terminal", kit::Variant::Outline, Some(crate::assets::Icon::SquareTerminal), crate::keymap::with_shortcut(cx, tr!("本机终端"), "new-local-terminal"))
                                                                 .h(px(32.))
                                                                 .text_size(px(13.))
                                                                 .on_click(cx.listener(|this, _, window, cx| this.new_local_terminal(window, cx))),
@@ -1672,6 +1641,15 @@ impl Workspace {
     }
 }
 
+/// 没会话时页面中间的提示：侧栏收起时没有连接列表可点，提快速连接（它有快捷键才提）。
+fn empty_page_hint(sidebar_collapsed: bool, quick_connect: Option<String>) -> String {
+    match (sidebar_collapsed, quick_connect) {
+        (false, _) => tr!("点击左侧连接或创建新连接开始使用").into(),
+        (true, Some(keys)) => tr!("按 {} 快速连接，或新建连接开始使用", keys),
+        (true, None) => tr!("新建连接开始使用").into(),
+    }
+}
+
 /// 退出前要不要问：开着标签时问（返回要说的话），没有标签不问。
 fn quit_question(tabs: usize) -> Option<String> {
     (tabs > 0).then(|| tr!("开着的 {} 个标签会关闭，连着的会话会断开。", tabs))
@@ -1700,17 +1678,22 @@ mod tests {
     }
 
     #[test]
+    fn empty_page_mentions_quick_connect_only_when_it_has_a_shortcut() {
+        assert_eq!(empty_page_hint(false, Some("⌘K".into())), "点击左侧连接或创建新连接开始使用", "侧栏开着：点左边的连接");
+        assert_eq!(empty_page_hint(true, Some("⌃⌥K".into())), "按 ⌃⌥K 快速连接，或新建连接开始使用", "写的是设置里改过的键");
+        assert_eq!(empty_page_hint(true, None), "新建连接开始使用", "快速连接没有快捷键就不提");
+    }
+
+    #[test]
     fn cmd_numbers_switch_tabs_and_cmd_letters_switch_views() {
-        let mut keymap = Keymap::new(key_bindings());
         // 终端自己的 ⌘ 键（⌘C / ⌘F / ⌘0 …）不能把这些抢走
-        keymap.add_bindings(crate::terminal::view::key_bindings());
+        let keymap = Keymap::new(crate::keymap::default_bindings());
         let stack: Vec<KeyContext> = ["Root", "Workspace", "Terminal"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let first = |key: &'static str| -> Option<Box<dyn Action>> {
             let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
             bindings.first().map(|b| b.action().boxed_clone())
         };
-        for (key, n) in TAB_KEYS.into_iter().zip(1..) {
-            assert_eq!(key, format!("cmd-{n}"));
+        for (key, n) in ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8", "cmd-9"].into_iter().zip(1..) {
             let action = first(key).unwrap_or_else(|| panic!("{key} 没有绑定"));
             assert!(action.partial_eq(&SelectTab(n)), "{key} 应切到第 {n} 个标签，实际是 {}", action.name());
         }

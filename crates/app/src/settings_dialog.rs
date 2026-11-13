@@ -1,10 +1,10 @@
-//! 设置（旧 SettingsDialog.tsx + GroupTree.tsx）：终端字号 / 字体 / 配色（实时预览），分组管理（改完要点保存）。
+//! 设置（旧 SettingsDialog.tsx + GroupTree.tsx）：终端字号 / 字体 / 配色、外观、快捷键（实时预览，点保存才写盘），分组管理（改完要点保存）。
 
 use std::collections::HashSet;
 
 use gpui::{
     AnyElement, AppContext, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, Role, SharedString,
+    HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, Render, Role, SharedString,
     StatefulInteractiveElement, StyledText, Styled, Subscription, Toggled, Window, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
@@ -13,6 +13,7 @@ use sshl_core::config_store::{self, ConnectionLayoutInput, StoredConnection};
 use crate::assets::Icon;
 use crate::backend;
 use crate::groups::{self, Side};
+use crate::keymap::{self, COMMANDS, Command, Group, Recorded};
 use crate::prompts::{self, Options};
 use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Language, Settings};
 use crate::sidebar::DragPreview;
@@ -68,6 +69,7 @@ fn presets(installed: &[String]) -> Vec<Preset> {
 enum Tab {
     Font,
     Appearance,
+    Shortcuts,
     Groups,
 }
 
@@ -111,6 +113,12 @@ pub struct SettingsDialog {
     renames: Vec<(String, Entity<InputState>)>,
     expanded: HashSet<String>,
     drop: Option<GroupDrop>,
+    /// 正在录哪条命令的快捷键（「快捷键」页里点了那一格）。
+    recording: Option<&'static str>,
+    /// 录的时候按了不带 ⌘ / ⌃ / ⌥ 的键：格子里提示要带修饰键。
+    record_hint: bool,
+    /// 录的时候截住所有按键（先于快捷键生效，⌘Q / ⌘W 也录得进来）；不录了就丢掉。
+    recorder: Option<Subscription>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -156,6 +164,9 @@ impl SettingsDialog {
             renames: Vec::new(),
             expanded: HashSet::new(),
             drop: None,
+            recording: None,
+            record_hint: false,
+            recorder: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -219,6 +230,7 @@ impl SettingsDialog {
             right_click_paste: snapshot.right_click_paste,
             terminal_theme: snapshot.terminal_theme,
             appearance: snapshot.appearance,
+            key_bindings: snapshot.key_bindings,
             ..current.clone()
         };
         if restored != current {
@@ -273,6 +285,91 @@ impl SettingsDialog {
     fn pick_theme(&mut self, id: &'static str, cx: &mut Context<Self>) {
         settings::preview(cx, |s| s.terminal_theme = id.into());
         cx.notify();
+    }
+
+    /// 点了某条命令的快捷键格子：开始录（再点一下同一格 = 不录了）。
+    fn toggle_recording(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        if self.recording == Some(id) {
+            self.stop_recording(cx);
+            return;
+        }
+        self.recording = Some(id);
+        self.record_hint = false;
+        let this = cx.entity().downgrade();
+        self.recorder = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            let _ = this.update(cx, |this, cx| this.recorded(&event.keystroke, window, cx));
+        }));
+        cx.notify();
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        self.recording = None;
+        self.record_hint = false;
+        self.recorder = None;
+        cx.notify();
+    }
+
+    fn recorded(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.recording else { return };
+        let Some(command) = keymap::find(id) else { return };
+        match keymap::record(stroke) {
+            // 单按修饰键（松开时也报一次）：放过去，接着等
+            Recorded::Ignore => return,
+            Recorded::Cancel => self.stop_recording(cx),
+            Recorded::NeedsModifier => {
+                self.record_hint = true;
+                cx.notify();
+            }
+            Recorded::Clear => {
+                self.stop_recording(cx);
+                self.set_keys(id, Vec::new(), cx);
+            }
+            Recorded::Set(keys) => {
+                self.stop_recording(cx);
+                match keymap::conflict(id, &keys, keymap::active(cx)) {
+                    None => self.set_keys(id, vec![keys], cx),
+                    Some(other) => self.confirm_takeover(command, other, keys, window, cx),
+                }
+            }
+        }
+        // 这一下是录快捷键用的：不再当快捷键、也不给对话框（Esc 不关对话框）
+        cx.stop_propagation();
+    }
+
+    /// 改快捷键先预览（键位表马上换），点保存才写盘，关掉不保存会还原。
+    fn set_keys(&mut self, id: &str, keys: Vec<String>, cx: &mut Context<Self>) {
+        let mut overrides = settings::get(cx).key_bindings.clone();
+        keymap::assign_in(cx, &mut overrides, id, keys);
+        settings::preview(cx, |s| s.key_bindings = overrides);
+        cx.notify();
+    }
+
+    /// 录的键已经给了别的命令：问一下，改用的话那条命令去掉这个键（它还有别的键就留着别的）。
+    fn confirm_takeover(&mut self, command: &'static Command, other: &'static Command, keys: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (label, other_label) = (command.label(), other.label());
+        let options = prompts::Options::new(tr!("{} 已经是「{}」的快捷键", keymap::display(&keys), other_label))
+            .message(tr!("改给「{}」后，「{}」就不再用这个快捷键。", label, other_label))
+            .confirm(tr!("改用"));
+        let answer = prompts::confirm(window, cx, options);
+        cx.spawn(async move |this, cx| {
+            if !answer.await.unwrap_or(false) {
+                return;
+            }
+            let _ = this.update(cx, |_, cx| {
+                let remaining: Vec<String> = keymap::active(cx).get(other.id).into_iter().flatten().filter(|k| **k != keys).cloned().collect();
+                let mut overrides = settings::get(cx).key_bindings.clone();
+                keymap::assign_in(cx, &mut overrides, other.id, remaining);
+                keymap::assign_in(cx, &mut overrides, command.id, vec![keys]);
+                settings::preview(cx, |s| s.key_bindings = overrides);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn reset_shortcuts(&mut self, cx: &mut Context<Self>) {
+        self.stop_recording(cx);
+        settings::preview(cx, |s| s.key_bindings.clear());
     }
 
     fn add_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -373,12 +470,13 @@ impl Render for SettingsDialog {
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.tab = tab;
-                    cx.notify();
+                    this.stop_recording(cx);
                 }))
         };
         let panel = match self.tab {
             Tab::Font => self.font_panel(window, cx),
             Tab::Appearance => self.appearance_panel(cx),
+            Tab::Shortcuts => self.shortcuts_panel(window, cx),
             Tab::Groups => self.groups_panel(window, cx),
         };
         let body = div()
@@ -425,6 +523,7 @@ impl Render for SettingsDialog {
                             .border_color(theme::color(ui::BORDER))
                             .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, tr!("终端"), self.tab == Tab::Font, cx))
                             .child(tab_button("settings-tab-appearance", Tab::Appearance, Icon::Moon, tr!("外观"), self.tab == Tab::Appearance, cx))
+                            .child(tab_button("settings-tab-shortcuts", Tab::Shortcuts, Icon::Keyboard, tr!("快捷键"), self.tab == Tab::Shortcuts, cx))
                             .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, tr!("分组管理"), self.tab == Tab::Groups, cx)),
                     )
                     // 窗口矮（最小 600）时「终端」这页放不下：右边这块自己滚动，标题栏和保存按钮不会被挤出窗口
@@ -713,6 +812,104 @@ impl SettingsDialog {
                     .border_t_1()
                     .border_color(theme::color(ui::BORDER))
                     .child(kit::labeled_button("appearance-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
+            )
+            .into_any_element()
+    }
+
+    /// 快捷键：按分组列出能改的命令。点格子再按新的组合键（录的是这个键盘布局下实际按出来的键）；
+    /// 改过的那一行多一个「恢复默认」。和「终端」「外观」页一样先预览，点保存才写盘。
+    /// 列表很长：自己滚动，底下的「还原默认 / 保存」一直看得见（同「分组管理」页）。
+    fn shortcuts_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let changed: HashSet<&str> = settings::get(cx).key_bindings.keys().filter_map(|id| keymap::find(id)).map(|c| c.id).collect();
+        let active = keymap::active(cx).clone();
+        let sections: Vec<AnyElement> = Group::ALL
+            .into_iter()
+            .map(|group| {
+                let rows: Vec<AnyElement> = COMMANDS
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, command)| command.group == group)
+                    .map(|(index, command)| self.shortcut_row(index, command, active.get(command.id).map_or(&[][..], Vec::as_slice), changed.contains(command.id), cx))
+                    .collect();
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme::color(ui::MUTED_FOREGROUND)).child(group.label()))
+                    .children(rows)
+                    .into_any_element()
+            })
+            .collect();
+        // 对话框最高是窗口高减 96（见 render），再除去标题栏、说明、底栏和内边距
+        let list_height = (window.viewport_size().height - px(250.)).clamp(px(240.), px(440.));
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("点快捷键后按新的组合键：Esc 取消，⌫ 去掉")))
+            .child(div().id("shortcut-list").max_h(list_height).overflow_y_scroll().pr_2().flex().flex_col().gap_4().children(sections))
+            .child(
+                div()
+                    .pt_3()
+                    .flex()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(theme::color(ui::BORDER))
+                    .child(kit::labeled_button("shortcuts-reset", Variant::Outline, None, tr!("还原默认")).on_click(cx.listener(|this, _, _, cx| this.reset_shortcuts(cx))))
+                    .child(kit::labeled_button("shortcuts-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
+            )
+            .into_any_element()
+    }
+
+    fn shortcut_row(&self, index: usize, command: &'static Command, keys: &[String], changed: bool, cx: &mut Context<Self>) -> AnyElement {
+        let id = command.id;
+        let label = command.label();
+        let recording = self.recording == Some(id);
+        let text: SharedString = if recording {
+            if self.record_hint { tr!("要带 ⌘、⌃ 或 ⌥").into() } else { tr!("按下新的快捷键…").into() }
+        } else if keys.is_empty() {
+            tr!("无").into()
+        } else {
+            keys.iter().map(|keys| keymap::display(keys)).collect::<Vec<_>>().join("  ").into()
+        };
+        let muted = recording || keys.is_empty();
+        div()
+            .h(px(34.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(label.clone()))
+            .when(changed && !recording, |row| {
+                row.child(
+                    kit::mini_button(("shortcut-reset", index), Icon::RotateCcw, tr!("恢复默认"), ui::MUTED_FOREGROUND).on_click(cx.listener(move |this, _, _, cx| {
+                        settings::preview(cx, |s| {
+                            s.key_bindings.remove(id);
+                        });
+                        this.stop_recording(cx);
+                    })),
+                )
+            })
+            .child(
+                div()
+                    .id(("shortcut", index))
+                    .role(Role::Button)
+                    .aria_label(tr!("{} 的快捷键", label))
+                    .flex_shrink_0()
+                    .min_w(px(132.))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(theme::color(if recording { ui::RING } else { ui::CONTROL_BORDER }))
+                    .bg(theme::color(ui::CONTROL))
+                    .text_sm()
+                    .text_color(theme::color(if muted { ui::MUTED_FOREGROUND } else { ui::FOREGROUND }))
+                    .cursor_pointer()
+                    .when(!recording, |b| b.hover(|s| s.border_color(theme::color(ui::RING))))
+                    .child(text)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_recording(id, cx))),
             )
             .into_any_element()
     }

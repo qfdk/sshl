@@ -58,6 +58,9 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 - Load, memory, disk, uptime
 - Three lists — processes, listening ports, systemd services — with search and sorting. You can kill processes, start / stop services, and toggle start-on-boot
 
+**Shortcuts**
+- Every shortcut above can be changed in Settings → Shortcuts: click one and press the new keys. The defaults follow your keyboard layout (on a French AZERTY keyboard ⌘1 is ⌘&, as in other Mac apps)
+
 ## Getting started
 
 ### Download

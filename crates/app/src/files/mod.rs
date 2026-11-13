@@ -11,4 +11,4 @@ mod view;
 
 pub use delete::shell_quote;
 pub use model::{bookmark_label, bookmark_lines};
-pub use view::{FileManager, FileManagerEvent, FileSession};
+pub use view::{FileManager, FileManagerEvent, FileSession, SelectAllFiles, ToggleBookmark, ToggleHiddenFiles, key_bindings};

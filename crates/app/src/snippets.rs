@@ -17,9 +17,9 @@ use crate::ui::{self as kit, Variant};
 
 actions!(snippets, [SnippetPrev, SnippetNext, SnippetRun, SnippetInsert, SnippetClose, SnippetSave]);
 
-pub fn bind_keys(cx: &mut App) {
+pub fn key_bindings() -> Vec<KeyBinding> {
     // 绑在比 gpui-base 输入框更深的上下文里，压过它自己的 上 / 下 / 回车 / Esc
-    cx.bind_keys([
+    vec![
         KeyBinding::new("up", SnippetPrev, Some("SnippetPanel > Input")),
         KeyBinding::new("down", SnippetNext, Some("SnippetPanel > Input")),
         KeyBinding::new("enter", SnippetRun, Some("SnippetPanel > Input")),
@@ -30,7 +30,7 @@ pub fn bind_keys(cx: &mut App) {
         // 点了「所有服务器 / 本机」之后焦点在对话框本身上
         KeyBinding::new("cmd-enter", SnippetSave, Some("SnippetDialog")),
         KeyBinding::new("escape", SnippetClose, Some("SnippetDialog")),
-    ]);
+    ]
 }
 
 // ---------------------------------------------------------------- 纯逻辑
