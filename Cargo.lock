@@ -5557,7 +5557,7 @@ dependencies = [
 
 [[package]]
 name = "sshl"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5579,7 +5579,7 @@ dependencies = [
 
 [[package]]
 name = "sshl-core"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
