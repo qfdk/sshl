@@ -1076,6 +1076,12 @@ fn search_label(needle: &str, info: Option<&SearchInfo>) -> String {
     }
 }
 
+/// 输入法组字里有没有要画的字。鼠须管把拼音显示在候选框里时只塞一个占位（全角空格，或去下划线补丁版的零宽空格），
+/// 画出来只是光标边上一截下划线。
+fn visible_composition(text: &str) -> bool {
+    text.chars().any(|c| !c.is_whitespace() && !matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}'))
+}
+
 /// 这一格在不在搜索匹配里（`spans` 是这一行的，按列排好）。
 fn highlighted(spans: &[MatchSpan], x: usize) -> bool {
     spans.iter().any(|span| usize::from(span.start) <= x && x < usize::from(span.end))
@@ -1358,7 +1364,7 @@ impl Element for TerminalElement {
             }
 
             // 输入法组字：画在光标处，带下划线；用终端的默认前景 / 底色（跟着配色，程序用 OSC 10 / 11 改过就是改后的）
-            if let Some(marked) = &self.marked {
+            if let Some(marked) = self.marked.as_ref().filter(|text| visible_composition(text)) {
                 let run = TextRun {
                     len: marked.len(),
                     font: fonts.regular.clone(),
@@ -1455,6 +1461,17 @@ mod tests {
     fn resolve(keymap: &Keymap, key: &'static str) -> usize {
         let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0.len()
+    }
+
+    /// 拼音显示在候选框里时，鼠须管往组字里只塞一个占位：不画（画出来只是光标边上一截下划线），有字才画。
+    #[test]
+    fn ime_placeholder_composition_is_not_drawn() {
+        assert!(!visible_composition("\u{3000}")); // 鼠须管官方版：全角空格
+        assert!(!visible_composition("\u{200B}")); // 去下划线补丁版：零宽空格
+        assert!(!visible_composition(" "));
+        assert!(visible_composition("ni hao"));
+        assert!(visible_composition("你好"));
+        assert!(visible_composition("\u{3000}a"));
     }
 
     /// ⌘V：有文字贴文字；没文字但有图片 = 一次空粘贴（程序自己去读图）；什么都没有就不发。
