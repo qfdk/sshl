@@ -18,6 +18,8 @@
 
 本项目由 [Voilà Pro](https://voilapro.app/?ref=github-sshl) 赞助支持 —— macOS 语音输入工具。按住快捷键说话，文字直接落到光标处，中英法混说也能识别。
 
+SSHL 本身全程靠语音完成：发给 AI 编程工具的每一条提示词，都是用 Voilà Pro 说出来的。
+
 ## 功能
 
 **终端**

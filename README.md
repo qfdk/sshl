@@ -18,6 +18,8 @@ A lightweight native SSH client for macOS: terminal and SFTP file manager in one
 
 This project is sponsored by [Voilà Pro](https://voilapro.app/?ref=github-sshl), a voice input tool for macOS. Hold a shortcut and speak, and the text lands at your cursor — mixed Chinese, English and French are recognized too.
 
+SSHL itself was built entirely by voice: every prompt to the AI coding tool was spoken through Voilà Pro.
+
 ## Features
 
 **Terminal**
