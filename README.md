@@ -33,6 +33,7 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 - When a sudo / su password prompt appears, fill in a saved password with one click. One host can store several accounts
 - Local terminal (⌘N): a login shell. A new tab starts in the current local tab's directory, files dragged in from Finder insert their path, and `exit` closes the tab
 - Find (⌘F): searches the screen and the whole scrollback, highlights matches, Enter jumps through them
+- GNU screen output goes into the normal scrollback, so the mouse wheel and ⌘F work inside `screen` without touching `~/.screenrc` on the server
 - ⌘-click a URL to open it in the browser (wrapped long links and program-declared hyperlinks both work); ⌘+ / ⌘- / ⌘0 change the font size
 - Switch tabs with ⌘1 … ⌘9, ⌘⇧[ / ⌘⇧] (or ⌃Tab / ⌃⇧Tab); double-click or right-click a tab to rename it
 - Switch between Terminal / Files / System with ⌘I / ⌘O / ⌘P
