@@ -29,6 +29,7 @@ macro_rules! icons {
 }
 
 icons! {
+    ArrowDown => "arrow-down",
     ArrowDownUp => "arrow-down-up",
     ArrowUp => "arrow-up",
     Check => "check",
@@ -42,15 +43,12 @@ icons! {
     Folder => "folder",
     FolderOpen => "folder-open",
     FolderPlus => "folder-plus",
-    Gauge => "gauge",
     GripVertical => "grip-vertical",
-    HardDrive => "hard-drive",
     House => "house",
     Keyboard => "keyboard",
     KeyRound => "key-round",
     LoaderCircle => "loader-circle",
     Lock => "lock",
-    MemoryStick => "memory-stick",
     PanelLeft => "panel-left",
     Pencil => "pencil",
     Plus => "plus",

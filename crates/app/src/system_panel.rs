@@ -3,16 +3,18 @@
 //! 远程的命令以文件管理当前身份执行（终端 sudo -i 之后就是 root），本机的以 SSHL 自己的身份；
 //! 没权限时提议改在终端里用 sudo 执行。停在这页时每 3 秒刷新一次。
 
+use std::f32::consts::TAU;
 use std::ops::Range;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    HighlightStyle, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role,
-    ScrollStrategy, SharedString, StatefulInteractiveElement, StyledText, Styled, Task, UniformListScrollHandle, Window,
-    anchored, deferred, div, prelude::FluentBuilder, px, uniform_list,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
+    FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels,
+    Point, Render, Role, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement, Styled, Task, UniformListScrollHandle,
+    Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px, size, uniform_list,
 };
-use gpui_base::input::{InputEvent, InputState};
+use gpui_base::input::{Input, InputEvent, InputState};
 use sshl_core::server_info::{self, Machine, Overview, PortInfo, ProcessInfo};
 use sshl_core::services::{self, ServiceAction, ServiceInfo};
 
@@ -23,14 +25,29 @@ use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
-const ROW_HEIGHT: f32 = 32.;
+const ROW_HEIGHT: f32 = 34.;
+/// 命令行、监听地址用等宽字；数字用界面字体的等宽数字（[`TABULAR`]）。
 const MONO: &str = "Menlo";
-const CPU_WIDTH: f32 = 84.;
-const MEMORY_WIDTH: f32 = 96.;
+const PID_WIDTH: f32 = 76.;
+const USER_WIDTH: f32 = 130.;
+const CPU_WIDTH: f32 = 96.;
+const MEMORY_WIDTH: f32 = 104.;
+const ACTION_WIDTH: f32 = 64.;
 const ADDRESS_WIDTH: f32 = 250.;
 const STATUS_WIDTH: f32 = 104.;
 /// 「开机启动 ↑」放得下箭头。
 const BOOT_WIDTH: f32 = 96.;
+/// 指标那一段的同色浅底、圆环轨道的不透明度：[浅色, 深色]。
+pub const SEGMENT_TINT: [f32; 2] = [0.06, 0.10];
+const RING_TRACK: [f32; 2] = [0.16, 0.22];
+/// 鼠标停在哪一行，那一行铺一层浅蓝：[浅色, 深色]。
+const ROW_HOVER: [f32; 2] = [0.08, 0.14];
+const GAUGE_SIZE: f32 = 58.;
+/// 指标一段至少这么宽：圆环 + 三个负载值（19px）放得下；四段一排放不下时换行。
+const SEGMENT_MIN_WIDTH: f32 = 250.;
+const RING_STROKE: f32 = 6.;
+/// 等宽数字（tnum）：一列数字上下对齐，不用借等宽字体。
+static TABULAR: LazyLock<FontFeatures> = LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -45,7 +62,8 @@ pub enum SortKey {
     User,
     Cpu,
     Memory,
-    Command,
+    /// 「进程」列：按进程名（不按命令行路径）。
+    Name,
 }
 
 /// 可点表头排序的列。
@@ -107,6 +125,8 @@ enum Loaded {
 pub struct SystemPanel {
     /// 看的是哪台机器；None = 当前标签没连着。
     machine: Option<Machine>,
+    /// 那台机器的登录用户（进程列表里标蓝）。
+    me: Option<String>,
     active: bool,
     view: View,
     overview: Option<Overview>,
@@ -180,13 +200,22 @@ pub fn filter_processes<'a>(processes: &'a [ProcessInfo], query: &str, sort: (So
         .iter()
         .filter(|p| query.is_empty() || p.pid.to_string().contains(&query) || p.user.to_lowercase().contains(&query) || p.command.to_lowercase().contains(&query))
         .collect();
+    if sort.0 == SortKey::Name {
+        // 名字要从命令行切出来：每个进程只切一次
+        let mut named: Vec<(String, &ProcessInfo)> = out.into_iter().map(|p| (process_name(&p.command, p.program.as_deref()).to_lowercase(), p)).collect();
+        named.sort_by(|(a_name, a), (b_name, b)| {
+            let order = a_name.cmp(b_name).then_with(|| a.command.cmp(&b.command));
+            if sort.1 { order.reverse() } else { order }
+        });
+        return named.into_iter().map(|(_, p)| p).collect();
+    }
     out.sort_by(|a, b| {
         let order = match sort.0 {
             SortKey::Pid => a.pid.cmp(&b.pid),
             SortKey::User => a.user.cmp(&b.user),
             SortKey::Cpu => a.cpu.total_cmp(&b.cpu).then(a.rss_kb.cmp(&b.rss_kb)),
             SortKey::Memory => a.rss_kb.cmp(&b.rss_kb),
-            SortKey::Command => a.command.cmp(&b.command),
+            SortKey::Name => std::cmp::Ordering::Equal,
         };
         if sort.1 { order.reverse() } else { order }
     });
@@ -307,13 +336,81 @@ pub fn cpu_color(cpu: f32) -> ui::Token {
     }
 }
 
-/// 状态色做文字时用的颜色（绿、橙换深一号）。
+/// 颜色做文字（多半在同色浅底上）时用的颜色：绿、橙、红换成文字用的那一号，主色换成深 / 浅蓝。
 pub fn readable(color: ui::Token) -> ui::Token {
     match color {
         ui::SUCCESS => ui::SUCCESS_FOREGROUND,
         ui::WARNING => ui::WARNING_FOREGROUND,
+        ui::DESTRUCTIVE => ui::DESTRUCTIVE_FOREGROUND,
+        ui::PRIMARY => ui::ACCENT_FOREGROUND,
         other => other,
     }
+}
+
+/// 进程 CPU% 怎么标：没在用的淡色数字，用一点（≥ 0.5）同色浅底小标签，用得多（≥ 5）实心标签、白字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuLevel {
+    Idle,
+    Light(ui::Token),
+    Busy(ui::Token),
+}
+
+pub fn cpu_level(cpu: f32) -> CpuLevel {
+    let color = cpu_color(cpu);
+    if cpu < 0.5 {
+        CpuLevel::Idle
+    } else if cpu < 5. {
+        CpuLevel::Light(color)
+    } else {
+        CpuLevel::Busy(match color {
+            ui::DESTRUCTIVE => ui::DESTRUCTIVE_SOLID,
+            ui::WARNING => ui::WARNING_SOLID,
+            _ => ui::SUCCESS_SOLID,
+        })
+    }
+}
+
+/// 常驻内存多的标紫：≥ 100 MB 加粗一点，≥ 1 GB 再粗。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryLevel {
+    Normal,
+    Large,
+    Huge,
+}
+
+pub fn memory_level(rss_kb: u64) -> MemoryLevel {
+    match rss_kb {
+        kb if kb >= 1024 * 1024 => MemoryLevel::Huge,
+        kb if kb >= 100 * 1024 => MemoryLevel::Large,
+        _ => MemoryLevel::Normal,
+    }
+}
+
+/// 用户列的几种人：root、登录用户自己、macOS 的系统账号（`_windowserver` 这类）、其他。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserKind {
+    Root,
+    Me,
+    Service,
+    Other,
+}
+
+pub fn user_kind(user: &str, me: Option<&str>) -> UserKind {
+    if user == "root" {
+        UserKind::Root
+    } else if me == Some(user) {
+        UserKind::Me
+    } else if user.starts_with('_') {
+        UserKind::Service
+    } else {
+        UserKind::Other
+    }
+}
+
+/// 圆环上的点：`turn` 是第几圈（0 在 12 点钟，顺时针，0.25 在 3 点钟）。
+pub fn ring_point(center: Point<Pixels>, radius: Pixels, turn: f32) -> Point<Pixels> {
+    let angle = turn * TAU;
+    point(center.x + radius * angle.sin(), center.y - radius * angle.cos())
 }
 
 /// 监听地址的范围：所有地址（对外开放）、只有本机、某个网卡。
@@ -334,14 +431,25 @@ pub fn address_scope(address: &str) -> AddressScope {
     }
 }
 
-/// 命令行拆成 目录 / 程序名 / 参数（程序名深色、其余淡色）。内核线程（[kworker/…]）整个当名字。
-pub fn command_parts(command: &str) -> (&str, &str, &str) {
+/// 命令行拆成 目录 / 程序名 / 参数。内核线程（[kworker/…]）整个当名字。知道程序路径（`program`，macOS 的 comm）时
+/// 按它切，路径里的空格（`Google Chrome Helper`）不算参数的开始；不知道就切在第一个空格。
+pub fn command_parts<'a>(command: &'a str, program: Option<&str>) -> (&'a str, &'a str, &'a str) {
     if command.starts_with('[') {
         return ("", command, "");
     }
-    let (first, args) = command.split_at(command.find(char::is_whitespace).unwrap_or(command.len()));
+    let end = program
+        .filter(|program| command.starts_with(program))
+        .map_or_else(|| command.find(char::is_whitespace).unwrap_or(command.len()), str::len);
+    let (first, args) = command.split_at(end);
     let (dir, name) = first.split_at(first.rfind('/').map_or(0, |i| i + 1));
     if name.is_empty() { ("", first, args) } else { (dir, name, args) }
+}
+
+/// 进程名：程序名去掉路径，冒号结尾的（「nginx: worker」）去掉冒号；内核线程整个。
+pub fn process_name(command: &str, program: Option<&str>) -> String {
+    let (_, name, _) = command_parts(command, program);
+    let name = name.trim_end_matches(':');
+    if name.is_empty() { command.to_string() } else { name.to_string() }
 }
 
 /// 读列表失败的说明：没权限时说怎么办。
@@ -384,6 +492,7 @@ impl SystemPanel {
         });
         Self {
             machine: None,
+            me: None,
             active: false,
             view: View::Processes,
             overview: None,
@@ -408,7 +517,12 @@ impl SystemPanel {
     }
 
     /// 切标签（远程会话 / 本机）/ 断开（None）。几个本机标签看的是同一台机器，在它们之间切不重新读。
-    pub fn set_machine(&mut self, machine: Option<Machine>, cx: &mut Context<Self>) {
+    /// `me` 是那台机器的登录用户。
+    pub fn set_machine(&mut self, machine: Option<Machine>, me: Option<String>, cx: &mut Context<Self>) {
+        if self.me != me {
+            self.me = me;
+            cx.notify();
+        }
         if self.machine == machine {
             return;
         }
@@ -628,70 +742,66 @@ impl SystemPanel {
 
     // ---------------------------------------------------------------- 渲染
 
-    fn overview_cards(&self) -> impl IntoElement {
+    /// 四项指标在同一张卡片里，每项一段同色浅底 + 圆环（已运行是时钟）。用量高了那一段整个换成橙 / 红。
+    fn overview(&self) -> impl IntoElement {
         let o = self.overview.clone().unwrap_or_default();
-        // 每项指标一个颜色（图标底色、进度条）；用量高了进度条和百分比变橙 / 红
-        let card = |glyph: Icon, color: ui::Token, title: &'static str, value: String, sub: Option<String>, ratio: Option<f32>| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .px_4()
-                .py_3()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .rounded(px(12.))
-                .border_1()
-                .border_color(theme::color(ui::BORDER))
-                .bg(theme::color(ui::CARD))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
+        let dark = usize::from(theme::is_dark());
+        let segment = |color: ui::Token, title: &'static str, value: String, sub: Option<String>, ratio: Option<f32>, clock: bool| {
+            let color = ratio.map_or(color, |ratio| usage_color(ratio, color));
+            let gauge = div().relative().size(px(GAUGE_SIZE)).flex_shrink_0();
+            let gauge = if clock {
+                gauge
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme::alpha(color, RING_TRACK[dark]))
+                    .text_color(theme::color(color))
+                    .child(kit::icon_sized(Icon::Clock, 24.))
+            } else {
+                let (stroke, track) = (theme::color(color), theme::alpha(color, RING_TRACK[dark]));
+                let fill = ratio.unwrap_or(0.);
+                gauge
+                    .child(canvas(|_, _, _| {}, move |bounds, _, window, _| paint_ring(bounds, fill, stroke, track, window)).absolute().top_0().left_0().size_full())
+                    .when_some(ratio, |d, ratio| {
+                        d.child(
                             div()
-                                .size(px(26.))
-                                .flex_shrink_0()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(7.))
-                                .bg(theme::alpha(color, 0.12))
-                                .text_color(theme::color(color))
-                                .child(kit::icon_sized(glyph, 15.)),
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::BOLD)
+                                .font_features(TABULAR.clone())
+                                .text_color(theme::color(readable(color)))
+                                .child(format!("{:.0}%", ratio * 100.)),
                         )
-                        .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(title))
-                        .when_some(ratio, |d, ratio| {
-                            d.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::color(readable(usage_color(ratio, color))))
-                                    .child(format!("{:.0}%", ratio * 100.)),
-                            )
-                        }),
-                )
+                    })
+            };
+            div()
+                .flex_1()
+                .min_w(px(SEGMENT_MIN_WIDTH))
+                .flex()
+                .items_center()
+                .gap(px(14.))
+                .px_4()
+                .py(px(14.))
+                .rounded(px(10.))
+                .bg(theme::alpha(color, SEGMENT_TINT[dark]))
+                .child(gauge)
                 .child(
                     div()
+                        .min_w_0()
                         .flex()
-                        .items_baseline()
-                        .gap_2()
-                        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).truncate().child(value))
-                        .when_some(sub, |d, sub| d.child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).truncate().child(sub))),
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(title))
+                        .child(div().truncate().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).font_features(TABULAR.clone()).child(value))
+                        .when_some(sub, |d, sub| d.child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(sub))),
                 )
-                .when_some(ratio, |d, ratio| {
-                    let color = usage_color(ratio, color);
-                    d.child(
-                        div()
-                            .h(px(4.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .bg(theme::alpha(color, 0.18))
-                            .child(div().h_full().w(gpui::relative(ratio.clamp(0., 1.))).bg(theme::color(color))),
-                    )
-                })
         };
         let dash = || "—".to_string();
         let load = o.load.map(|l| format!("{:.2}  {:.2}  {:.2}", l[0], l[1], l[2])).unwrap_or_else(dash);
@@ -710,14 +820,26 @@ impl SystemPanel {
             _ => (dash(), None, None),
         };
         let uptime = o.uptime_secs.map(format_uptime).unwrap_or_else(dash);
+        // 两段一组：宽时一排四段，窄了两组各占一排（2 × 2），再窄一段一排；不会剩一段单独铺满一排
+        let pair = |a: Div, b: Div| div().flex_1().flex_basis(px(2. * SEGMENT_MIN_WIDTH + 8.)).flex().flex_wrap().gap(px(8.)).child(a).child(b);
         div()
             .flex()
-            .gap_3()
+            .flex_wrap()
             .flex_shrink_0()
-            .child(card(Icon::Gauge, ui::PRIMARY, tr!("负载（1 / 5 / 15 分钟）"), load, cpus, load_ratio))
-            .child(card(Icon::MemoryStick, ui::VIOLET, tr!("内存已用"), memory, memory_sub, memory_ratio))
-            .child(card(Icon::HardDrive, ui::TEAL, tr!("磁盘已用"), disk, disk_sub, disk_ratio))
-            .child(card(Icon::Clock, ui::SUCCESS, tr!("已运行"), uptime, None, None))
+            .gap(px(8.))
+            .p(px(8.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme::color(ui::BORDER))
+            .bg(theme::color(ui::CARD))
+            .child(pair(
+                segment(ui::PRIMARY, tr!("负载（1 / 5 / 15 分钟）"), load, cpus, load_ratio, false),
+                segment(ui::VIOLET, tr!("内存已用"), memory, memory_sub, memory_ratio, false),
+            ))
+            .child(pair(
+                segment(ui::TEAL, tr!("磁盘已用"), disk, disk_sub, disk_ratio, false),
+                segment(ui::SUCCESS_FOREGROUND, tr!("已运行"), uptime, None, None, true),
+            ))
     }
 
     fn header_cell(&self, label: &'static str, key: Option<SortColumn>, width: Option<f32>, align: Align, cx: &mut Context<Self>) -> AnyElement {
@@ -726,16 +848,12 @@ impl SystemPanel {
             SortColumn::Port(key) => (key == self.port_sort.0).then_some(self.port_sort.1),
             SortColumn::Service(key) => (key == self.service_sort.0).then_some(self.service_sort.1),
         });
-        let arrow = match descending {
-            Some(true) => " ↓",
-            Some(false) => " ↑",
-            None => "",
-        };
         div()
             .id(label)
             .px_3()
             .flex()
             .items_center()
+            .gap(px(3.))
             .map(|d| match width {
                 Some(w) => d.w(px(w)).flex_shrink_0(),
                 None => d.flex_1().min_w_0(),
@@ -745,7 +863,11 @@ impl SystemPanel {
                 Align::End => d.justify_end(),
                 Align::Center => d.justify_center(),
             })
-            .child(format!("{label}{arrow}"))
+            .child(label)
+            // 按这一列排序：蓝字 + 箭头
+            .when_some(descending, |d, descending| {
+                d.text_color(theme::color(ui::PRIMARY)).child(kit::icon_sized(if descending { Icon::ArrowDown } else { Icon::ArrowUp }, 12.))
+            })
             .when_some(key, |d, key| {
                 d.role(Role::Button)
                     .aria_label(SharedString::from(tr!("按{}排序", label)))
@@ -757,20 +879,7 @@ impl SystemPanel {
     }
 
     fn kill_button(&self, id: (&'static str, usize), pid: u32, name: String, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label(SharedString::from(tr!("结束 {}", name)))
-            .px_2()
-            .py(px(2.))
-            .rounded(px(6.))
-            .text_xs()
-            .text_color(theme::color(ui::DESTRUCTIVE))
-            .opacity(0.)
-            .group_hover("system-row", |s| s.opacity(1.))
-            .hover(|s| s.bg(theme::alpha(ui::DESTRUCTIVE, 0.1)))
-            .cursor_pointer()
-            .child(tr!("结束"))
+        Self::hover_button(id, tr!("结束"), tr!("结束 {}", name), ui::DESTRUCTIVE)
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 this.kill(pid, name.clone(), false, window, cx);
@@ -786,44 +895,81 @@ impl SystemPanel {
             .take(range.len())
             .cloned()
             .collect();
+        let me = self.me.clone();
         rows.into_iter()
             .enumerate()
             .map(|(i, p)| {
                 let ix = range.start + i;
-                let name = process_name(&p.command);
+                let name = process_name(&p.command, p.program.as_deref());
                 let (menu_name, menu_command) = (name.clone(), p.command.clone());
                 let pid = p.pid;
-                div()
-                    .id(("process", ix))
-                    .group("system-row")
-                    .h(px(ROW_HEIGHT))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.))
-                    .border_b_1()
-                    .border_color(theme::alpha(ui::BORDER, 0.6))
-                    .hover(|s| s.bg(theme::color(ui::MUTED)))
+                let kernel = p.command.starts_with('[');
+                // 程序名后面跟完整命令行（淡色）；命令行就只是程序名时不重复
+                let command = (p.command != name).then(|| p.command.clone());
+                table_row(("process", ix))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.open_menu(event.position, MenuTarget::Process { pid, name: menu_name.clone(), command: Some(menu_command.clone()) }, cx);
                     }))
-                    .child(div().w(px(76.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).text_color(theme::color(ui::MUTED_FOREGROUND)).child(p.pid.to_string()))
-                    .child(div().w(px(110.)).flex_shrink_0().px_3().truncate().child(p.user.clone()))
                     .child(
-                        // 真在用 CPU 的才标出来（同服务状态的小标签：低绿、中橙、高红），0.0 的淡色
-                        div().w(px(CPU_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).map(|d| {
-                            let value = format!("{:.1}", p.cpu);
-                            if p.cpu >= 0.5 {
-                                let color = cpu_color(p.cpu);
-                                d.child(pill(readable(color), theme::alpha(color, 0.12)).child(value))
-                            } else {
-                                d.text_color(theme::color(ui::MUTED_FOREGROUND)).child(value)
-                            }
-                        }),
+                        div()
+                            .w(px(PID_WIDTH))
+                            .flex_shrink_0()
+                            .px_3()
+                            .flex()
+                            .justify_end()
+                            .font_features(TABULAR.clone())
+                            .text_color(theme::color(ui::MUTED_FOREGROUND))
+                            .child(p.pid.to_string()),
                     )
-                    .child(div().w(px(MEMORY_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).child(format_bytes(p.rss_kb * 1024)))
-                    .child(div().flex_1().min_w_0().px_3().truncate().font_family(MONO).child(command_text(&p.command)))
-                    .child(div().w(px(64.)).flex_shrink_0().flex().justify_center().child(self.kill_button(("kill-process", ix), pid, name, cx)))
+                    .child(div().w(px(USER_WIDTH)).flex_shrink_0().px_3().flex().child(user_label(&p.user, me.as_deref())))
+                    .child(div().w(px(CPU_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_features(TABULAR.clone()).child(cpu_label(p.cpu)))
+                    .child(
+                        div()
+                            .w(px(MEMORY_WIDTH))
+                            .flex_shrink_0()
+                            .px_3()
+                            .flex()
+                            .justify_end()
+                            .font_features(TABULAR.clone())
+                            .map(|d| match memory_level(p.rss_kb) {
+                                MemoryLevel::Normal => d,
+                                MemoryLevel::Large => d.text_color(theme::color(ui::VIOLET)).font_weight(FontWeight::SEMIBOLD),
+                                MemoryLevel::Huge => d.text_color(theme::color(ui::VIOLET)).font_weight(FontWeight::BOLD),
+                            })
+                            .child(format_bytes(p.rss_kb * 1024)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            // 名字放全，剩下的给命令行；窄了命令行先缩没
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .max_w_full()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .when(kernel, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
+                                    .child(name.clone()),
+                            )
+                            .when_some(command, |d, command| {
+                                d.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(MONO)
+                                        .text_size(px(11.))
+                                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                                        .child(command),
+                                )
+                            }),
+                    )
+                    .child(div().w(px(ACTION_WIDTH)).flex_shrink_0().flex().justify_center().child(self.kill_button(("kill-process", ix), pid, name, cx)))
                     .into_any_element()
             })
             .collect()
@@ -838,17 +984,7 @@ impl SystemPanel {
             .map(|(i, p)| {
                 let ix = range.start + i;
                 let name = p.process.clone().unwrap_or_else(|| "—".into());
-                div()
-                    .id(("port", ix))
-                    .group("system-row")
-                    .h(px(ROW_HEIGHT))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.))
-                    .border_b_1()
-                    .border_color(theme::alpha(ui::BORDER, 0.6))
-                    .hover(|s| s.bg(theme::color(ui::MUTED)))
+                table_row(("port", ix))
                     .when_some(p.pid, |d, pid| {
                         let menu_name = name.clone();
                         d.on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -858,7 +994,7 @@ impl SystemPanel {
                     .child(div().w(px(64.)).flex_shrink_0().px_3().flex().child(if p.proto.eq_ignore_ascii_case("udp") {
                         pill(ui::VIOLET, theme::alpha(ui::VIOLET, 0.1)).child(p.proto.to_uppercase())
                     } else {
-                        pill(ui::PRIMARY, theme::color(ui::ACCENT)).child(p.proto.to_uppercase())
+                        pill(ui::ACCENT_FOREGROUND, theme::color(ui::ACCENT)).child(p.proto.to_uppercase())
                     }))
                     .child(
                         div()
@@ -867,7 +1003,7 @@ impl SystemPanel {
                             .px_3()
                             .flex()
                             .justify_end()
-                            .font_family(MONO)
+                            .font_features(TABULAR.clone())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::color(ui::PRIMARY))
                             .child(p.port.to_string()),
@@ -888,17 +1024,34 @@ impl SystemPanel {
                                 AddressScope::Specific => d,
                             }),
                     )
-                    .child(div().w(px(80.)).flex_shrink_0().px_3().flex().justify_end().font_family(MONO).child(p.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "—".into())))
+                    .child(
+                        div()
+                            .w(px(80.))
+                            .flex_shrink_0()
+                            .px_3()
+                            .flex()
+                            .justify_end()
+                            .font_features(TABULAR.clone())
+                            .text_color(theme::color(ui::MUTED_FOREGROUND))
+                            .child(p.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "—".into())),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .px_3()
                             .truncate()
-                            .when(p.pid.is_none(), |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
+                            .map(|d| if p.pid.is_some() { d.font_weight(FontWeight::SEMIBOLD) } else { d.text_color(theme::color(ui::MUTED_FOREGROUND)) })
                             .child(if p.pid.is_some() { name.clone() } else { tr!("看不到进程（需要 root）").into() }),
                     )
-                    .child(div().w(px(64.)).flex_shrink_0().flex().justify_center().when_some(p.pid, |d, pid| d.child(self.kill_button(("kill-port", ix), pid, name.clone(), cx))))
+                    .child(
+                        div()
+                            .w(px(ACTION_WIDTH))
+                            .flex_shrink_0()
+                            .flex()
+                            .justify_center()
+                            .when_some(p.pid, |d, pid| d.child(self.kill_button(("kill-port", ix), pid, name.clone(), cx))),
+                    )
                     .into_any_element()
             })
             .collect()
@@ -906,8 +1059,8 @@ impl SystemPanel {
 }
 
 impl SystemPanel {
-    /// 行尾悬停才出现的文字按钮（结束、启动、停止…）。
-    fn hover_button(id: (&'static str, usize), label: &'static str, aria: String, color: ui::Token) -> gpui::Stateful<gpui::Div> {
+    /// 行尾悬停才出现的文字按钮（结束、启动、停止…）：同色浅底，按上去再深一点。
+    fn hover_button(id: (&'static str, usize), label: &'static str, aria: String, color: ui::Token) -> Stateful<Div> {
         div()
             .id(id)
             .role(Role::Button)
@@ -916,10 +1069,11 @@ impl SystemPanel {
             .py(px(2.))
             .rounded(px(6.))
             .text_xs()
-            .text_color(theme::color(color))
+            .text_color(theme::color(readable(color)))
+            .bg(theme::alpha(color, 0.08))
             .opacity(0.)
             .group_hover("system-row", |s| s.opacity(1.))
-            .hover(|s| s.bg(theme::alpha(color, 0.1)))
+            .hover(move |s| s.bg(theme::alpha(color, 0.16)))
             .cursor_pointer()
             .child(label)
     }
@@ -969,19 +1123,9 @@ impl SystemPanel {
                             }
                         })
                     });
-                div()
-                    .id(("service", ix))
-                    .group("system-row")
-                    .h(px(ROW_HEIGHT))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.))
-                    .border_b_1()
-                    .border_color(theme::alpha(ui::BORDER, 0.6))
+                table_row(("service", ix))
                     // 失败的服务整行淡红，一眼能看到
                     .when(color == ui::DESTRUCTIVE, |d| d.bg(theme::alpha(ui::DESTRUCTIVE, 0.05)))
-                    .hover(|s| s.bg(theme::color(ui::MUTED)))
                     .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.open_menu(event.position, MenuTarget::Service(menu_target.clone()), cx);
                     }))
@@ -995,7 +1139,7 @@ impl SystemPanel {
                                 .child(status),
                         ),
                     )
-                    .child(div().w(px(220.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
+                    .child(div().w(px(220.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
                     .child(div().flex_1().min_w_0().px_3().truncate().text_color(theme::color(ui::MUTED_FOREGROUND)).child(service.description.clone()))
                     .child(
                         div()
@@ -1030,24 +1174,98 @@ fn pill(text: ui::Token, background: gpui::Hsla) -> gpui::Div {
         .bg(background)
 }
 
-/// 命令行：程序名深色，目录和参数淡色；内核线程整个淡色。
-fn command_text(command: &str) -> StyledText {
-    let muted = HighlightStyle { color: Some(theme::color(ui::MUTED_FOREGROUND)), ..Default::default() };
-    let (dir, name, _) = command_parts(command);
-    let text = StyledText::new(command.to_string());
-    if command.starts_with('[') {
-        return text.with_highlights([(0..command.len(), muted)]);
+/// 圆环：一圈同色浅轨道，上面从 12 点钟顺时针画用量那一段，两头是圆的。
+fn paint_ring(bounds: Bounds<Pixels>, ratio: f32, color: Hsla, track: Hsla, window: &mut Window) {
+    let stroke = px(RING_STROKE);
+    let side = if bounds.size.width < bounds.size.height { bounds.size.width } else { bounds.size.height };
+    let radius = (side - stroke) / 2.;
+    let center = bounds.center();
+    let radii = point(radius, radius);
+    let at = |turn: f32| ring_point(center, radius, turn);
+    let circle = |path: &mut PathBuilder| {
+        path.move_to(at(0.));
+        path.arc_to(radii, px(0.), false, true, at(0.5));
+        path.arc_to(radii, px(0.), false, true, at(0.));
+    };
+    let mut path = PathBuilder::stroke(stroke);
+    circle(&mut path);
+    if let Ok(path) = path.build() {
+        window.paint_path(path, track);
     }
-    let name_style = HighlightStyle { color: Some(theme::color(ui::FOREGROUND)), ..Default::default() };
-    let (start, end) = (dir.len(), dir.len() + name.len());
-    text.with_highlights([(0..start, muted), (start..end, name_style), (end..command.len(), muted)].into_iter().filter(|(range, _)| !range.is_empty()))
+    let ratio = ratio.clamp(0., 1.);
+    if ratio <= 0. {
+        return;
+    }
+    let mut path = PathBuilder::stroke(stroke);
+    if ratio >= 1. {
+        circle(&mut path);
+    } else {
+        path.move_to(at(0.));
+        path.arc_to(radii, px(0.), ratio > 0.5, true, at(ratio));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+    if ratio < 1. {
+        // PathBuilder 的线头是平的：两头各补一个圆点
+        for turn in [0., ratio] {
+            let cap = Bounds::centered_at(at(turn), size(stroke, stroke));
+            window.paint_quad(gpui::fill(cap, color).corner_radii(stroke / 2.));
+        }
+    }
 }
 
-/// 命令行 → 进程名（第一个词去掉路径，冒号结尾的如「nginx: worker」保留原样的头一个词）。
-pub fn process_name(command: &str) -> String {
-    let first = command.split_whitespace().next().unwrap_or(command);
-    let name = first.rsplit('/').next().unwrap_or(first).trim_end_matches(':');
-    if name.is_empty() { command.to_string() } else { name.to_string() }
+/// 表格的一行：细线分隔，鼠标停着时铺浅蓝；行尾按钮悬停才出来（group「system-row」）。
+fn table_row(id: impl Into<ElementId>) -> Stateful<Div> {
+    let hover = theme::alpha(ui::PRIMARY, ROW_HOVER[usize::from(theme::is_dark())]);
+    div()
+        .id(id)
+        .group("system-row")
+        .h(px(ROW_HEIGHT))
+        .w_full()
+        .flex()
+        .items_center()
+        .text_size(px(12.))
+        .border_b_1()
+        .border_color(theme::alpha(ui::BORDER, 0.6))
+        .hover(move |s| s.bg(hover))
+}
+
+/// 表头：上下两条线，次要文字色。
+fn table_header() -> Div {
+    div()
+        .h(px(32.))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .text_size(px(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme::color(ui::MUTED_FOREGROUND))
+        .border_t_1()
+        .border_b_1()
+        .border_color(theme::color(ui::BORDER))
+}
+
+/// 用户列：root 橙色标签、登录用户蓝色标签、系统账号淡色。标签往左挪出内边距，字和表头对齐。
+fn user_label(user: &str, me: Option<&str>) -> Div {
+    let label = div().ml(px(-7.)).px(px(7.)).py(px(1.)).rounded(px(5.)).truncate().child(user.to_string());
+    match user_kind(user, me) {
+        UserKind::Root => label.bg(theme::alpha(ui::WARNING, 0.13)).text_color(theme::color(ui::WARNING_FOREGROUND)).font_weight(FontWeight::SEMIBOLD),
+        UserKind::Me => label.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND)).font_weight(FontWeight::MEDIUM),
+        UserKind::Service => label.text_color(theme::color(ui::MUTED_FOREGROUND)),
+        UserKind::Other => label,
+    }
+}
+
+/// CPU% 那一格（见 [`cpu_level`]）。
+fn cpu_label(cpu: f32) -> Div {
+    let value = format!("{cpu:.1}");
+    let badge = || div().min_w(px(40.)).px(px(7.)).py(px(2.)).rounded(px(6.)).flex().justify_end().child(value.clone());
+    match cpu_level(cpu) {
+        CpuLevel::Idle => div().text_color(theme::color(ui::MUTED_FOREGROUND)).child(value),
+        CpuLevel::Light(color) => badge().bg(theme::alpha(color, 0.14)).text_color(theme::color(readable(color))).font_weight(FontWeight::SEMIBOLD),
+        CpuLevel::Busy(solid) => badge().bg(theme::color(solid)).text_color(theme::color(ui::PRIMARY_FOREGROUND)).font_weight(FontWeight::BOLD),
+    }
 }
 
 impl Render for SystemPanel {
@@ -1061,77 +1279,99 @@ impl Render for SystemPanel {
             View::Ports => (port_count.unwrap_or(0), self.ports.is_some()),
             View::Services => (service_count.unwrap_or(0), self.services.is_some()),
         };
-        let this = cx.entity().downgrade();
-        let tab_label = |view: View| -> SharedString {
-            let (label, count) = match view {
-                View::Processes => (trc!("标签页", "进程"), process_count),
-                View::Ports => (trc!("标签页", "端口"), port_count),
-                View::Services => (trc!("标签页", "服务"), service_count),
-            };
-            match count {
-                Some(n) => format!("{label} {n}").into(),
-                None => label.into(),
-            }
-        };
-        let views: Vec<(View, Option<Icon>, SharedString)> = views_for(self.machine.as_ref()).iter().map(|&view| (view, None, tab_label(view))).collect();
-        let toolbar = div()
+        // 几个列表的标签：选中的实心蓝底，后面是条数
+        let tabs = div()
+            .id("system-view")
+            .role(Role::TabList)
+            .flex_shrink_0()
+            .h(px(34.))
+            .p(px(3.))
+            .flex()
+            .gap(px(2.))
+            .rounded(px(10.))
+            .bg(theme::color(ui::SECONDARY))
+            .children(views_for(self.machine.as_ref()).iter().enumerate().map(|(index, &view)| {
+                let (label, count) = match view {
+                    View::Processes => (trc!("标签页", "进程"), process_count),
+                    View::Ports => (trc!("标签页", "端口"), port_count),
+                    View::Services => (trc!("标签页", "服务"), service_count),
+                };
+                let active = view == self.view;
+                let aria: SharedString = match count {
+                    Some(n) => format!("{label} {n}").into(),
+                    None => label.into(),
+                };
+                div()
+                    .id(("system-view", index))
+                    .role(Role::Tab)
+                    .aria_label(aria)
+                    .h(px(28.))
+                    .pl(px(12.))
+                    .pr(px(if count.is_some() { 8. } else { 12. }))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(7.))
+                    .text_size(px(14.))
+                    .cursor_pointer()
+                    .map(|t| {
+                        if active {
+                            t.bg(theme::color(ui::PRIMARY)).text_color(theme::color(ui::PRIMARY_FOREGROUND)).font_weight(FontWeight::SEMIBOLD)
+                        } else {
+                            t.text_color(theme::color(ui::MUTED_FOREGROUND)).hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
+                        }
+                    })
+                    .child(label)
+                    .when_some(count, |t, n| {
+                        t.child(
+                            div()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(5.))
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_features(TABULAR.clone())
+                                .bg(if active { theme::alpha(ui::PRIMARY_FOREGROUND, 0.22) } else { theme::alpha(ui::FOREGROUND, 0.07) })
+                                .child(n.to_string()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_view(view, cx)))
+            }));
+        let search = div()
+            .flex_1()
+            .min_w_0()
+            .max_w(px(300.))
+            .h(px(34.))
+            .px(px(10.))
             .flex()
             .items_center()
-            .gap_3()
-            .child(kit::segmented(
-                "system-view",
-                &views,
-                self.view,
-                move |view, _, cx| {
-                    let _ = this.update(cx, |this, cx| this.set_view(view, cx));
-                },
-            ))
-            // 停在这页时每 3 秒自动刷新，不放手动刷新按钮
-            .child(div().flex_1().min_w_0().max_w(px(360.)).child(kit::text_field(&self.search, self.search_focused)));
+            .gap_2()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme::color(if self.search_focused { ui::RING } else { ui::BORDER }))
+            .bg(theme::color(ui::CARD))
+            .text_color(theme::color(ui::MUTED_FOREGROUND))
+            .child(kit::icon_sized(Icon::Search, 14.))
+            .child(div().flex_1().min_w_0().text_size(px(13.)).child(Input::new(&self.search)));
+        // 停在这页时每 3 秒自动刷新，不放手动刷新按钮
+        let toolbar = div().flex().items_center().gap_3().p_3().child(tabs).child(search);
 
         let header = match self.view {
-            View::Processes => div()
-                .h(px(32.))
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::color(ui::MUTED_FOREGROUND))
-                .border_b_1()
-                .border_color(theme::color(ui::BORDER))
-                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(76.), Align::End, cx))
-                .child(self.header_cell(tr!("用户"), Some(SortColumn::Process(SortKey::User)), Some(110.), Align::Start, cx))
+            View::Processes => table_header()
+                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(PID_WIDTH), Align::End, cx))
+                .child(self.header_cell(tr!("用户"), Some(SortColumn::Process(SortKey::User)), Some(USER_WIDTH), Align::Start, cx))
                 .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), Align::End, cx))
                 .child(self.header_cell(tr!("内存"), Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), Align::End, cx))
-                .child(self.header_cell(tr!("命令"), Some(SortColumn::Process(SortKey::Command)), None, Align::Start, cx))
-                .child(div().w(px(64.)).flex_shrink_0()),
-            View::Ports => div()
-                .h(px(32.))
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::color(ui::MUTED_FOREGROUND))
-                .border_b_1()
-                .border_color(theme::color(ui::BORDER))
+                .child(self.header_cell(tr!("进程"), Some(SortColumn::Process(SortKey::Name)), None, Align::Start, cx))
+                .child(div().w(px(ACTION_WIDTH)).flex_shrink_0()),
+            View::Ports => table_header()
                 .child(self.header_cell(tr!("协议"), Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), Align::Start, cx))
                 .child(self.header_cell(tr!("端口"), Some(SortColumn::Port(PortSortKey::Port)), Some(86.), Align::End, cx))
                 .child(self.header_cell(tr!("地址"), Some(SortColumn::Port(PortSortKey::Address)), Some(ADDRESS_WIDTH), Align::Start, cx))
                 .child(self.header_cell("PID", Some(SortColumn::Port(PortSortKey::Pid)), Some(80.), Align::End, cx))
                 .child(self.header_cell(tr!("进程"), Some(SortColumn::Port(PortSortKey::Process)), None, Align::Start, cx))
-                .child(div().w(px(64.)).flex_shrink_0()),
-            View::Services => div()
-                .h(px(32.))
-                .flex()
-                .flex_shrink_0()
-                .items_center()
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme::color(ui::MUTED_FOREGROUND))
-                .border_b_1()
-                .border_color(theme::color(ui::BORDER))
+                .child(div().w(px(ACTION_WIDTH)).flex_shrink_0()),
+            View::Services => table_header()
                 .child(self.header_cell(tr!("状态"), Some(SortColumn::Service(ServiceSortKey::Status)), Some(STATUS_WIDTH), Align::Start, cx))
                 .child(self.header_cell(tr!("服务"), Some(SortColumn::Service(ServiceSortKey::Name)), Some(220.), Align::Start, cx))
                 .child(self.header_cell(tr!("说明"), Some(SortColumn::Service(ServiceSortKey::Description)), None, Align::Start, cx))
@@ -1252,22 +1492,21 @@ impl Render for SystemPanel {
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .child(self.overview_cards())
+            .gap(px(10.))
+            .child(self.overview())
             .child(
+                // 表头、各行铺满卡片的宽；底下留一点，最后一行的悬停底色不压到圆角上（gpui 只按矩形裁）
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .p_3()
-                    .rounded(px(12.))
+                    .rounded(px(14.))
                     .border_1()
                     .border_color(theme::color(ui::BORDER))
                     .bg(theme::color(ui::CARD))
                     .child(toolbar)
-                    .child(div().flex_1().min_h_0().flex().flex_col().child(header).child(body)),
+                    .child(div().flex_1().min_h_0().flex().flex_col().pb_2().child(header).child(body)),
             )
             .when_some(menu, |d, menu| d.child(menu))
     }
@@ -1278,7 +1517,7 @@ mod tests {
     use super::*;
 
     fn p(pid: u32, user: &str, cpu: f32, rss_kb: u64, command: &str) -> ProcessInfo {
-        ProcessInfo { pid, user: user.into(), cpu, mem: 0., rss_kb, command: command.into() }
+        ProcessInfo { pid, user: user.into(), cpu, mem: 0., rss_kb, command: command.into(), program: None }
     }
 
     #[test]
@@ -1302,6 +1541,20 @@ mod tests {
         assert_eq!(pids(filter_processes(&procs, "NGINX", (SortKey::Cpu, true))), [20]);
         assert_eq!(pids(filter_processes(&procs, "mysql", (SortKey::Cpu, true))), [30], "按用户或命令都能搜");
         assert_eq!(pids(filter_processes(&procs, "10", (SortKey::Cpu, true))), [10]);
+    }
+
+    /// 「进程」那一列显示的是进程名，按它排也按名字排（不分大小写），不按路径：/usr/sbin/sshd 不该排在 nginx 前面。
+    #[test]
+    fn the_process_column_sorts_by_name() {
+        let procs = vec![
+            p(1, "root", 0., 0, "/usr/sbin/sshd -D"),
+            p(2, "www-data", 0., 0, "nginx: worker process"),
+            p(3, "qfdk", 0., 0, "/Applications/Adguard.app/Contents/MacOS/Adguard"),
+            p(4, "qfdk", 0., 0, "./sshl-dev"),
+        ];
+        let pids = |v: Vec<&ProcessInfo>| v.iter().map(|p| p.pid).collect::<Vec<_>>();
+        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Name, false))), [3, 2, 1, 4]);
+        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Name, true))), [4, 1, 2, 3]);
     }
 
     #[test]
@@ -1414,7 +1667,53 @@ mod tests {
         assert_eq!(cpu_color(180.), ui::DESTRUCTIVE, "多核进程会超过 100");
         assert_eq!(readable(ui::SUCCESS), ui::SUCCESS_FOREGROUND);
         assert_eq!(readable(ui::WARNING), ui::WARNING_FOREGROUND);
-        assert_eq!(readable(ui::DESTRUCTIVE), ui::DESTRUCTIVE);
+        assert_eq!(readable(ui::DESTRUCTIVE), ui::DESTRUCTIVE_FOREGROUND);
+        assert_eq!(readable(ui::PRIMARY), ui::ACCENT_FOREGROUND, "负载圆环里的百分比：主色在浅蓝底上不够清楚");
+        assert_eq!(readable(ui::VIOLET), ui::VIOLET);
+    }
+
+    /// CPU：没在用的淡色数字，用一点的浅色小标签，用得多的（≥ 5%）实心标签、白字，越多越红。
+    #[test]
+    fn cpu_badges_get_louder_with_usage() {
+        assert_eq!(cpu_level(0.0), CpuLevel::Idle);
+        assert_eq!(cpu_level(0.4), CpuLevel::Idle);
+        assert_eq!(cpu_level(0.5), CpuLevel::Light(ui::SUCCESS));
+        assert_eq!(cpu_level(4.9), CpuLevel::Light(ui::SUCCESS));
+        assert_eq!(cpu_level(5.0), CpuLevel::Busy(ui::SUCCESS_SOLID));
+        assert_eq!(cpu_level(25.), CpuLevel::Busy(ui::WARNING_SOLID));
+        assert_eq!(cpu_level(180.), CpuLevel::Busy(ui::DESTRUCTIVE_SOLID));
+    }
+
+    #[test]
+    fn big_memory_users_stand_out() {
+        assert_eq!(memory_level(99 * 1024), MemoryLevel::Normal);
+        assert_eq!(memory_level(100 * 1024), MemoryLevel::Large);
+        assert_eq!(memory_level(1024 * 1024), MemoryLevel::Huge);
+    }
+
+    /// 用户列：root 橙色、登录用户蓝色、macOS 的系统账号（_ 开头）淡色，其余照常。
+    #[test]
+    fn users_are_told_apart() {
+        assert_eq!(user_kind("root", Some("qfdk")), UserKind::Root);
+        assert_eq!(user_kind("root", Some("root")), UserKind::Root, "用 root 登录时 root 还是橙色");
+        assert_eq!(user_kind("qfdk", Some("qfdk")), UserKind::Me);
+        assert_eq!(user_kind("qfdk", None), UserKind::Other, "不知道登录用户时不猜");
+        assert_eq!(user_kind("_windowserver", Some("qfdk")), UserKind::Service);
+        assert_eq!(user_kind("www-data", Some("deploy")), UserKind::Other);
+    }
+
+    /// 圆环从 12 点钟开始顺时针画。
+    #[test]
+    fn ring_points_go_clockwise_from_twelve_o_clock() {
+        let center = gpui::point(px(29.), px(29.));
+        let at = |turn: f32| {
+            let p = ring_point(center, px(24.), turn);
+            ((f32::from(p.x) * 100.).round() / 100., (f32::from(p.y) * 100.).round() / 100.)
+        };
+        assert_eq!(at(0.), (29., 5.), "顶上");
+        assert_eq!(at(0.25), (53., 29.), "右边");
+        assert_eq!(at(0.5), (29., 53.), "底下");
+        assert_eq!(at(0.75), (5., 29.), "左边");
     }
 
     #[test]
@@ -1430,18 +1729,32 @@ mod tests {
 
     #[test]
     fn commands_split_into_directory_name_and_arguments() {
-        assert_eq!(command_parts("/usr/bin/dockerd -H fd://"), ("/usr/bin/", "dockerd", " -H fd://"));
-        assert_eq!(command_parts("/sbin/init"), ("/sbin/", "init", ""));
-        assert_eq!(command_parts("nginx: worker process"), ("", "nginx:", " worker process"));
-        assert_eq!(command_parts("python3 app.py"), ("", "python3", " app.py"));
-        assert_eq!(command_parts("[kworker/u4:0-events_unbound]"), ("", "[kworker/u4:0-events_unbound]", ""), "内核线程整个当名字");
+        assert_eq!(command_parts("/usr/bin/dockerd -H fd://", None), ("/usr/bin/", "dockerd", " -H fd://"));
+        assert_eq!(command_parts("/sbin/init", None), ("/sbin/", "init", ""));
+        assert_eq!(command_parts("nginx: worker process", None), ("", "nginx:", " worker process"));
+        assert_eq!(command_parts("python3 app.py", None), ("", "python3", " app.py"));
+        assert_eq!(command_parts("[kworker/u4:0-events_unbound]", None), ("", "[kworker/u4:0-events_unbound]", ""), "内核线程整个当名字");
+    }
+
+    /// 知道程序路径（macOS 的 comm）时按它切：路径里的空格不算参数的开始。
+    #[test]
+    fn a_known_program_path_keeps_its_spaces() {
+        let program = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif)";
+        let command = format!("{program} --type=gpu-process");
+        assert_eq!(
+            command_parts(&command, Some(program)),
+            ("/Applications/Google Chrome.app/Contents/MacOS/", "Google Chrome Helper (Aperitif)", " --type=gpu-process")
+        );
+        assert_eq!(process_name(&command, Some(program)), "Google Chrome Helper (Aperitif)");
+        assert_eq!(process_name(&command, None), "Google", "不知道程序路径时只能按空格切");
     }
 
     #[test]
     fn names_and_kill_errors_read_well() {
-        assert_eq!(process_name("/usr/sbin/sshd -D"), "sshd");
-        assert_eq!(process_name("nginx: worker process"), "nginx");
-        assert_eq!(process_name("python3 app.py"), "python3");
+        assert_eq!(process_name("/usr/sbin/sshd -D", None), "sshd");
+        assert_eq!(process_name("nginx: worker process", None), "nginx");
+        assert_eq!(process_name("python3 app.py", None), "python3");
+        assert_eq!(process_name("[kworker/u4:0-events_unbound]", None), "[kworker/u4:0-events_unbound]");
         assert!(kill_error_message("kill: (1) - Operation not permitted").contains("sudo -i"));
         assert_eq!(kill_error_message("kill: (99999) - No such process"), "进程已经不在了。");
     }

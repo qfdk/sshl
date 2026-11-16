@@ -205,6 +205,13 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   只有进程 / 端口两个列表（`system_panel::views_for`，macOS 没有 systemd）。没权限（`services::needs_root`）时不只报错，
   而是提议「在终端里用 sudo 执行」，把 sudo 命令发到终端（`SystemPanelEvent::RunInTerminal`），密码在终端里输或点填充密码。
   看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
+  外观是用户在 Claude Design 画布上从五个方案里挑的（2026-11-16，「上面 B 的卡片、下面 C 的表格」；嫌原来「太白」，A 的表格首字母方块 + 数据条又「太密」）：
+  四项指标在一张卡片里，每项一段同色浅底 + 圆环（`paint_ring`，PathBuilder 画弧、两头补圆点；用量 ≥75% / ≥90% 整段换橙 / 红，`usage_color`）；
+  表格铺满卡片宽、细线分行，标签页选中项实心蓝底带条数，排序列蓝字 + 箭头。进程表：用户列 root 橙、登录用户蓝（`set_machine` 的 `me`：本机 $USER、远程连接的用户名）、
+  `_` 开头的系统账号淡色；CPU ≥5% 实心标签白字（`*_SOLID` token，白字 4.5:1）、0.5–5% 浅底标签；内存 ≥100 MB 紫字；进程名加粗 + 完整命令行淡色。
+  数字用界面字体的等宽数字（`tnum`），等宽字体只留给命令行和监听地址。「进程」列按进程名排（不按命令行路径）。
+  窄窗口：指标两段一组（每段至少 `SEGMENT_MIN_WIDTH`），放不下一排四段就 2 × 2；进程名先放全，命令行拿剩下的宽度（窄了先缩没）。
+  进程名按 ps 的 comm 切（`ProcessInfo::program`）：macOS 的程序路径里常有空格（Chrome / Docker 的 Helper），只按第一个空格切会只剩「Google」。
   macOS（本机和远程的 Mac 一样）：端口用 `netstat -anvl`——不是 root 也带每个端口的 `进程名:pid`（lsof 只看得到自己的），名字是 16 字节的 p_comm，
   被截断的用 `ps -axo comm`（argv[0]，redis 这类会改写）里以它开头的补全；内存用 vm_stat，已用同活动监视器（匿名页 - 可清除 + 联动 + 压缩）；
   磁盘按 APFS 容器算（已用 = 总量 - 可用：/ 是只读的系统卷，它自己的已用只有十几 GB）。

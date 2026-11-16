@@ -358,7 +358,6 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("服务|标签页", "Services"),
     ("用户", "User"),
     ("内存", "Memory"),
-    ("命令", "Command"),
     ("协议", "Protocol"),
     ("地址", "Address"),
     ("进程", "Process"),

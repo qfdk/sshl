@@ -627,7 +627,7 @@ impl Workspace {
                             files.set_session(None, window, cx);
                             files.show_disconnected(Some(connection_id), window, cx);
                         });
-                        self.system_panel.update(cx, |panel, cx| panel.set_machine(None, cx));
+                        self.system_panel.update(cx, |panel, cx| panel.set_machine(None, None, cx));
                     }
                     cx.notify();
                 }
@@ -697,7 +697,9 @@ impl Workspace {
         }
         let id = connection_id.to_string();
         let machine = if local { Some(Machine::Local) } else { file_session.as_ref().map(|s| Machine::Remote(s.session_id.clone())) };
-        self.system_panel.update(cx, |panel, cx| panel.set_machine(machine, cx));
+        // 系统页把登录用户的进程标出来：本机是 SSHL 自己的用户，远程是连接里的用户名
+        let me = if local { std::env::var("USER").ok() } else { self.connection(connection_id).map(|c| c.username.clone()) };
+        self.system_panel.update(cx, |panel, cx| panel.set_machine(machine, me, cx));
         self.file_manager.update(cx, |files, cx| {
             files.set_session(file_session, window, cx);
             if disconnected {
@@ -852,7 +854,7 @@ impl Workspace {
                 self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
                 self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
             }
-            self.system_panel.update(cx, |panel, cx| panel.set_machine(None, cx));
+            self.system_panel.update(cx, |panel, cx| panel.set_machine(None, None, cx));
             self.fill_menu = None;
             self.top_panel = None;
             window.focus(&self.focus, cx);

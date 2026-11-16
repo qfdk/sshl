@@ -122,6 +122,11 @@ pub mod ui {
     /// 成功 / 警告色做文字时：亮色用深一号的（原色在白底上对比度不够），深色用亮一号的。
     pub const SUCCESS_FOREGROUND: Token = token(0x047857, 0x34d399);
     pub const WARNING_FOREGROUND: Token = token(0xb45309, 0xfbbf24);
+    pub const DESTRUCTIVE_FOREGROUND: Token = token(0xc40009, 0xf87171);
+    /// 成功 / 警告 / 危险色做实心底、上面是白字（「系统」页 CPU 用得多的进程）：两种外观同一个值，白字都在 4.5:1 以上。
+    pub const SUCCESS_SOLID: Token = token(0x047857, 0x047857);
+    pub const WARNING_SOLID: Token = token(0xc2410c, 0xc2410c);
+    pub const DESTRUCTIVE_SOLID: Token = token(0xdc2626, 0xdc2626);
     /// 「系统」页区分指标用：内存紫、磁盘青绿。
     pub const VIOLET: Token = token(0x7c3aed, 0xa78bfa);
     pub const TEAL: Token = token(0x0f766e, 0x2dd4bf);
@@ -437,6 +442,30 @@ mod tests {
             assert!(hover >= 4.5, "{name}：悬停行上的字只有 {hover:.2}:1");
             let tip = ui_contrast(ui::TOOLTIP_FOREGROUND, ui::TOOLTIP, dark);
             assert!(tip >= 7., "{name}：气泡提示的字只有 {tip:.2}:1");
+        }
+    }
+
+    /// 「系统」页：CPU 实心标签上的白字；四项指标各自同色浅底上的百分比、标题、数值（用量高时底色换成橙 / 红）。
+    #[test]
+    fn system_page_colors_stay_readable() {
+        use crate::system_panel::{SEGMENT_TINT, readable};
+        for dark in [false, true] {
+            let name = if dark { "深色" } else { "浅色" };
+            for solid in [ui::SUCCESS_SOLID, ui::WARNING_SOLID, ui::DESTRUCTIVE_SOLID] {
+                let label = ui_contrast(ui::PRIMARY_FOREGROUND, solid, dark);
+                assert!(label >= 4.5, "{name}：{solid:?} 上的白字只有 {label:.2}:1");
+            }
+            let tint = SEGMENT_TINT[usize::from(dark)];
+            for base in [ui::PRIMARY, ui::VIOLET, ui::TEAL, ui::SUCCESS_FOREGROUND, ui::WARNING, ui::DESTRUCTIVE] {
+                let mut wash: Hsla = gpui::rgb(base.resolve(dark)).into();
+                wash.a = tint;
+                let ground = luminance(over(wash, gpui::rgb(ui::CARD.resolve(dark)).into()));
+                for text in [readable(base), ui::FOREGROUND, ui::MUTED_FOREGROUND] {
+                    let l = luminance(gpui::rgb(text.resolve(dark)));
+                    let ratio = (l.max(ground) + 0.05) / (l.min(ground) + 0.05);
+                    assert!(ratio >= 4.5, "{name}：{base:?} 浅底上的 {text:?} 只有 {ratio:.2}:1");
+                }
+            }
         }
     }
 

@@ -26,6 +26,9 @@ pub struct ProcessInfo {
     /// 常驻内存，KB。
     pub rss_kb: u64,
     pub command: String,
+    /// 命令行开头的程序（可执行文件，macOS 上是完整路径，里面可能有空格）。从 ps 的 comm 来，命令行以它开头才算；
+    /// None 时程序就是命令行的第一个词。
+    pub program: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,11 +55,15 @@ pub struct Overview {
     pub uptime_secs: Option<u64>,
 }
 
-/// 全部进程。args 放最后：命令行里有空格。
-pub const PROCESSES_COMMAND: &str = "LC_ALL=C ps -eo pid=,user=,pcpu=,pmem=,rss=,args=";
+/// 全部进程。args 放最后：命令行里有空格。后面附每个进程的 comm（macOS 上是程序的完整路径，用来切出带空格的程序名），
+/// 读不到 comm 不算失败。
+pub const PROCESSES_COMMAND: &str =
+    "sh -c 'LC_ALL=C ps -eo pid=,user=,pcpu=,pmem=,rss=,args= && { echo @@comm; LC_ALL=C ps -eo pid=,comm= 2>/dev/null; true; }'";
 
 pub fn parse_processes(out: &str) -> Vec<ProcessInfo> {
-    out.lines()
+    let (list, comm) = out.split_once("\n@@comm\n").unwrap_or((out, ""));
+    let programs: HashMap<u32, String> = comm.lines().filter_map(comm_entry).collect();
+    list.lines()
         .filter_map(|line| {
             let mut it = line.split_whitespace();
             let pid = it.next()?.parse().ok()?;
@@ -65,7 +72,11 @@ pub fn parse_processes(out: &str) -> Vec<ProcessInfo> {
             let mem = it.next()?.parse().ok()?;
             let rss_kb = it.next()?.parse().ok()?;
             let command = it.collect::<Vec<_>>().join(" ");
-            Some(ProcessInfo { pid, user, cpu, mem, rss_kb, command })
+            let program = programs
+                .get(&pid)
+                .filter(|program| command.strip_prefix(program.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')))
+                .cloned();
+            Some(ProcessInfo { pid, user, cpu, mem, rss_kb, command, program })
         })
         .collect()
 }
@@ -145,14 +156,25 @@ fn parse_darwin(line: &str, column: OwnerColumn) -> Option<PortInfo> {
     Some(PortInfo { proto: proto_of(proto), address, port, pid: pid.parse().ok(), process: Some(name.to_string()).filter(|n| !n.is_empty()) })
 }
 
-/// `ps -axo pid=,comm=` 的一行 → (pid, 程序名)。macOS 的 comm 是可执行文件的完整路径（里面可能有空格）。
-fn comm_line(line: &str) -> Option<(u32, String)> {
+/// `ps -o pid=,comm=` 的一行 → (pid, comm)。macOS 的 comm 是可执行文件的完整路径（里面可能有空格）；
+/// 连续的空白并成一个，同 [`parse_processes`] 里的命令行。
+fn comm_entry(line: &str) -> Option<(u32, String)> {
     let (pid, comm) = line.trim().split_once(char::is_whitespace)?;
-    let name = comm.trim().rsplit('/').next()?;
+    let comm = comm.split_whitespace().collect::<Vec<_>>().join(" ");
+    if comm.is_empty() {
+        return None;
+    }
+    Some((pid.parse().ok()?, comm))
+}
+
+/// `ps -axo pid=,comm=` 的一行 → (pid, 程序名)。
+fn comm_line(line: &str) -> Option<(u32, String)> {
+    let (pid, comm) = comm_entry(line)?;
+    let name = comm.rsplit('/').next()?;
     if name.is_empty() {
         return None;
     }
-    Some((pid.parse().ok()?, name.to_string()))
+    Some((pid, name.to_string()))
 }
 
 pub fn parse_ports(out: &str) -> Vec<PortInfo> {
@@ -398,8 +420,37 @@ mod tests {
         let out = "    1 root      0.0  0.1  11236 /sbin/init splash\n 1234 www-data 12.5  2.3 190000 nginx: worker process\n  363 root               0.0  0.0   2624 /usr/libexec/dprivacyd\nbad line\n";
         let procs = parse_processes(out);
         assert_eq!(procs.len(), 3);
-        assert_eq!(procs[1], ProcessInfo { pid: 1234, user: "www-data".into(), cpu: 12.5, mem: 2.3, rss_kb: 190000, command: "nginx: worker process".into() });
+        assert_eq!(
+            procs[1],
+            ProcessInfo { pid: 1234, user: "www-data".into(), cpu: 12.5, mem: 2.3, rss_kb: 190000, command: "nginx: worker process".into(), program: None }
+        );
         assert_eq!(procs[2].command, "/usr/libexec/dprivacyd");
+    }
+
+    /// macOS 的程序路径里常有空格（Chrome 的 Helper），光看命令行切不出程序名；ps 的 comm 是完整路径，按 pid 对上、
+    /// 命令行以它开头时就是程序。Linux 的 comm 是内核里最多 15 个字的短名，`nginx: worker process` 这类还改写过命令行，对不上的不算。
+    #[test]
+    fn the_program_comes_from_comm_when_the_command_line_starts_with_it() {
+        let out = "\
+ 3130 qfdk      3.1  0.5 171000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif) --type=gpu-process\n\
+ 9140 qfdk      9.3  1.2 391000 claude\n\
+ 1234 www-data 12.5  2.3 190000 nginx: worker process\n\
+  700 root      0.0  0.0   1000 /usr/sbin/sshd -D\n\
+   42 root      0.0  0.0      0 [kworker/u4:0-events_unbound]\n\
+@@comm\n\
+ 3130 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif)\n\
+ 9140 claude\n\
+ 1234 nginx\n\
+  700 sshd\n\
+   42 kworker/u4:0-ev\n";
+        let procs = parse_processes(out);
+        assert_eq!(procs.iter().map(|p| p.pid).collect::<Vec<_>>(), [3130, 9140, 1234, 700, 42], "@@comm 下面的不是进程");
+        assert_eq!(procs[0].program.as_deref(), Some("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif)"));
+        assert_eq!(procs[1].program.as_deref(), Some("claude"), "整个命令行就是程序");
+        assert_eq!(procs[2].program, None, "nginx 改写了命令行，「nginx」后面不是空格");
+        assert_eq!(procs[3].program, None, "Linux 的 comm 只是短名");
+        assert_eq!(procs[4].program, None);
+        assert_eq!(parse_processes("    1 root 0.0 0.1 11236 /sbin/init splash\n")[0].program, None, "没有 comm 那段（老输出）照样能读");
     }
 
     #[test]
