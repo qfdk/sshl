@@ -1,7 +1,7 @@
 //! 「系统」页：负载 / 内存 / 磁盘 / 运行时间，进程、监听端口和 systemd 服务；结束进程、启停服务。
-//! 看服务日志发到终端里做。
-//! 命令以文件管理当前身份执行（终端 sudo -i 之后就是 root）；没权限时提议改在终端里用 sudo 执行。
-//! 停在这页时每 3 秒刷新一次。
+//! 看服务日志发到终端里做。看的是当前标签那台机器：远程会话的服务器，或者本机标签的这台 Mac（没有服务列表）。
+//! 远程的命令以文件管理当前身份执行（终端 sudo -i 之后就是 root），本机的以 SSHL 自己的身份；
+//! 没权限时提议改在终端里用 sudo 执行。停在这页时每 3 秒刷新一次。
 
 use std::ops::Range;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use gpui::{
     anchored, deferred, div, prelude::FluentBuilder, px, uniform_list,
 };
 use gpui_base::input::{InputEvent, InputState};
-use sshl_core::server_info::{self, Overview, PortInfo, ProcessInfo};
+use sshl_core::server_info::{self, Machine, Overview, PortInfo, ProcessInfo};
 use sshl_core::services::{self, ServiceAction, ServiceInfo};
 
 use crate::assets::Icon;
@@ -105,7 +105,8 @@ enum Loaded {
 }
 
 pub struct SystemPanel {
-    session_id: Option<String>,
+    /// 看的是哪台机器；None = 当前标签没连着。
+    machine: Option<Machine>,
     active: bool,
     view: View,
     overview: Option<Overview>,
@@ -157,6 +158,19 @@ pub fn format_uptime(secs: u64) -> String {
         (0, _) => tr!("{} 小时 {} 分", hours, minutes),
         _ => tr!("{} 天 {} 小时", days, hours),
     }
+}
+
+/// 这台机器有哪几个列表：本机（macOS）没有 systemd 服务。没连着时照旧三个（只显示空状态）。
+pub fn views_for(machine: Option<&Machine>) -> &'static [View] {
+    match machine {
+        Some(Machine::Local) => &[View::Processes, View::Ports],
+        _ => &[View::Processes, View::Ports, View::Services],
+    }
+}
+
+/// 换到另一台机器时还停在原来的列表；那台没有这个列表（本机没有服务）就回到进程。
+pub fn view_on(machine: Option<&Machine>, view: View) -> View {
+    if views_for(machine).contains(&view) { view } else { View::Processes }
 }
 
 /// 搜索：PID、用户、命令里含关键字（不分大小写）。
@@ -369,7 +383,7 @@ impl SystemPanel {
             _ => {}
         });
         Self {
-            session_id: None,
+            machine: None,
             active: false,
             view: View::Processes,
             overview: None,
@@ -393,12 +407,13 @@ impl SystemPanel {
         }
     }
 
-    /// 切会话 / 断开（None）。
-    pub fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
-        if self.session_id == session_id {
+    /// 切标签（远程会话 / 本机）/ 断开（None）。几个本机标签看的是同一台机器，在它们之间切不重新读。
+    pub fn set_machine(&mut self, machine: Option<Machine>, cx: &mut Context<Self>) {
+        if self.machine == machine {
             return;
         }
-        self.session_id = session_id;
+        self.view = view_on(machine.as_ref(), self.view);
+        self.machine = machine;
         self.overview = None;
         self.processes = None;
         self.ports = None;
@@ -427,7 +442,7 @@ impl SystemPanel {
     }
 
     fn restart(&mut self, cx: &mut Context<Self>) {
-        self._refresh = (self.active && self.session_id.is_some()).then(|| {
+        self._refresh = (self.active && self.machine.is_some()).then(|| {
             cx.spawn(async move |this, cx| {
                 loop {
                     if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
@@ -440,18 +455,18 @@ impl SystemPanel {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else { return };
+        let Some(machine) = self.machine.clone() else { return };
         self.request += 1;
         let request = self.request;
         let view = self.view;
-        let sid = session_id.clone();
-        let overview = backend::spawn(async move { server_info::overview(&backend::get().state, sid).await });
+        let target = machine.clone();
+        let overview = backend::spawn(async move { server_info::overview(&backend::get().state, &target).await });
         let list = backend::spawn(async move {
             let state = &backend::get().state;
             match view {
-                View::Processes => server_info::processes(state, session_id).await.map(Loaded::Processes),
-                View::Ports => server_info::ports(state, session_id).await.map(Loaded::Ports),
-                View::Services => services::services(state, session_id).await.map(Loaded::Services),
+                View::Processes => server_info::processes(state, &machine).await.map(Loaded::Processes),
+                View::Ports => server_info::ports(state, &machine).await.map(Loaded::Ports),
+                View::Services => services::services(state, &machine).await.map(Loaded::Services),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -513,7 +528,7 @@ impl SystemPanel {
 
     fn kill(&mut self, pid: u32, name: String, force: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        let Some(session_id) = self.session_id.clone() else { return };
+        let Some(machine) = self.machine.clone() else { return };
         let (title, detail) = if force {
             (tr!("强制结束 {}？", name), tr!("PID {} · kill -9：进程来不及收尾（不保存、不清理），只在普通结束不管用时用。", pid))
         } else {
@@ -526,7 +541,7 @@ impl SystemPanel {
             if !answer.await.unwrap_or(false) {
                 return;
             }
-            let result = backend::spawn(async move { server_info::kill(&backend::get().state, session_id, pid, force).await }).await;
+            let result = backend::spawn(async move { server_info::kill(&backend::get().state, &machine, pid, force).await }).await;
             // 给进程一点时间退出，再刷新列表
             cx.background_executor().timer(Duration::from_millis(300)).await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -563,7 +578,7 @@ impl SystemPanel {
     /// 启动 / 停止 / 重启 / 开关开机启动。停止和重启先确认（停错了可能把正在用的东西断掉）。
     fn service_action(&mut self, service: ServiceInfo, action: ServiceAction, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        let Some(session_id) = self.session_id.clone() else { return };
+        let Some(machine) = self.machine.clone() else { return };
         let name = service.name().to_string();
         let confirm = matches!(action, ServiceAction::Stop | ServiceAction::Restart).then(|| {
             let mut options = Options::new(tr!("{}{}？", action_label(action), name)).confirm(action_label(action));
@@ -584,7 +599,7 @@ impl SystemPanel {
                 this.busy = Some(unit.clone());
                 cx.notify();
             });
-            let result = backend::spawn(async move { services::act(&backend::get().state, session_id, action, unit).await }).await;
+            let result = backend::spawn(async move { services::act(&backend::get().state, &machine, action, unit).await }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match result {
@@ -1047,23 +1062,25 @@ impl Render for SystemPanel {
             View::Services => (service_count.unwrap_or(0), self.services.is_some()),
         };
         let this = cx.entity().downgrade();
-        let tab_label = |label: &str, count: Option<usize>| -> SharedString {
+        let tab_label = |view: View| -> SharedString {
+            let (label, count) = match view {
+                View::Processes => (trc!("标签页", "进程"), process_count),
+                View::Ports => (trc!("标签页", "端口"), port_count),
+                View::Services => (trc!("标签页", "服务"), service_count),
+            };
             match count {
                 Some(n) => format!("{label} {n}").into(),
-                None => label.to_string().into(),
+                None => label.into(),
             }
         };
+        let views: Vec<(View, Option<Icon>, SharedString)> = views_for(self.machine.as_ref()).iter().map(|&view| (view, None, tab_label(view))).collect();
         let toolbar = div()
             .flex()
             .items_center()
             .gap_3()
             .child(kit::segmented(
                 "system-view",
-                &[
-                    (View::Processes, None, tab_label(trc!("标签页", "进程"), process_count)),
-                    (View::Ports, None, tab_label(trc!("标签页", "端口"), port_count)),
-                    (View::Services, None, tab_label(trc!("标签页", "服务"), service_count)),
-                ],
+                &views,
                 self.view,
                 move |view, _, cx| {
                     let _ = this.update(cx, |this, cx| this.set_view(view, cx));
@@ -1123,7 +1140,7 @@ impl Render for SystemPanel {
         };
 
         let view_is_services = self.view == View::Services;
-        let empty: Option<SharedString> = if self.session_id.is_none() {
+        let empty: Option<SharedString> = if self.machine.is_none() {
             Some(tr!("连接服务器后显示它的进程、端口和服务").into())
         } else if let Some(error) = &self.error {
             Some(list_error_message(error).into())
@@ -1368,6 +1385,17 @@ mod tests {
         assert_eq!(order, ["apport", "apport-autoreport"]);
         let order = filter_services(&similar, "", (ServiceSortKey::Status, false)).iter().map(|s| s.name().to_string()).collect::<Vec<_>>();
         assert_eq!(order, ["apport", "apport-autoreport"], "同状态也按显示的名字");
+    }
+
+    #[test]
+    fn the_local_machine_has_processes_and_ports_but_no_services() {
+        let (local, remote) = (Machine::Local, Machine::Remote("s1".into()));
+        assert_eq!(views_for(Some(&local)), [View::Processes, View::Ports], "macOS 没有 systemd");
+        assert_eq!(views_for(Some(&remote)), [View::Processes, View::Ports, View::Services]);
+        assert_eq!(views_for(None), [View::Processes, View::Ports, View::Services], "没连着时照旧三个");
+        assert_eq!(view_on(Some(&local), View::Services), View::Processes, "从服务器的服务列表切到本机：回到进程");
+        assert_eq!(view_on(Some(&local), View::Ports), View::Ports, "两边都有的留在原处");
+        assert_eq!(view_on(Some(&remote), View::Services), View::Services);
     }
 
     #[test]

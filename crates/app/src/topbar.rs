@@ -14,7 +14,10 @@ use crate::settings;
 use crate::sidebar::{DragPreview, sidebar_toggle_button};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
-use crate::workspace::{CONTENT_EDGE, ConnectionMenu, DraggedTab, MainTab, TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS, TRAFFIC_LIGHTS_WIDTH, TopPanel, Workspace, controls, drag_region};
+use crate::workspace::{
+    CONTENT_EDGE, ConnectionMenu, DraggedTab, MainTab, TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS, TRAFFIC_LIGHTS_WIDTH, TopPanel, Workspace, controls, drag_region,
+    main_tabs_for,
+};
 
 actions!(topbar, [ConfirmTabRename, CancelTabRename]);
 
@@ -75,7 +78,7 @@ impl Workspace {
         }
         self.settle_rename(window, cx);
         let connected = self.active.is_some();
-        // 本机标签只有终端：不放 终端 / 文件管理 / 系统 和填充密码
+        // 本机标签没有文件管理（只切 终端 / 系统）、没有填充密码
         let local = self.active_session().is_some_and(|s| s.local);
         let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
         drag_region("topbar")
@@ -121,7 +124,7 @@ impl Workspace {
                         )
                     })
                     .when(connected, |r| r.child(self.panel_button(TopPanel::Snippets, cx)).child(self.panel_button(TopPanel::Favorites, cx)))
-                    .when(connected && !local, |r| r.child(self.main_tabs(cx)))
+                    .when(connected, |r| r.child(self.main_tabs(local, cx)))
                     .when(connected && !local && (self.fill_feedback || self.active_session().is_some_and(|s| s.view.read(cx).password_prompt())), |r| {
                         r.child(self.fill_button(cx))
                     })
@@ -130,20 +133,18 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn main_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// 终端 / 文件管理 / 系统（本机标签没有文件管理）。
+    fn main_tabs(&self, local: bool, cx: &mut Context<Self>) -> AnyElement {
         let hints = self.hint_visible;
         let this = cx.entity().downgrade();
+        let tabs = main_tabs_for(local);
+        let options: Vec<(MainTab, Option<Icon>, SharedString)> = tabs.iter().map(|&tab| (tab, None, main_tab_label(tab).into())).collect();
         div()
             .relative()
-            .child(kit::segmented(
-                "main-tabs",
-                &[(MainTab::Terminal, None, tr!("终端").into()), (MainTab::Files, None, tr!("文件管理").into()), (MainTab::System, None, tr!("系统").into())],
-                self.main_tab,
-                move |tab, window, cx| {
-                    let _ = this.update(cx, |this, cx| this.set_main_tab(tab, window, cx));
-                },
-            ))
-            // 快捷键角标（⌘I / ⌘O / ⌘P）浮在每个选项的右上角（与旧版一样不挤动布局）；选项等宽，叠一层同样三等分的格子放角标
+            .child(kit::segmented("main-tabs", &options, self.main_tab, move |tab, window, cx| {
+                let _ = this.update(cx, |this, cx| this.set_main_tab(tab, window, cx));
+            }))
+            // 快捷键角标（⌘I / ⌘O / ⌘P）浮在每个选项的右上角（与旧版一样不挤动布局）；选项等宽，叠一层同样等分的格子放角标
             .child(
                 div()
                     .absolute()
@@ -151,8 +152,8 @@ impl Workspace {
                     .p(px(3.))
                     .flex()
                     .gap(px(2.))
-                    .children(["show-terminal", "show-files", "show-system"].map(|id| {
-                        div().relative().flex_1().h_full().when_some(keymap::hint(cx, id), |slot, key| slot.child(hint(key, hints)))
+                    .children(tabs.iter().map(|&tab| {
+                        div().relative().flex_1().h_full().when_some(keymap::hint(cx, main_tab_command(tab)), |slot, key| slot.child(hint(key, hints)))
                     })),
             )
             .into_any_element()
@@ -603,6 +604,23 @@ impl Workspace {
             let input = rename.input.clone();
             self.finish_rename_later(&input, true, window, cx);
         }
+    }
+}
+
+fn main_tab_label(tab: MainTab) -> &'static str {
+    match tab {
+        MainTab::Terminal => tr!("终端"),
+        MainTab::Files => tr!("文件管理"),
+        MainTab::System => tr!("系统"),
+    }
+}
+
+/// 切到这一页的命令（`keymap::COMMANDS` 里的 id），角标读它的实际绑定。
+fn main_tab_command(tab: MainTab) -> &'static str {
+    match tab {
+        MainTab::Terminal => "show-terminal",
+        MainTab::Files => "show-files",
+        MainTab::System => "show-system",
     }
 }
 

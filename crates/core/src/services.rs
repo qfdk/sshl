@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::error::AppResult;
+use crate::server_info::Machine;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,13 +161,13 @@ pub fn needs_root(error: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
-pub async fn services(state: &AppState, session_id: String) -> AppResult<Option<Vec<ServiceInfo>>> {
-    Ok(parse_services(&crate::server_info::run(state, &session_id, SERVICES_COMMAND).await?))
+pub async fn services(state: &AppState, machine: &Machine) -> AppResult<Option<Vec<ServiceInfo>>> {
+    Ok(parse_services(&crate::server_info::run(state, machine, SERVICES_COMMAND).await?))
 }
 
 /// systemctl 默认等任务做完才返回：返回时服务已经起来 / 停下了（或失败）。
-pub async fn act(state: &AppState, session_id: String, action: ServiceAction, unit: String) -> AppResult<()> {
-    crate::server_info::run(state, &session_id, &action_command(action, &unit)).await.map(|_| ())
+pub async fn act(state: &AppState, machine: &Machine, action: ServiceAction, unit: String) -> AppResult<()> {
+    crate::server_info::run(state, machine, &action_command(action, &unit)).await.map(|_| ())
 }
 
 #[cfg(test)]

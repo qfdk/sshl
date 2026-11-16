@@ -13,6 +13,7 @@ use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, AuthKind, SaveConnectionInput, StoredConnection};
 use sshl_core::crypto_store;
 use sshl_core::events::CoreEvent;
+use sshl_core::server_info::Machine;
 use sshl_core::sftp;
 use sshl_core::ssh::{self, ConnectionDetails};
 
@@ -49,12 +50,17 @@ const LATENCY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// 按住 ⌘ 多久后浮出快捷键角标：太短则 ⌘C / ⌘V 这类快捷键会让角标一闪。
 const HINT_DELAY: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MainTab {
     Terminal,
     Files,
     /// 进程、端口、负载。
     System,
+}
+
+/// 顶栏能切的页：本机标签没有文件管理，只有 终端 / 系统（系统页看的是这台 Mac）。
+pub(crate) fn main_tabs_for(local: bool) -> &'static [MainTab] {
+    if local { &[MainTab::Terminal, MainTab::System] } else { &[MainTab::Terminal, MainTab::Files, MainTab::System] }
 }
 
 pub struct Session {
@@ -65,7 +71,7 @@ pub struct Session {
     /// 标签的自定义名字（双击标签 / 右键「重命名」）；None 用默认名字。只跟着这个打开的标签，不存库、重启不留。
     pub custom_title: Option<SharedString>,
     pub view: Entity<TerminalView>,
-    /// 本机终端（没有文件管理 / 系统页 / 填充密码）。
+    /// 本机终端（没有文件管理、填充密码；系统页看的是这台 Mac）。
     pub local: bool,
     /// 本机标签的序号（「本机」「本机 2」…）；远程会话是 0。
     pub local_number: usize,
@@ -621,7 +627,7 @@ impl Workspace {
                             files.set_session(None, window, cx);
                             files.show_disconnected(Some(connection_id), window, cx);
                         });
-                        self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
+                        self.system_panel.update(cx, |panel, cx| panel.set_machine(None, cx));
                     }
                     cx.notify();
                 }
@@ -682,15 +688,16 @@ impl Workspace {
             Some(FileSession { session_id, connection_id: s.connection_id.clone(), name: s.name.clone() })
         });
         let disconnected = self.session(connection_id).is_some_and(|s| s.view.read(cx).is_disconnected());
-        // 本机标签只有终端：停在文件管理 / 系统页时切回终端
-        if self.session(connection_id).is_some_and(|s| s.local) && self.main_tab != MainTab::Terminal {
+        let local = self.session(connection_id).is_some_and(|s| s.local);
+        // 本机标签没有文件管理：停在文件管理页时切回终端（停在系统页的接着看这台 Mac）
+        if !main_tabs_for(local).contains(&self.main_tab) {
             self.main_tab = MainTab::Terminal;
             self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
             self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
         }
         let id = connection_id.to_string();
-        let system_session = file_session.as_ref().map(|s| s.session_id.clone());
-        self.system_panel.update(cx, |panel, cx| panel.set_session(system_session, cx));
+        let machine = if local { Some(Machine::Local) } else { file_session.as_ref().map(|s| Machine::Remote(s.session_id.clone())) };
+        self.system_panel.update(cx, |panel, cx| panel.set_machine(machine, cx));
         self.file_manager.update(cx, |files, cx| {
             files.set_session(file_session, window, cx);
             if disconnected {
@@ -845,7 +852,7 @@ impl Workspace {
                 self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
                 self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
             }
-            self.system_panel.update(cx, |panel, cx| panel.set_session(None, cx));
+            self.system_panel.update(cx, |panel, cx| panel.set_machine(None, cx));
             self.fill_menu = None;
             self.top_panel = None;
             window.focus(&self.focus, cx);
@@ -1292,14 +1299,14 @@ impl Workspace {
         if self.active.is_none() || self.main_tab == tab {
             return;
         }
-        // 本机标签没有文件管理 / 系统页
-        if tab != MainTab::Terminal && self.active_session().is_some_and(|s| s.local) {
+        // 本机标签没有文件管理（⌘O 不动）
+        if !main_tabs_for(self.active_session().is_some_and(|s| s.local)).contains(&tab) {
             return;
         }
         self.main_tab = tab;
         self.fill_menu = None;
         self.file_manager.update(cx, |files, cx| files.set_active(tab == MainTab::Files, window, cx));
-        // 系统页的命令以文件管理当前身份跑：先跟上终端此刻的用户（sudo -i 之后是 root）
+        // 系统页的远程命令以文件管理当前身份跑：先跟上终端此刻的用户（sudo -i 之后是 root）；本机标签没有文件管理会话，不动
         if tab == MainTab::System {
             self.file_manager.update(cx, |files, cx| files.sync_identity_quietly(window, cx));
         }
@@ -1675,6 +1682,12 @@ mod tests {
         assert_eq!(quit_question(0), None, "没有标签：直接退");
         assert_eq!(quit_question(3).as_deref(), Some("开着的 3 个标签会关闭，连着的会话会断开。"));
         assert!(quit_question(1).is_some());
+    }
+
+    #[test]
+    fn local_tabs_switch_between_terminal_and_system_only() {
+        assert_eq!(main_tabs_for(true), [MainTab::Terminal, MainTab::System], "本机没有文件管理");
+        assert_eq!(main_tabs_for(false), [MainTab::Terminal, MainTab::Files, MainTab::System]);
     }
 
     #[test]

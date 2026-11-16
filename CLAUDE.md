@@ -198,11 +198,20 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
   同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
 - **「系统」页**（⌘P，顶栏顺序 终端（⌘I）/ 文件管理（⌘O）/ 系统，系统不常用放最后，`system_panel.rs` + core 的 `server_info.rs` / `services.rs`）：负载 / 内存 / 磁盘 / 运行时间，
-  下面三个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、再否则 lsof）、systemd 服务（list-units + list-unit-files，
+  下面三个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、macOS 用 netstat -anvl、再否则 lsof）、systemd 服务（list-units + list-unit-files，
   没被载入的已停服务也列出）。可结束进程、启停 / 重启服务、开关开机启动（停止、重启先确认）。容器管理做过又删了：用户用不到。
-  命令走 `run_as_file_user`，切过来时先同步文件管理身份，终端 sudo -i 之后就以 root 跑。没权限（`services::needs_root`）时不只报错，
+  看哪台机器是 `server_info::Machine`：远程会话（`Remote`）的命令走 `run_as_file_user`，切过来时先同步文件管理身份，终端 sudo -i 之后就以 root 跑；
+  本机标签（`Local`）看这台 Mac，命令以 SSHL 自己的身份用 /bin/sh 跑，结束进程直接 kill(2)（`local_pid`：0 和负数是进程组，不发），
+  只有进程 / 端口两个列表（`system_panel::views_for`，macOS 没有 systemd）。没权限（`services::needs_root`）时不只报错，
   而是提议「在终端里用 sudo 执行」，把 sudo 命令发到终端（`SystemPanelEvent::RunInTerminal`），密码在终端里输或点填充密码。
   看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
+  macOS（本机和远程的 Mac 一样）：端口用 `netstat -anvl`——不是 root 也带每个端口的 `进程名:pid`（lsof 只看得到自己的），名字是 16 字节的 p_comm，
+  被截断的用 `ps -axo comm`（argv[0]，redis 这类会改写）里以它开头的补全；内存用 vm_stat，已用同活动监视器（匿名页 - 可清除 + 联动 + 压缩）；
+  磁盘按 APFS 容器算（已用 = 总量 - 可用：/ 是只读的系统卷，它自己的已用只有十几 GB）。
+  **netstat 只在进程的祖先里没有 ad-hoc 签名的程序时才列得出端口**（macOS 27 实测：同一个程序 ad-hoc 签名时一行都没有、不报错，
+  Developer ID 签名后正常；读 pcblist 的 sysctl 本身对没有私有授权的进程只给空表）。装好的 SSHL（deploy.sh）和发版包都是 Developer ID 签名的；
+  `cargo run`、`cargo test`、只跑 bundle.sh 的 ad-hoc 包里 netstat 是空的，命令自动退到 lsof（只有自己的进程）。验证 netstat 那条路要把二进制用
+  Developer ID 签了再跑（单测见 `local_ports_of_every_user_when_signed` 的说明）。Homebrew 的 python / perl 也是 ad-hoc 的，从它们里面跑 netstat 同样是空的。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
 - **本机终端**（⌘N——用户开终端的第一反应是它；新建连接是 ⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
@@ -214,7 +223,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   Claude Code 的会话标记（`CLAUDECODE`、`CLAUDE_CODE_*`、`CLAUDE_PID`、`AI_AGENT`…）。在 Claude Code 里 `open -a SSHL`（部署完重开）时
   整个会话的环境都跟进 SSHL；不去掉的话本机终端里再开的 claude 以为自己是那次会话的子会话，提示「Transcript saving is off」、不存对话记录，
   而且从这样的终端里再部署又会带进下一个 SSHL（用户反复遇到过）。
-  工作区里本机标签 id 是 `local:<n>`（`Session.local`）：只有终端（不显示 终端 / 文件管理 / 系统、填充密码，⌘O / ⌘P 不切），
+  工作区里本机标签 id 是 `local:<n>`（`Session.local`）：没有文件管理和填充密码，顶栏只切 终端 / 系统（`workspace::main_tabs_for`，⌘O 不切），
   shell 退出标签直接关；⌘W 前台只有 shell 时直接关，有程序在跑（`tcgetpgrp` ≠ shell）才问；新标签从当前本机标签前台进程的目录开始
   （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段的「本机」、本机的目录收藏都归属 `local`（`workspace::LOCAL_SCOPE`），所有本机标签共用。
   标签切换 ⌘⇧] / ⌘⇧[、⌃Tab / ⌃⇧Tab（`groups::cycle_tab`，两头绕回）；⌘1 … ⌘9 切到第几个标签（`groups::nth_tab`，本机标签也算，
