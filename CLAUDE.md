@@ -88,10 +88,11 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   所以悬停时只给纯文本网址画下划线。点击时 OSC 8 优先（程序明说的目标；显示的字可能是截断的或另一个网址），没有才用纯文本的。只开 http / https / ftp / mailto（`frame::openable`），file: / javascript: 之类一律不开。
   ⌘+（⌘=）/ ⌘- / ⌘0 放大 / 缩小 / 回默认字号：改的是全局字号并存盘（`settings::update`，所有终端一起变）。
 - **GNU screen 不进备用屏**（`terminal/gnu_screen.rs`，效果同 `~/.screenrc` 里的 `termcapinfo xterm* ti@:te@`，服务器上不用配）：
-  screen 每次连上（启动、`screen -r`、挂起后 fg）都先发 is2（`\e[!p…`，DECSTR 打头）再紧跟 smcup，认出这一对就把 smcup 吞掉，之后它的 rmcup 也吞掉。
+  screen 每次连上（启动、`screen -r`、挂起后 fg）都先发 is2（`\e[!p\e[?3;4l\e[4l\e>`）再紧跟 smcup，认出连着的这一整串就把 smcup 吞掉，之后它的 rmcup 也吞掉。
+  只认整串、不只看 DECSTR：别的程序先软复位再进备用屏会被认错，跑在主屏上冲掉回滚历史；认漏了只是照旧进备用屏。
   screen 留在主屏上画，滚出去的行进回滚历史（它在从第一行开始的滚动区底边换行，最后一行是 hardstatus 时 libghostty 也照样存），滚轮、⌘F 照常用。
   不这样的话：备用屏没有回滚历史，滚轮在备用屏里又换成方向键（less / man 靠它翻页），发给 screen 窗口里的程序——
-  脚本在跑时被 tty 回显成一串 `^[[B`，还真进了它的输入（用户报过）。vim / less 的 smcup 前面没有 DECSTR，照常进备用屏。
+  脚本在跑时被 tty 回显成一串 `^[[B`，还真进了它的输入（用户报过）。vim / less 的 smcup 前面没有 is2，照常进备用屏。
   被切在两片输出之间的半截序列留到下一片再判断；断线原地重连时状态清掉。副作用同 ti@:te@：screen 退出 / 断开后它的画面留在屏幕上，
   screen 里切窗口时几个窗口的内容混在回滚历史里。tmux 不管：`set -g mouse on` 之后滚轮走鼠标上报，tmux 自己翻。
 - **终端流控**：shell 通道用 vendored russh 的手动窗口（2MB）。终端线程解析完一片就 `ShellHandle::ack`，

@@ -5,28 +5,25 @@
 //! 照常进备用屏的话，screen 里滚出屏幕的行哪儿都不留（备用屏没有回滚历史）；滚轮在备用屏里又换成方向键，
 //! 发给 screen 窗口里的程序——在 shell 里是翻历史，脚本在跑时被 tty 回显成一串 `^[[B`，还真进了脚本的输入。
 //!
-//! 认出「DECSTR 后面紧跟 smcup」就把这个 smcup 吞掉：screen 留在主屏上画。它往上滚动时在滚动区底边换行
+//! 认出这一整串（is2 紧跟 smcup）就把其中的 smcup 吞掉：screen 留在主屏上画。它往上滚动时在滚动区底边换行
 //! （`ScrollV`：滚动区从第一行开始，最后一行留给 hardstatus 时也是），滚出去的行进回滚历史，滚轮、⌘F 照常用。
 //! 之后它退出 / 断开时发的 rmcup（`\e[?1049l`）也吞掉，同 ti@:te@：screen 的画面留在屏幕上，提示符接在下面。
-//! vim、less、htop 这类程序的 smcup 前面没有 DECSTR，照常进备用屏。
+//! vim、less、htop 这类程序的 smcup 前面没有 is2，照常进备用屏。只认整串、不只看 DECSTR：is2 和 smcup 是两条独立的
+//! terminfo 能力，别的程序先软复位再进备用屏也是可能的；认错了它就跑在主屏上、冲掉回滚历史，认漏了只是照旧进备用屏。
 
 use std::borrow::Cow;
 use std::ops::Range;
 
-/// 软复位（DECSTR），xterm 系 is2 的开头。
-const DECSTR: &[u8] = b"\x1b[!p";
+/// xterm-256color 的 is2（DECSTR 打头）。screen 的 `InitTerm` 发完它紧接着发 smcup。
+const IS2: &[u8] = b"\x1b[!p\x1b[?3;4l\x1b[4l\x1b>";
 const SMCUP: &[u8] = b"\x1b[?1049h";
 const RMCUP: &[u8] = b"\x1b[?1049l";
-/// DECSTR 结束后这么多字节内来的 smcup 才算 screen 的：中间只隔着 is2 剩下的 13 个字节。
-const ARM_WINDOW: usize = 32;
 
 #[derive(Default)]
 pub struct GnuScreen {
     /// 吞了 screen 的 smcup、还没见到它的 rmcup。
     active: bool,
-    /// DECSTR 之后还剩多少字节内来的 smcup 算 screen 的；0 = 没在等。
-    armed: usize,
-    /// 上一片末尾可能是 DECSTR / smcup / rmcup 开头的半截，拼上下一片再判断。
+    /// 上一片末尾可能是 is2 + smcup / rmcup 开头的半截，拼上下一片再判断。
     /// 半截的转义序列交给终端也还不起作用，晚一片交过去看不出差别。
     pending: Vec<u8>,
 }
@@ -60,16 +57,13 @@ impl GnuScreen {
         let mut i = 0;
         while let Some(found) = data[i..].iter().position(|&b| b == 0x1b) {
             let at = i + found;
-            self.armed = self.armed.saturating_sub(at - i);
             let rest = &data[at..];
-            if rest.starts_with(DECSTR) {
-                self.armed = ARM_WINDOW;
-                i = at + DECSTR.len();
-            } else if self.armed > 0 && rest.starts_with(SMCUP) {
-                cuts.push(at..at + SMCUP.len());
+            if rest.starts_with(IS2) && rest[IS2.len()..].starts_with(SMCUP) {
+                // is2 照常交给终端，只去掉后面的 smcup
+                let smcup = at + IS2.len();
+                cuts.push(smcup..smcup + SMCUP.len());
                 self.active = true;
-                self.armed = 0;
-                i = at + SMCUP.len();
+                i = smcup + SMCUP.len();
             } else if self.active && rest.starts_with(RMCUP) {
                 cuts.push(at..at + RMCUP.len());
                 self.active = false;
@@ -77,18 +71,16 @@ impl GnuScreen {
             } else if self.partial(rest) {
                 return (cuts, at);
             } else {
-                self.armed = self.armed.saturating_sub(1);
                 i = at + 1;
             }
         }
-        self.armed = self.armed.saturating_sub(data.len() - i);
         (cuts, data.len())
     }
 
     /// `rest`（从某个 ESC 到这片末尾）是不是还没收完的、我们要认的序列。
     fn partial(&self, rest: &[u8]) -> bool {
-        let prefix_of = |pattern: &[u8]| rest.len() < pattern.len() && pattern.starts_with(rest);
-        prefix_of(DECSTR) || (self.armed > 0 && prefix_of(SMCUP)) || (self.active && prefix_of(RMCUP))
+        let attach = rest.len() < IS2.len() + SMCUP.len() && IS2.iter().chain(SMCUP).zip(rest).all(|(a, b)| a == b);
+        attach || (self.active && rest.len() < RMCUP.len() && RMCUP.starts_with(rest))
     }
 }
 
@@ -129,7 +121,7 @@ mod tests {
         assert!(!screen.active);
     }
 
-    /// vim / less / htop 直接发 smcup（前面没有 DECSTR）：照常进出备用屏。
+    /// vim / less / htop 直接发 smcup（前面没有 is2）：照常进出备用屏。
     #[test]
     fn other_programs_still_use_the_alternate_screen() {
         let mut screen = GnuScreen::default();
@@ -147,13 +139,24 @@ mod tests {
         assert_eq!(run(&mut screen, &[vim]), vim);
     }
 
-    /// `tput init` / `reset` 之后隔了一阵（制表位、提示符……）才开 vim：不算 screen。
+    /// `tput init` / `reset` 之后才开 vim：is2 和 smcup 中间隔着别的，不算 screen。
     #[test]
-    fn a_soft_reset_long_before_smcup_does_not_count() {
+    fn a_soft_reset_before_smcup_does_not_count() {
         let mut screen = GnuScreen::default();
-        let reset = [&b"\x1b[!p\x1b[?3;4l\x1b[4l\x1b>"[..], &b"\x1b[3g\x1bH".repeat(10), b"$ vim\r\n\x1b[?1049h"].concat();
+        let reset = [IS2, &b"\x1b[3g\x1bH".repeat(10), b"$ vim\r\n\x1b[?1049h"].concat();
         assert_eq!(run(&mut screen, &[&reset]), reset);
         assert!(!screen.active);
+    }
+
+    /// 只有 DECSTR、不是完整的 is2，紧跟着 smcup：也不算（别的程序先软复位再进备用屏）。
+    #[test]
+    fn a_bare_decstr_right_before_smcup_does_not_count() {
+        let mut screen = GnuScreen::default();
+        for app in [&b"\x1b[!p\x1b[?1049h"[..], b"\x1b[!p\x1b[4l\x1b[?1049h", b"\x1b[!p\x1b[?3;4l\x1b[4l\x1b>x\x1b[?1049h"] {
+            let session = [app, b"tui", RMCUP].concat();
+            assert_eq!(run(&mut screen, &[&session]), session);
+            assert!(!screen.active);
+        }
     }
 
     /// 序列被切在两片输出中间（SSH 包、64KB 解析片的边界）：哪儿切开都认得出，交给终端的字节一样。
