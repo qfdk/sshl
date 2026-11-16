@@ -325,7 +325,7 @@ fn login_shell() -> PathBuf {
 }
 
 /// 子进程环境要去掉的和要设的。终端类型同 SSH 那边（xterm-256color）；从别的终端里启动 SSHL 时
-/// 带进来的那个终端的变量去掉。没设语言时补一个 UTF-8 的 LANG（从 Finder 打开的应用没有），
+/// 带进来的那个终端的变量去掉（[`from_launcher`]）。没设语言时补一个 UTF-8 的 LANG（从 Finder 打开的应用没有），
 /// 否则 zsh 里中文显示成 <ffffffe4> 这类转义。
 fn child_env(keys: impl Iterator<Item = String>, lang: impl FnOnce() -> String) -> (Vec<String>, Vec<(String, String)>) {
     let mut remove = Vec::new();
@@ -334,7 +334,7 @@ fn child_env(keys: impl Iterator<Item = String>, lang: impl FnOnce() -> String) 
         if matches!(key.as_str(), "LANG" | "LC_ALL" | "LC_CTYPE") {
             has_locale = true;
         }
-        if key.starts_with("GHOSTTY_") || key.starts_with("ITERM_") || key.starts_with("SSHL_DEV_") || key == "TERMINFO" || key == "TERM_SESSION_ID" {
+        if from_launcher(&key) {
             remove.push(key);
         }
     }
@@ -348,6 +348,17 @@ fn child_env(keys: impl Iterator<Item = String>, lang: impl FnOnce() -> String) 
         set.push(("LANG".to_string(), lang()));
     }
     (remove, set)
+}
+
+/// 说的是启动 SSHL 的那个程序、不是这个新终端的变量：别的终端（Ghostty、iTerm）的，开发测试口的，
+/// 还有 Claude Code 给它的命令设的会话标记（在 Claude Code 里 `open -a SSHL` 时整个带进来：本机终端里再开的 claude
+/// 会以为自己是那次会话的子会话，不存对话记录）。用户的 Claude 配置（CLAUDE_CONFIG_DIR、settings.json 里的）不在其中。
+fn from_launcher(key: &str) -> bool {
+    key.starts_with("GHOSTTY_")
+        || key.starts_with("ITERM_")
+        || key.starts_with("SSHL_DEV_")
+        || key.starts_with("CLAUDE_CODE_")
+        || matches!(key, "TERMINFO" | "TERM_SESSION_ID" | "CLAUDECODE" | "CLAUDE_PID" | "CLAUDE_EFFORT" | "AI_AGENT")
 }
 
 /// 系统语言地区对应的 UTF-8 locale（同 Terminal / Ghostty），系统里没有这个 locale 就用 en_US.UTF-8。
@@ -544,6 +555,16 @@ mod tests {
         assert!(set.contains(&("LANG".into(), "zh_CN.UTF-8".into())));
         let (_, set) = child_env(keys(&["LC_ALL"]), || unreachable!("已有语言设置就不问系统"));
         assert!(!set.iter().any(|(k, _)| k == "LANG"));
+    }
+
+    /// SSHL 是在 Claude Code 的会话里打开的（比如部署完 `open -a SSHL`）时，它的环境里带着那次会话的标记；
+    /// 原样传下去的话，本机终端里再开的 claude 以为自己是那次会话的子会话，不存对话记录（「Transcript saving is off」）。
+    /// 用户自己的配置留着。
+    #[test]
+    fn child_env_drops_the_markers_of_a_claude_code_session_that_launched_sshl() {
+        let keys = ["HOME", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_PID", "CLAUDE_EFFORT", "AI_AGENT", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY"];
+        let (remove, _) = child_env(keys.iter().map(|k| k.to_string()), || "en_US.UTF-8".into());
+        assert_eq!(remove, ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_PID", "CLAUDE_EFFORT", "AI_AGENT"]);
     }
 
     #[test]

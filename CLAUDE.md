@@ -210,6 +210,10 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
   TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上
   （`seq` 这类逐行 write 的和 `script -q /dev/null` 一样慢，是内核开销，不是终端）。
+  SSHL 自己的环境原样传给 shell，只去掉说的是「启动 SSHL 的那个程序」的变量（`local_shell::from_launcher`）：Ghostty / iTerm 的、开发测试口的、
+  Claude Code 的会话标记（`CLAUDECODE`、`CLAUDE_CODE_*`、`CLAUDE_PID`、`AI_AGENT`…）。在 Claude Code 里 `open -a SSHL`（部署完重开）时
+  整个会话的环境都跟进 SSHL；不去掉的话本机终端里再开的 claude 以为自己是那次会话的子会话，提示「Transcript saving is off」、不存对话记录，
+  而且从这样的终端里再部署又会带进下一个 SSHL（用户反复遇到过）。
   工作区里本机标签 id 是 `local:<n>`（`Session.local`）：只有终端（不显示 终端 / 文件管理 / 系统、填充密码，⌘O / ⌘P 不切），
   shell 退出标签直接关；⌘W 前台只有 shell 时直接关，有程序在跑（`tcgetpgrp` ≠ shell）才问；新标签从当前本机标签前台进程的目录开始
   （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段的「本机」、本机的目录收藏都归属 `local`（`workspace::LOCAL_SCOPE`），所有本机标签共用。
