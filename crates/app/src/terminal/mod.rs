@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod frame;
+mod gnu_screen;
 mod keys;
 pub mod view;
 

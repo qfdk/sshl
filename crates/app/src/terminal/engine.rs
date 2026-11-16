@@ -24,6 +24,7 @@ use libghostty_vt::{RenderState, Terminal};
 use sshl_core::ssh::ShellHandle;
 
 use super::frame::{self, flags, Cell, Cursor, CursorShape, Frame, Rgb, Row};
+use super::gnu_screen::GnuScreen;
 use crate::theme::term::Theme;
 
 /// 给远端 PTY 的 window_change 最多约 30 次/秒：拖动窗口时本地每帧都重排，远端只跟最后的尺寸。
@@ -237,6 +238,7 @@ struct Engine {
     buf: Vec<u8>,
     focused: bool,
     blink: BlinkPolicy,
+    gnu_screen: GnuScreen,
 }
 
 /// 把终端整理成 [`Frame`] 交给界面。
@@ -386,13 +388,15 @@ impl Engine {
             buf: Vec::with_capacity(64),
             focused: true,
             blink: BlinkPolicy::default(),
+            gnu_screen: GnuScreen::default(),
         })
     }
 
-    /// 远端输出交给 libghostty 解析；光标闪烁按 `BlinkPolicy` 改回来（不认 DEC 12）。
+    /// 远端输出交给 libghostty 解析：GNU screen 的进出备用屏先去掉（[`GnuScreen`]）；光标闪烁按 `BlinkPolicy` 改回来（不认 DEC 12）。
     fn write_output(&mut self, bytes: &[u8]) {
-        self.term.vt_write(bytes);
-        self.blink.feed(bytes);
+        let bytes = self.gnu_screen.filter(bytes);
+        self.term.vt_write(&bytes[..]);
+        self.blink.feed(&bytes[..]);
         let _ = self.term.set_mode(Mode::CURSOR_BLINKING, self.blink.blinking());
     }
 
@@ -544,6 +548,7 @@ impl Engine {
                 *self.shell.lock().unwrap() = shell;
                 // 旧通道没确认完的字节不能记到新通道头上
                 self.unacked = 0;
+                self.gnu_screen.reset();
             }
             Input::Theme(theme) => {
                 if let Err(error) = apply_theme(&mut self.term, theme) {
@@ -1228,6 +1233,31 @@ mod tests {
         assert!(blinking(&mut engine, &shared, b"\x1b[4"), "还没收完，不变");
         assert!(!blinking(&mut engine, &shared, b" q"), "DECSCUSR 4（分两片到）：不闪的下划线");
         assert!(!blinking(&mut engine, &shared, b"\x1b[?12h\x1b[?12l"), "DEC 12 不认，仍按 DECSCUSR 不闪");
+    }
+
+    /// GNU screen 连上时先发 is2（DECSTR 打头）再发 smcup：不进备用屏，它滚出去的行进回滚历史（滚轮、⌘F 都能用），
+    /// 退出时的 rmcup 也不认。vim 这类直接发 smcup 的照常进备用屏。
+    #[test]
+    fn gnu_screen_stays_on_the_primary_screen_so_its_output_reaches_the_scrollback() {
+        let (mut engine, shared) = engine();
+        let alternate = |engine: &Engine| engine.term.active_screen().unwrap() == Screen::Alternate;
+        engine.write_output(b"$ screen\r\n\x1b[!p\x1b[?3;4l\x1b[4l\x1b>\x1b[?1049h\x1b[22;0;0t\x1b[?1h\x1b=\x1b[H\x1b[2J");
+        assert!(!alternate(&engine), "screen 留在主屏");
+        // screen 往上滚：滚动区从第一行到倒数第二行（最后一行是 hardstatus），光标到滚动区底边再换行
+        engine.write_output(b"\x1b[1;23r");
+        for i in 0..40 {
+            engine.write_output(format!("\x1b[23;1H\nline {i}").as_bytes());
+        }
+        engine.write_output(b"\x1b[24;1Hhardstatus");
+        // 屏幕上是 line 17…39，滚出去的 line 0…16 在回滚历史最后 17 行
+        engine.handle(Input::Scroll(-17));
+        engine.paint().unwrap();
+        assert_eq!(first_row(&shared), "line 0", "滚出去的行在回滚历史里");
+        // screen 退出：rmcup 不认，画面留着，提示符接在下面
+        engine.write_output(b"\x1b[r\x1b[24;1H\x1b[?1049l\x1b[23;0;0t\r\n[screen is terminating]\r\n$ ");
+        assert!(!alternate(&engine));
+        engine.write_output(b"vim\r\n\x1b[?1049h\x1b[22;0;0t");
+        assert!(alternate(&engine), "vim 照常进备用屏");
     }
 
     fn first_row(shared: &Shared) -> String {
