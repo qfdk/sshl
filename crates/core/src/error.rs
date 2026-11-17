@@ -24,6 +24,14 @@ pub enum AppError {
     Other(String),
 }
 
+impl AppError {
+    /// 改名的目标已经有东西了：不覆盖它（`path` 是目标的完整路径，报错里只说名字）。
+    pub fn name_taken(path: &str) -> Self {
+        let name = path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path);
+        AppError::Other(crate::tr!("「{}」已被占用，请换一个名字。", name))
+    }
+}
+
 impl Serialize for AppError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())

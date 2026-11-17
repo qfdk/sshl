@@ -354,6 +354,30 @@ pub fn set_bookmarked(connection_id: &str, path: &str, bookmarked: bool) -> AppR
     db::with_db(|conn| set_bookmarked_in(conn, connection_id, path, bookmarked))
 }
 
+/// 目录改名了：收藏的这个目录和它下面的目录跟着换路径（名字、顺序不变）。
+pub fn move_bookmarks(connection_id: &str, from: &str, to: &str) -> AppResult<()> {
+    db::with_db(|conn| move_bookmarks_in(conn, connection_id, from, to))
+}
+
+fn move_bookmarks_in(conn: &rusqlite::Connection, connection_id: &str, from: &str, to: &str) -> rusqlite::Result<()> {
+    let from = from.trim_end_matches('/');
+    let to = to.trim_end_matches('/');
+    let below = format!("{from}/");
+    for bookmark in bookmarks_in(conn, connection_id)? {
+        let path = bookmark.path;
+        if path != from && !path.starts_with(&below) {
+            continue;
+        }
+        let moved = format!("{to}{}", &path[from.len()..]);
+        // 新路径上原来还有一条（收藏的目录后来被删了、又有东西改成了这个名字）：挪过来的这条取代它
+        conn.execute(
+            "UPDATE OR REPLACE bookmarks SET path=?3 WHERE connection_id=?1 AND path=?2",
+            rusqlite::params![connection_id, path, moved],
+        )?;
+    }
+    Ok(())
+}
+
 fn bookmarks_in(conn: &rusqlite::Connection, connection_id: &str) -> rusqlite::Result<Vec<Bookmark>> {
     let mut stmt = conn.prepare("SELECT path, name FROM bookmarks WHERE connection_id=?1 ORDER BY sort_order, rowid")?;
     let rows = stmt.query_map(rusqlite::params![connection_id], |r| Ok(Bookmark { path: r.get(0)?, name: r.get(1)? }))?;
@@ -461,6 +485,30 @@ mod tests {
         assert_eq!(bookmark_paths(&conn, "a"), ["/etc/nginx"]);
         set_bookmarked_in(&conn, "a", "/var/log", true).unwrap();
         assert_eq!(bookmark_paths(&conn, "a"), ["/etc/nginx", "/var/log"], "重新收藏排到最后");
+    }
+
+    #[test]
+    fn renaming_a_directory_moves_its_bookmarks_and_the_ones_below_it() {
+        let conn = memory_db();
+        for path in ["/srv/app", "/var/log", "/srv/app/logs", "/srv/app-old", "/srv/apple"] {
+            set_bookmarked_in(&conn, "a", path, true).unwrap();
+        }
+        set_bookmarked_in(&conn, "b", "/srv/app", true).unwrap();
+        rename_bookmark_in(&conn, "a", "/srv/app/logs", "日志").unwrap();
+
+        move_bookmarks_in(&conn, "a", "/srv/app", "/srv/web").unwrap();
+        assert_eq!(bookmark_paths(&conn, "a"), ["/srv/web", "/var/log", "/srv/web/logs", "/srv/app-old", "/srv/apple"], "顺序不变，名字相近的兄弟目录不动");
+        assert_eq!(bookmarks_in(&conn, "a").unwrap()[2].name, "日志", "起的名字跟着走");
+        assert_eq!(bookmark_paths(&conn, "b"), ["/srv/app"], "别的连接不动");
+
+        // 新路径上已有一条失效的收藏：挪过去的这条取代它，不报错、不留两条
+        set_bookmarked_in(&conn, "a", "/srv/api", true).unwrap();
+        move_bookmarks_in(&conn, "a", "/srv/web", "/srv/api").unwrap();
+        assert_eq!(bookmark_paths(&conn, "a"), ["/srv/api", "/var/log", "/srv/api/logs", "/srv/app-old", "/srv/apple"]);
+
+        // 改的不是收藏的目录：什么都不变
+        move_bookmarks_in(&conn, "a", "/etc", "/etc2").unwrap();
+        assert_eq!(bookmark_paths(&conn, "a").len(), 5);
     }
 
     #[test]

@@ -6,9 +6,10 @@ mod drag;
 mod identity;
 mod model;
 mod progress;
+mod rename;
 mod sudo;
 mod view;
 
 pub use delete::shell_quote;
 pub use model::{bookmark_label, bookmark_lines};
-pub use view::{FileManager, FileManagerEvent, FileSession, SelectAllFiles, ToggleBookmark, ToggleHiddenFiles, key_bindings};
+pub use view::{FILE_LIST_CONTEXT, FileManager, FileManagerEvent, FileSession, RenameFile, SelectAllFiles, ToggleBookmark, ToggleHiddenFiles, key_bindings};

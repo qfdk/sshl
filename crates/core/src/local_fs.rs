@@ -60,6 +60,26 @@ pub async fn file_delete_local_directory(dir_path: String) -> AppResult<()> {
     Ok(())
 }
 
+/// 改名（文件管理本地栏）。目标已经有东西就不改：`rename(2)` 会悄悄把它覆盖掉。
+/// 只差大小写的（`a.txt` → `A.txt`）在不分大小写的磁盘上目标就是它自己（同一个 inode），照改。
+pub async fn file_rename_local(from: String, to: String) -> AppResult<()> {
+    tokio::task::spawn_blocking(move || rename_local(Path::new(&from), Path::new(&to)))
+        .await
+        .map_err(|e| AppError::Other(format!("rename: {e}")))?
+}
+
+fn rename_local(from: &Path, to: &Path) -> AppResult<()> {
+    use std::os::unix::fs::MetadataExt;
+    // 都不跟随符号链接：改的是链接本身，指向哪儿不管
+    let source = std::fs::symlink_metadata(from)?;
+    let taken = std::fs::symlink_metadata(to).is_ok_and(|target| (target.dev(), target.ino()) != (source.dev(), source.ino()));
+    if taken {
+        return Err(AppError::name_taken(&to.to_string_lossy()));
+    }
+    std::fs::rename(from, to)?;
+    Ok(())
+}
+
 /// 本地路径各是不是目录（从 Finder 拖进来的只有路径）。读不到的按文件处理，上传时再报错。
 pub async fn file_local_kinds(paths: Vec<String>) -> Vec<bool> {
     let mut kinds = Vec::with_capacity(paths.len());
@@ -79,7 +99,71 @@ pub fn local_exists(path: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_list_local, local_exists};
+    use super::{file_list_local, file_rename_local, local_exists};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("sshl-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    async fn rename(dir: &std::path::Path, from: &str, to: &str) -> Result<(), String> {
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        file_rename_local(path(from), path(to)).await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn renaming_never_overwrites_what_is_already_there() {
+        let root = temp_dir("rename");
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("taken.txt"), b"keep me").unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        std::fs::write(root.join("dir/inside.txt"), b"x").unwrap();
+
+        rename(&root, "a.txt", "b.txt").await.unwrap();
+        assert_eq!(names(&root), ["b.txt", "dir", "taken.txt"]);
+        assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"a");
+
+        let error = rename(&root, "b.txt", "taken.txt").await.unwrap_err();
+        assert!(error.contains("taken.txt"), "{error}");
+        assert_eq!(std::fs::read(root.join("taken.txt")).unwrap(), b"keep me", "被占用的不能被覆盖");
+        assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"a");
+        assert!(rename(&root, "b.txt", "dir").await.is_err(), "也不能把文件改成已有文件夹的名字");
+
+        rename(&root, "dir", "folder").await.unwrap();
+        assert_eq!(std::fs::read(root.join("folder/inside.txt")).unwrap(), b"x", "文件夹连里面的东西一起改名");
+        assert!(rename(&root, "missing.txt", "x.txt").await.is_err(), "原文件不在了要报错");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 只改大小写：在不分大小写的磁盘上（macOS 默认）目标查得到，但就是它自己，照改。
+    #[tokio::test]
+    async fn changing_only_the_case_renames_the_file() {
+        let root = temp_dir("rename-case");
+        std::fs::write(root.join("readme.md"), b"r").unwrap();
+        rename(&root, "readme.md", "README.md").await.unwrap();
+        assert_eq!(names(&root), ["README.md"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_symlink_is_renamed_itself_not_its_target() {
+        let root = temp_dir("rename-link");
+        std::fs::write(root.join("target.txt"), b"t").unwrap();
+        std::os::unix::fs::symlink("target.txt", root.join("link")).unwrap();
+        rename(&root, "link", "renamed-link").await.unwrap();
+        assert_eq!(names(&root), ["renamed-link", "target.txt"]);
+        assert_eq!(std::fs::read_link(root.join("renamed-link")).unwrap(), std::path::Path::new("target.txt"));
+        // 指向 target.txt 的链接不算「target.txt 就是它自己」
+        assert!(rename(&root, "renamed-link", "target.txt").await.is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn existence_follows_links_and_counts_broken_ones() {

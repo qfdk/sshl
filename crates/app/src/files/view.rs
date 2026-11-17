@@ -42,7 +42,7 @@ use crate::prompts::{self, Choice, Options, PasswordAnswer};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
 
-actions!(files, [SelectAllFiles, ClearFileSelection, PathNext, PathPrev, PathComplete, PathDismiss, ToggleHiddenFiles, ToggleBookmark]);
+actions!(files, [SelectAllFiles, ClearFileSelection, PathNext, PathPrev, PathComplete, PathDismiss, ToggleHiddenFiles, ToggleBookmark, RenameFile, ConfirmRename, CancelRename]);
 
 mod dialogs;
 mod dragging;
@@ -52,10 +52,12 @@ mod menu;
 mod ops;
 mod pane;
 mod path_bar;
+mod rename;
 mod transfer;
 
 use dialogs::{NewFolderDialog, PermissionDialog};
 use dragging::DragState;
+use rename::RenameState;
 use transfer::Job;
 
 /// 文件管理用的会话：切会话 / 断开时由工作区设置。
@@ -76,10 +78,17 @@ const DIVIDER_WIDTH: f32 = 10.;
 
 const MONO_FONT: &str = "Menlo";
 
-/// 写死的按键（⌘A / ⌘⇧. / ⌘D 能在设置里改，在 `keymap.rs`）。要晚于 gpui-base 绑：同一节点上后绑的优先，地址栏里的方向键 / Tab / Esc 先给补全。
+/// 文件列表（不含地址栏、对话框）：↵ 改名只在这里管用。
+pub const FILE_LIST_CONTEXT: &str = "FileList";
+
+/// 写死的按键（⌘A / ⌘⇧. / ⌘D / ↵ 能在设置里改，在 `keymap.rs`）。要晚于 gpui-base 绑：同一节点上后绑的优先，
+/// 地址栏里的方向键 / Tab / Esc 先给补全。改名框里的 ↵ / Esc 也要自己绑：gpui-base 的单行输入框处理完回车还让它
+/// 往外传，传到列表上就成了「再改一次名」。
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("escape", ClearFileSelection, Some("FileManager")),
+        KeyBinding::new("enter", ConfirmRename, Some("FileRename > Input")),
+        KeyBinding::new("escape", CancelRename, Some("FileRename > Input")),
         KeyBinding::new("down", PathNext, Some("FilePathBar > Input")),
         KeyBinding::new("up", PathPrev, Some("FilePathBar > Input")),
         KeyBinding::new("tab", PathComplete, Some("FilePathBar > Input")),
@@ -233,6 +242,7 @@ pub struct FileManager {
     bookmark_list: bool,
     permission: Option<PermissionDialog>,
     new_folder: Option<NewFolderDialog>,
+    rename: Option<RenameState>,
     dragging: Option<DragState>,
     hover_pane: Option<PaneKind>,
     hover_row: Option<(PaneKind, String)>,
@@ -307,6 +317,7 @@ impl FileManager {
             bookmark_list: false,
             permission: None,
             new_folder: None,
+            rename: None,
             dragging: None,
             hover_pane: None,
             hover_row: None,
@@ -474,15 +485,20 @@ impl FileManager {
         self.last_selected = Some((kind, index));
     }
 
-    /// 全选当前目录的全部条目（含没画出来的行），并清空另一侧，与点选规则一致。
-    fn select_all(&mut self, _: &SelectAllFiles, window: &mut Window, cx: &mut Context<Self>) {
-        let kind = if self.local.list_focus.is_focused(window) {
+    /// 按键（⌘A、↵）管哪一栏：焦点在哪个列表上就是哪个；都不在时是最近按过的一侧，都没碰过时已连接选远程，否则选本地。
+    fn focused_pane(&self, window: &Window) -> PaneKind {
+        if self.local.list_focus.is_focused(window) {
             PaneKind::Local
         } else if self.remote.list_focus.is_focused(window) {
             PaneKind::Remote
         } else {
             self.active_pane.unwrap_or(if self.session.is_some() { PaneKind::Remote } else { PaneKind::Local })
-        };
+        }
+    }
+
+    /// 全选当前目录的全部条目（含没画出来的行），并清空另一侧，与点选规则一致。
+    fn select_all(&mut self, _: &SelectAllFiles, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.focused_pane(window);
         let all = self.pane(kind).files.iter().map(|f| f.path.clone()).collect();
         self.pane_mut(kind).selected = all;
         self.pane_mut(kind.other()).selected.clear();
@@ -570,6 +586,7 @@ impl FileManager {
 
 impl Render for FileManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_rename(window, cx);
         let weak = cx.entity().downgrade();
         let resizing = self.resize.is_some();
         let local = self.render_pane(PaneKind::Local, window, cx);
@@ -608,6 +625,7 @@ impl Render for FileManager {
             .gap(px(10.))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(|this, _: &RenameFile, window, cx| this.rename_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleHiddenFiles, window, cx| this.toggle_hidden_files(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleBookmark, window, cx| {
                 if this.session.is_some() {
@@ -717,9 +735,9 @@ impl Render for FileManager {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{KeyContext, Keymap, Keystroke, Modifiers};
+    use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, Modifiers};
 
-    use super::ToggleHiddenFiles;
+    use super::{FILE_LIST_CONTEXT, ToggleHiddenFiles, key_bindings};
 
     /// macOS 上按 ⌘⇧. 送来的按键：Shift 并进字符，key 是「>」、只剩 ⌘（gpui-pre-macos 的 parse_keystroke）。
     /// 绑定写成 cmd-shift-. 永远对不上。
@@ -731,5 +749,27 @@ mod tests {
         let (bindings, _) = keymap.bindings_for_input(&[typed], &stack);
         assert_eq!(bindings.len(), 1);
         assert!(bindings[0].action().partial_eq(&ToggleHiddenFiles));
+    }
+
+    /// ↵：文件列表上是改名（同 Finder）；改名框里是确认改名，排在最前、不往外传；地址栏和对话框里的输入框
+    /// 还是它自己的回车，不能顺带把选中的文件改名（gpui-base 的单行输入框处理完回车会让它接着往外传）。
+    #[test]
+    fn enter_renames_only_in_the_file_list() {
+        gpui::actions!(test, [InputEnter]);
+        let mut keymap = Keymap::new(vec![KeyBinding::new("enter", InputEnter, Some("Input"))]);
+        keymap.add_bindings(crate::keymap::default_bindings());
+        keymap.add_bindings(key_bindings());
+        let enter = |path: &[&str]| -> Vec<String> {
+            let stack: Vec<KeyContext> = path.iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+            let (bindings, _) = keymap.bindings_for_input(&[Keystroke::parse("enter").unwrap()], &stack);
+            bindings.iter().map(|b| b.action().name().to_string()).collect()
+        };
+        let list = ["Root", "Workspace", "FileManager", FILE_LIST_CONTEXT];
+        assert_eq!(enter(&list), ["files::RenameFile"]);
+        let renaming = enter(&[&list[..], &["FileRename", "Input"]].concat());
+        assert_eq!(renaming.first().map(String::as_str), Some("files::ConfirmRename"), "{renaming:?}");
+        for path in [&["Root", "Workspace", "FileManager", "FilePathBar", "Input"][..], &["Root", "Workspace", "FileManager", "Input"]] {
+            assert!(!enter(path).iter().any(|a| a == "files::RenameFile"), "{path:?}");
+        }
     }
 }

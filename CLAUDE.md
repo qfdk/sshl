@@ -203,6 +203,13 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   底栏和终端右下角的进度卡片都有停止（清空队列 + 停下正在传的）。目标已有同名的先问覆盖还是跳过（文件夹是合并），
   还有排队的时可勾「后面再遇到同名的也这样处理」（`prompts::confirm_with_check`），这一轮里都照办。
   传输可停止：`sftp::cancellable(flag, fut)` 用任务局部变量传停止开关，读写循环每块检查，停止走出错路径（`AppError::Cancelled`），临时文件照样清掉。
+- **文件管理里改名**（`files/view/rename.rs`，规则在 `files/rename.rs`）：右键「重命名」或选中一项按 ↵（同 Finder，`files-rename`），
+  名字原地换成输入框，文件只选中扩展名前面那段；↵ 确认、Esc 取消、失焦也算确认；空的 / 没改的不动，带 `/`、是 `.` `..` 的不收。
+  远程走 SFTP rename（文件管理当前身份），本地 `local_fs::file_rename_local`；目标已有东西一律不覆盖、报「已被占用」
+  （本地的 rename(2) 会悄悄覆盖，所以先比 inode：只改大小写在不分大小写的磁盘上是同一个文件，照改）。改名的是目录时收藏跟着挪
+  （`config_store::move_bookmarks`，本地栏用本机标签那份 `LOCAL_SCOPE`）。
+  ↵ 改名只绑在文件列表（`FILE_LIST_CONTEXT`）上，改名框里的 ↵ / Esc 也自己绑（`FileRename > Input`）：gpui-base 的单行输入框
+  处理完回车还 `cx.propagate()`，绑在整个文件管理上的话，地址栏、对话框、改名框里按回车会顺带把选中的那项再改一次名。
 - **SFTP 通道复用**：每个 SSH 会话缓存一个 SFTP 会话共用。
 - **数据目录权限**：`~/.sshl` 是 0700（`db::private_dir`，每次开库时保证），`master.key` 建出来就是 0600。
 - **文件管理跟随终端用户**：终端里 `su` / `sudo -i` 之后，文件管理以那个用户运行（`files/identity.rs`、

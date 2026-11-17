@@ -158,7 +158,10 @@ impl FileManager {
                 .items_center()
                 .gap_2()
                 .child(icon)
-                .child(div().min_w_0().truncate().child(entry.name.clone()));
+                .child(match self.rename_field(kind, &entry.path, cx) {
+                    Some(field) => field,
+                    None => div().min_w_0().truncate().child(entry.name.clone()).into_any_element(),
+                });
             if selected {
                 name = name.font_weight(FontWeight::MEDIUM);
             }
@@ -384,6 +387,7 @@ impl FileManager {
 
         let list = div()
             .id(("file-list", kind as usize))
+            .key_context(FILE_LIST_CONTEXT)
             .track_focus(&list_focus)
             .relative()
             .flex_1()

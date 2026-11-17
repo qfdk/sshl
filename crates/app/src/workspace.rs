@@ -79,7 +79,7 @@ pub struct Session {
 }
 
 /// 命令片段里「本机」的归属、本机的目录收藏：所有本机标签共用（标签 id 每次都不同）。
-const LOCAL_SCOPE: &str = "local";
+pub(crate) const LOCAL_SCOPE: &str = "local";
 
 /// 顶栏按钮下面的面板，一次只开一个。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

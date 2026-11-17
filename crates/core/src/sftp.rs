@@ -1557,6 +1557,23 @@ async fn download_tree(
     Ok(())
 }
 
+/// 改名（以文件管理当前身份：终端 sudo -i 之后就是 root）。
+pub async fn file_rename(state: &AppState, session_id: String, from: String, to: String) -> AppResult<()> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let sftp = sftp_for(&session).await?;
+    rename_remote(&sftp, &from, &to).await
+}
+
+/// SFTP 的 rename 本来就不覆盖已有的（OpenSSH 先 link 再 unlink），先看一眼目标是为了报得清楚，
+/// 不然只有一句「Failure」。只差大小写的不先看：不分大小写的服务器（macOS）上目标就是它自己，交给服务器判断。
+async fn rename_remote(sftp: &SftpSession, from: &str, to: &str) -> AppResult<()> {
+    if from.to_lowercase() != to.to_lowercase() && remote_exists(sftp, to).await.is_some() {
+        return Err(AppError::name_taken(to));
+    }
+    sftp.rename(from, to).await.map_err(|e| AppError::Sftp(format!("rename: {e}")))
+}
+
 pub async fn file_change_permissions(
     state: &AppState,
     session_id: String,
@@ -3262,7 +3279,7 @@ mod tests {
     /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
     mod real_sftp {
         use super::super::{
-            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, remote_exists, scan_remote,
+            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, remote_exists, rename_remote, scan_remote,
             stream_to_remote, upload_file, upload_tree, DirCounts, DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY,
             DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
         };
@@ -3456,6 +3473,39 @@ mod tests {
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&src).unwrap();
             std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 改名：文件、文件夹都不覆盖已有的；只差大小写的跳过预先检查，交给服务器（也不覆盖）；没有写权限报 Permission denied。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn rename_never_overwrites_and_reports_permission_denied() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            exec(&h, &format!("cd '{base}' && printf a > a.txt && printf keep > taken.txt && mkdir dir && printf x > dir/in.txt && printf c > c.txt && printf C > C.txt")).await;
+            let at = |name: &str| format!("{base}/{name}");
+            let cat = |names: &str| format!("cd '{base}' && cat {names}");
+
+            rename_remote(&sftp, &at("a.txt"), &at("b.txt")).await.unwrap();
+            assert_eq!(exec(&h, &format!("cd '{base}' && cat b.txt && (test -e a.txt || echo -n ' gone')")).await, "a gone");
+
+            let error = rename_remote(&sftp, &at("b.txt"), &at("taken.txt")).await.unwrap_err().to_string();
+            assert!(error.contains("taken.txt"), "报错要说是哪个名字被占了：{error}");
+            assert_eq!(exec(&h, &cat("taken.txt b.txt")).await, "keepa", "两个都原样留着");
+            assert!(rename_remote(&sftp, &at("b.txt"), &at("dir")).await.is_err(), "文件不能改成已有文件夹的名字");
+
+            rename_remote(&sftp, &at("dir"), &at("folder")).await.unwrap();
+            assert_eq!(exec(&h, &cat("folder/in.txt")).await, "x", "文件夹连里面的东西一起改名");
+
+            // Linux 分大小写：c.txt 和 C.txt 是两个文件。跳过了预先检查，服务器也不覆盖
+            assert!(rename_remote(&sftp, &at("c.txt"), &at("C.txt")).await.is_err());
+            assert_eq!(exec(&h, &cat("C.txt c.txt")).await, "Cc");
+            rename_remote(&sftp, &at("b.txt"), &at("B.txt")).await.unwrap();
+            assert_eq!(exec(&h, &cat("B.txt")).await, "a", "目标不存在时只改大小写照常");
+
+            // alice 不能写 bob 的目录
+            let error = rename_remote(&sftp, "/home/bob/uploads/existing", "/home/bob/uploads/moved").await.unwrap_err().to_string();
+            assert!(error.contains("Permission denied"), "{error}");
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
         }
 
         /// 目标目录没有写权限：要报出 Permission denied（前端据此提示改用 sudo），不能被吞成后面开文件的 No such file。

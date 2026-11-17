@@ -73,8 +73,13 @@ impl FileManager {
             (PaneKind::Local, false) => (tr!("上传文件"), Icon::Upload),
         };
         let delete_label = if item.is_directory { tr!("删除目录") } else { tr!("删除文件") };
+        let rename: fn(&mut FileManager, Vec<FileEntry>, &mut Window, &mut Context<FileManager>) = match kind {
+            PaneKind::Local => |fm, items, w, cx| fm.start_rename(PaneKind::Local, &items[0], w, cx),
+            PaneKind::Remote => |fm, items, w, cx| fm.start_rename(PaneKind::Remote, &items[0], w, cx),
+        };
         vec![
             MenuEntry::Item(MenuItem::new(label.0, with_items(vec![item.clone()], transfer)).icon(label.1)),
+            MenuEntry::Item(MenuItem::new(tr!("重命名"), with_items(vec![item.clone()], rename)).icon(Icon::Pencil)),
             MenuEntry::Item(refresh),
             MenuEntry::Item(MenuItem::new(delete_label, with_items(vec![item], delete)).icon(Icon::Trash)),
         ]

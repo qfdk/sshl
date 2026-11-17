@@ -10,7 +10,7 @@ use std::sync::{LazyLock, Mutex};
 
 use gpui::{App, Global, KeyBinding, Keystroke, OperatingSystem, SharedString};
 
-use crate::files::{SelectAllFiles, ToggleBookmark, ToggleHiddenFiles};
+use crate::files::{RenameFile, SelectAllFiles, ToggleBookmark, ToggleHiddenFiles};
 use crate::settings;
 use crate::terminal::view::{self as term, Copy, Find, FindNext, FindPrev, Paste, SelectAll, ZoomIn, ZoomOut, ZoomReset};
 use crate::workspace::{
@@ -65,6 +65,7 @@ const WORKSPACE: Option<&str> = Some("Workspace");
 const TERMINAL: Option<&str> = Some(term::CONTEXT);
 const SEARCH: Option<&str> = Some(term::SEARCH_CONTEXT);
 const FILES: Option<&str> = Some("FileManager");
+const FILE_LIST: Option<&str> = Some(crate::files::FILE_LIST_CONTEXT);
 
 macro_rules! command {
     ($id:literal, $group:ident, $label:expr, [$($key:literal),+], [$($context:expr),+], $action:expr) => {
@@ -121,6 +122,8 @@ pub static COMMANDS: &[Command] = &[
     // ⌘⇧.：macOS 把 Shift 并进字符送来「⌘>」，写 cmd-shift-. 匹配不上
     command!("files-toggle-hidden", Files, || tr!("显示 / 隐藏隐藏文件").into(), ["cmd->"], [FILES], ToggleHiddenFiles),
     command!("files-toggle-bookmark", Files, || tr!("收藏 / 取消收藏当前目录").into(), ["cmd-d"], [FILES], ToggleBookmark),
+    // 同 Finder：选中一项按 ↵ 改名。只绑在文件列表上：地址栏、对话框里的回车输入框处理完还会往外传
+    command!("files-rename", Files, || tr!("重命名").into(), ["enter"], [FILE_LIST], RenameFile),
     command!("quit", App, || tr!("退出 SSHL").into(), ["cmd-q"], [None], Quit),
     command!("hide", App, || tr!("隐藏 SSHL").into(), ["cmd-h"], [None], Hide),
     command!("hide-others", App, || tr!("隐藏其他").into(), ["alt-cmd-h"], [None], HideOthers),
