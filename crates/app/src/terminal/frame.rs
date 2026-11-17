@@ -248,47 +248,103 @@ const URL_SCHEMES: &[&str] = &["http://", "https://", "ftp://"];
 /// 格子 `(x, y)` 处的纯文本网址。整条逻辑行一起看：上一行是软换行就接着往上找开头，本行是软换行就接着往下，
 /// 登录类命令打印的长链接折成几行也是同一个。
 pub fn link_at(rows: &[Arc<Row>], x: usize, y: usize) -> Option<Link> {
-    if x >= rows.get(y)?.cells.len() {
-        return None;
-    }
-    let mut first = y;
-    while first > 0 && rows[first - 1].wrapped {
-        first -= 1;
-    }
-    let mut last = y;
-    while last + 1 < rows.len() && rows[last].wrapped {
-        last += 1;
-    }
-    // 逻辑行的字符（宽字符的占位格跳过）和每个字符所在的格子
-    let mut chars = Vec::new();
-    let mut cells = Vec::new();
-    let mut target = None;
-    for (row_y, row) in rows.iter().enumerate().take(last + 1).skip(first) {
-        for (col, cell) in row.cells.iter().enumerate() {
-            if cell.has(flags::SPACER) {
-                continue;
-            }
-            if (row_y, col) == (y, x) {
-                target = Some(chars.len());
-            }
-            chars.push(cell.ch);
-            cells.push((row_y as u16, col as u16));
+    let line = LogicalLine::at(rows, x, y)?;
+    let range = line.url_at()?;
+    Some(Link { url: line.text(range.clone()), spans: link_spans(&line.cells[range]) })
+}
+
+/// `(x, y)` 所在的逻辑行（软换行接起来的几行）。
+struct LogicalLine {
+    /// 字符（宽字符的占位格跳过）和每个字符所在的格子（行, 列）。
+    chars: Vec<char>,
+    cells: Vec<(u16, u16)>,
+    /// `(x, y)` 那一格是第几个字符。
+    at: usize,
+}
+
+impl LogicalLine {
+    fn at(rows: &[Arc<Row>], x: usize, y: usize) -> Option<Self> {
+        if x >= rows.get(y)?.cells.len() {
+            return None;
         }
-    }
-    let target = target?;
-    let mut start = 0;
-    while start <= target {
-        let Some(end) = url_end(&chars, start) else {
-            start += 1;
-            continue;
-        };
-        if target < end {
-            let url = chars[start..end].iter().collect();
-            return Some(Link { url, spans: link_spans(&cells[start..end]) });
+        let mut first = y;
+        while first > 0 && rows[first - 1].wrapped {
+            first -= 1;
         }
-        start = end;
+        let mut last = y;
+        while last + 1 < rows.len() && rows[last].wrapped {
+            last += 1;
+        }
+        let mut chars = Vec::new();
+        let mut cells = Vec::new();
+        let mut at = None;
+        for (row_y, row) in rows.iter().enumerate().take(last + 1).skip(first) {
+            for (col, cell) in row.cells.iter().enumerate() {
+                let here = (row_y, col) == (y, x);
+                if cell.has(flags::SPACER) {
+                    // 点在宽字符的右半边：算点在这个字上
+                    if here {
+                        at = chars.len().checked_sub(1);
+                    }
+                    continue;
+                }
+                if here {
+                    at = Some(chars.len());
+                }
+                chars.push(cell.ch);
+                cells.push((row_y as u16, col as u16));
+            }
+        }
+        Some(Self { chars, cells, at: at? })
     }
-    None
+
+    /// 从开头起、开头不在 `at` 后面的网址（字符下标区间），从左到右。
+    fn urls_from_start(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        let mut start = 0;
+        std::iter::from_fn(move || {
+            while start <= self.at {
+                match url_end(&self.chars, start) {
+                    Some(end) => {
+                        let range = start..end;
+                        start = end;
+                        return Some(range);
+                    }
+                    None => start += 1,
+                }
+            }
+            None
+        })
+    }
+
+    /// `at` 那个字所在的网址。
+    fn url_at(&self) -> Option<std::ops::Range<usize>> {
+        self.urls_from_start().find(|range| self.at < range.end)
+    }
+
+    fn text(&self, range: std::ops::Range<usize>) -> String {
+        self.chars[range].iter().collect()
+    }
+
+    /// 程序给网址挂的超链接把后面紧跟着的标点和字也括了进去：返回屏幕上的那个网址（按住 ⌘ 时画下划线的那段）。
+    /// Claude Code 给回复里的网址自动挂超链接，一直括到下一个空白；中文句子里网址后面直接接「，」「。」、不留空格，
+    /// 超链接就成了 `https://a.net，我先用接口确认数字…`，浏览器把整串当成域名，开出来是 `xn--net,,-…` 这样的乱码。
+    /// 认法：超链接 = 屏幕上的一个网址 + 屏幕上紧跟在它后面的字，多出来的那段从标点 / 空白开头，点的那一格落在这一段里
+    /// （点在网址后面被括进去的字上也开网址）。多出来的从字开头的不算：路径里直接写中文的网址（维基百科），
+    /// 屏幕上只认得出中文前面那段，照旧开超链接。程序自己折行时超链接接着下一行，只比屏幕上这一行有的那部分。
+    fn swallowed_by(&self, target: &str) -> Option<String> {
+        let target: Vec<char> = target.chars().collect();
+        let mut shown_end = self.chars.len();
+        while shown_end > 0 && self.chars[shown_end - 1] == ' ' {
+            shown_end -= 1;
+        }
+        self.urls_from_start().find_map(|range| {
+            let extra = target.strip_prefix(&self.chars[range.clone()])?;
+            let after = self.chars.get(range.end..shown_end).unwrap_or_default();
+            let overlap = extra.len().min(after.len());
+            let swallowed = extra.first().is_some_and(|c| !c.is_alphanumeric()) && overlap > 0 && extra[..overlap] == after[..overlap];
+            (swallowed && self.at < range.end + overlap).then(|| self.text(range))
+        })
+    }
 }
 
 /// `start` 处是网址开头的话，返回网址（去掉结尾标点后）的结尾下标（不含）。
@@ -365,6 +421,32 @@ fn link_host(url: &str) -> Option<String> {
 /// 悬停时看不到 OSC 8 的目标，服务器的输出可以写着 github.com、点下去开的是别处。同一个站（显示的是截断的网址）不算。
 pub fn disguised(shown: &str, target: &str) -> bool {
     matches!((link_host(shown), link_host(target)), (Some(shown), Some(target)) if shown != target)
+}
+
+/// ⌘ 点击链接之后做什么。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkClick {
+    Open(String),
+    /// 屏幕上显示的是 `shown`，超链接却指向另一个站 `target`：先给用户看真正的目标。
+    Confirm { shown: String, target: String },
+}
+
+/// ⌘ 点击格子 `(x, y)`：`hyperlink` 是那一格的 OSC 8 超链接（终端线程查的），纯文本网址按屏幕上的字认。
+/// 有超链接时以它为准（程序明说的目标，显示的字可能是截断的网址），显示的是一个站、指向另一个站时先问（`disguised`）；
+/// 超链接把网址后面的标点和字也括进去了的，打开屏幕上的网址（`LogicalLine::swallowed_by`）。只开 `openable` 的由打开的地方管。
+pub fn link_click(rows: &[Arc<Row>], x: usize, y: usize, hyperlink: Option<String>) -> Option<LinkClick> {
+    let line = LogicalLine::at(rows, x, y);
+    let shown = line.as_ref().and_then(|line| Some(line.text(line.url_at()?)));
+    let Some(target) = hyperlink else {
+        return shown.map(LinkClick::Open);
+    };
+    if let Some(url) = line.as_ref().and_then(|line| line.swallowed_by(&target)) {
+        return Some(LinkClick::Open(url));
+    }
+    Some(match shown {
+        Some(shown) if openable(&target) && disguised(&shown, &target) => LinkClick::Confirm { shown, target },
+        _ => LinkClick::Open(target),
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -729,6 +811,61 @@ mod tests {
         assert!(!disguised("https://[::1]:8080/a", "https://[::1]/b"));
         // 邮件地址没有主机可比
         assert!(!disguised("mailto:me@example.com", "https://example.com"));
+    }
+
+    fn click(lines: &[(&str, bool)], x: usize, y: usize, hyperlink: Option<&str>) -> Option<LinkClick> {
+        link_click(&text_rows(lines), x, y, hyperlink.map(String::from))
+    }
+
+    fn open(url: &str) -> Option<LinkClick> {
+        Some(LinkClick::Open(url.into()))
+    }
+
+    /// Claude Code 给回复里的网址挂超链接，一直括到下一个空白（目标录自 Claude Code 2.1.326）：中文句子里网址后面的
+    /// 「，我先…」也在超链接里。点网址、点被括进去的字，都开屏幕上的网址，不弹「指向别处」，也不开乱码域名。
+    #[test]
+    fn a_hyperlink_that_swallows_the_sentence_after_the_url_opens_the_url() {
+        let target = "https://dkb-test.nuxman.net，我先用接口确认数字，然后在你的浏览器里打开看看。";
+        let url = open("https://dkb-test.nuxman.net");
+        let lines = [("门户地址是 https://dkb-test.nuxman.net，我先用接口确认数字，然后在你的浏览器里打开看看。", false)];
+        assert_eq!(click(&lines, 6, 0, Some(target)), url, "网址的第一个字符");
+        assert_eq!(click(&lines, 32, 0, Some(target)), url, "网址的最后一个字符");
+        assert_eq!(click(&lines, 33, 0, Some(target)), url, "被括进超链接的逗号");
+        assert_eq!(click(&lines, 57, 0, Some(target)), url, "被括进超链接的最后一个字");
+        // 程序自己折行：这一行只到「我先用接口」，超链接接着下一行
+        let lines = [("门户地址是 https://dkb-test.nuxman.net，我先用接口", false), ("确认数字，然后在你的浏览器里打开看看。", false)];
+        assert_eq!(click(&lines, 10, 0, Some(target)), url);
+        // 英文里网址后面接的是别的标点
+        let lines = [("docs: https://a.io/x—see below", false)];
+        assert_eq!(click(&lines, 8, 0, Some("https://a.io/x—see")), open("https://a.io/x"));
+    }
+
+    /// 只有超链接多出来的那段正是屏幕上紧跟着的字、而且从标点开头时才算括多了；别的照旧以超链接为准。
+    #[test]
+    fn other_hyperlinks_still_win_over_the_text_on_screen() {
+        // 路径里直接写中文（维基百科）：屏幕上只认得出中文前面那段，多出来的是字
+        let target = "https://zh.wikipedia.org/wiki/中文";
+        assert_eq!(click(&[("见 https://zh.wikipedia.org/wiki/中文 条目", false)], 5, 0, Some(target)), open(target));
+        // 显示截断的网址，同一个站
+        let target = "https://github.com/qfdk/sshl";
+        assert_eq!(click(&[("https://github.com/…/sshl", false)], 3, 0, Some(target)), open(target));
+        // 程序自己折行把长网址切成两截：两截都开整个网址
+        let target = "https://example.com/very/long/path";
+        let lines = [("see https://example.com/very/lo", false), ("ng/path", false)];
+        assert_eq!(click(&lines, 8, 0, Some(target)), open(target), "屏幕上这一行先到头，不算括多了");
+        assert_eq!(click(&lines, 2, 1, Some(target)), open(target));
+        // 字上挂的链接（Claude Code 状态栏的 /rc）
+        let target = "https://claude.ai/code/session_x?from=cli";
+        assert_eq!(click(&[("  /rc", false)], 3, 0, Some(target)), open(target));
+        // 多出来的那段和屏幕上的字对不上：显示一个站、指向另一个站，照旧先问
+        let lines = [("go https://github.com，see", false)];
+        let disguised = Some(LinkClick::Confirm { shown: "https://github.com".into(), target: "https://github.com，evil".into() });
+        assert_eq!(click(&lines, 5, 0, Some("https://github.com，evil")), disguised);
+        let disguised = Some(LinkClick::Confirm { shown: "https://github.com".into(), target: "https://evil.example/x".into() });
+        assert_eq!(click(&lines, 5, 0, Some("https://evil.example/x")), disguised);
+        // 没有超链接：开屏幕上的网址；都没有：什么都不开
+        assert_eq!(click(&lines, 5, 0, None), open("https://github.com"));
+        assert_eq!(click(&lines, 0, 0, None), None);
     }
 
     #[test]

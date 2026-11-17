@@ -87,6 +87,11 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   结尾的标点和没配对的右括号不算）；OSC 8 超链接不在帧里，只在点击时问终端线程（`Input::LinkAt`，查那一格的 `hyperlink_uri`），
   所以悬停时只给纯文本网址画下划线。点击时 OSC 8 优先（程序明说的目标；显示的字可能是截断的或另一个网址），没有才用纯文本的。只开 http / https / mailto（`frame::openable`），file: / javascript: 之类一律不开，ftp: 也不开（访达会去挂载对方的服务器）。
   OSC 8 的目标悬停时看不到：屏幕上显示的是一个站的网址、超链接却指向另一个站（`frame::disguised`，比主机）时先弹框给用户看真正的目标；同一个站（显示的是截断的网址）直接开。
+  例外是程序把网址后面的字也括进了超链接（`frame::link_click` → `LogicalLine::swallowed_by`）：Claude Code 给回复里的网址自动挂超链接时一直括到下一个空白，
+  中文句子里网址后面直接接「，」「。」，超链接就成了 `https://a.net，我先…`（以前弹「指向别处」，点「仍然打开」浏览器开出 `xn--net,,-…` 乱码域名，用户报过）。
+  超链接 = 屏幕上的网址 + 屏幕上紧跟着的字、多出来的那段从标点 / 空白开头时，开屏幕上的网址（点在被括进去的字上也是）；
+  多出来的从字开头的（路径里直接写中文的维基百科网址）照旧开超链接。中文字的右半边是占位格，点在上面算点在这个字上（`LogicalLine::at`）。
+  SSHL 的本机终端里（`TERM_PROGRAM=SSHL`）Claude Code 2.1.326 照样给回复里的网址和状态栏的「/rc」挂超链接（实测录下的输出）。
   ⌘+（⌘=）/ ⌘- / ⌘0 放大 / 缩小 / 回默认字号：改的是全局字号并存盘（`settings::update`，所有终端一起变）。
 - **GNU screen 不进备用屏**（`terminal/gnu_screen.rs`，效果同 `~/.screenrc` 里的 `termcapinfo xterm* ti@:te@`，服务器上不用配）：
   screen 每次连上（启动、`screen -r`、挂起后 fg）都先发 is2（`\e[!p\e[?3;4l\e[4l\e>`）再紧跟 smcup，认出连着的这一整串就把 smcup 吞掉，之后它的 rmcup 也吞掉。

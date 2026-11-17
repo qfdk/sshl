@@ -1497,6 +1497,25 @@ mod tests {
         assert_eq!(hyperlink(&mut engine, 6), None, "plain");
     }
 
+    /// Claude Code 实际写出来的样子（2.1.326，只留这一句）：超链接括住网址和后面整句中文。中文字两格、第二格是占位格；
+    /// 点网址、点被括进去的字的左右半边，都开屏幕上的网址（`frame::link_click`）。
+    #[test]
+    fn claude_code_links_that_swallow_the_chinese_after_the_url_open_the_url_on_screen() {
+        let (mut engine, shared) = engine();
+        let target = "https://dkb-test.nuxman.net，我先用接口确认数字，然后在你的浏览器里打开看看。";
+        engine.write_output(format!("门户地址是\x1b[12G\x1b]8;id=16ahx31;{target}\x07{target}\x1b]8;;\x07\r\n").as_bytes());
+        engine.paint().unwrap();
+        let rows = shared.frame.lock().unwrap().rows.clone();
+        let click = |engine: &mut Engine, col: u16| frame::link_click(&rows, usize::from(col), 0, hyperlink(engine, col));
+        let url = Some(frame::LinkClick::Open("https://dkb-test.nuxman.net".into()));
+        // 「门户地址是」占 0–9 格，网址占 11–37 格，后面的「，」占 38、39
+        assert_eq!(click(&mut engine, 11), url);
+        assert_eq!(click(&mut engine, 37), url);
+        assert_eq!(click(&mut engine, 38), url, "逗号");
+        assert_eq!(click(&mut engine, 39), url, "逗号的右半边（占位格）");
+        assert_eq!(click(&mut engine, 4), None, "前面的字没有链接");
+    }
+
     /// 网址比默认缓冲区（256 字节）长：按 libghostty 给的大小再取一次，拿到完整的。
     #[test]
     fn long_osc8_hyperlinks_are_read_in_full() {

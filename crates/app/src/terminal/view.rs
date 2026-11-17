@@ -25,7 +25,7 @@ use sshl_core::local_shell::{self, LocalOptions, LocalShell};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
-use super::frame::{Frame, Link, MatchSpan, Rgb, SearchInfo, disguised, flags, link_at, openable};
+use super::frame::{Frame, Link, LinkClick, MatchSpan, Rgb, SearchInfo, flags, link_at, link_click, openable};
 use super::keys;
 use crate::assets::Icon;
 use crate::backend;
@@ -684,25 +684,29 @@ impl TerminalView {
         }
     }
 
-    /// ⌘ 点击：先问终端线程那一格有没有 OSC 8 超链接（程序明说的目标，显示的字可能是截断的或另一个网址），
-    /// 没有再用那里的纯文本网址。只开 http / https / mailto。显示的是一个站的网址、超链接却指向另一个站时先问（`frame::disguised`）。
+    /// ⌘ 点击：先问终端线程那一格有没有 OSC 8 超链接，再按屏幕上的字定打开哪个（`frame::link_click`）。
+    /// 只开 http / https / mailto。
     fn open_link_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((x, y)) = self.cell_at(position) else { return };
-        let plain = link_at(&self.frame.rows, x, y).map(|link| link.url);
+        let Some((col, row)) = self.cell_at(position) else { return };
+        let rows = self.frame.rows.clone();
         let (x, y) = self.mouse_position(position);
         let (reply, answer) = oneshot::channel();
         self.handle.send(Input::LinkAt { x, y, reply });
         cx.spawn_in(window, async move |_, cx| {
-            let Some(url) = answer.await.ok().flatten().or_else(|| plain.clone()) else { return };
-            if let Some(shown) = plain.filter(|shown| openable(&url) && disguised(shown, &url)) {
-                let options = Options::new(tr!("这个链接指向别处"))
-                    .message(tr!("显示的是\n{}\n\n实际要打开的是\n{}", shown, url))
-                    .confirm(tr!("仍然打开"));
-                let Ok(asked) = cx.update(|window, cx| prompts::confirm(window, cx, options)) else { return };
-                if !asked.await.unwrap_or(false) {
-                    return;
+            let url = match link_click(&rows, col, row, answer.await.ok().flatten()) {
+                None => return,
+                Some(LinkClick::Open(url)) => url,
+                Some(LinkClick::Confirm { shown, target }) => {
+                    let options = Options::new(tr!("这个链接指向别处"))
+                        .message(tr!("显示的是\n{}\n\n实际要打开的是\n{}", shown, target))
+                        .confirm(tr!("仍然打开"));
+                    let Ok(asked) = cx.update(|window, cx| prompts::confirm(window, cx, options)) else { return };
+                    if !asked.await.unwrap_or(false) {
+                        return;
+                    }
+                    target
                 }
-            }
+            };
             let _ = cx.update(|_, cx| open_link(&url, cx));
         })
         .detach();
