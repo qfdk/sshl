@@ -25,7 +25,7 @@ use sshl_core::local_shell::{self, LocalOptions, LocalShell};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
-use super::frame::{Frame, Link, MatchSpan, Rgb, SearchInfo, flags, link_at, openable};
+use super::frame::{Frame, Link, MatchSpan, Rgb, SearchInfo, disguised, flags, link_at, openable};
 use super::keys;
 use crate::assets::Icon;
 use crate::backend;
@@ -685,17 +685,25 @@ impl TerminalView {
     }
 
     /// ⌘ 点击：先问终端线程那一格有没有 OSC 8 超链接（程序明说的目标，显示的字可能是截断的或另一个网址），
-    /// 没有再用那里的纯文本网址。只开 http / https / ftp / mailto。
-    fn open_link_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    /// 没有再用那里的纯文本网址。只开 http / https / mailto。显示的是一个站的网址、超链接却指向另一个站时先问（`frame::disguised`）。
+    fn open_link_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some((x, y)) = self.cell_at(position) else { return };
         let plain = link_at(&self.frame.rows, x, y).map(|link| link.url);
         let (x, y) = self.mouse_position(position);
         let (reply, answer) = oneshot::channel();
         self.handle.send(Input::LinkAt { x, y, reply });
-        cx.spawn(async move |_, cx| {
-            if let Some(url) = answer.await.ok().flatten().or(plain) {
-                cx.update(|cx| open_link(&url, cx));
+        cx.spawn_in(window, async move |_, cx| {
+            let Some(url) = answer.await.ok().flatten().or_else(|| plain.clone()) else { return };
+            if let Some(shown) = plain.filter(|shown| openable(&url) && disguised(shown, &url)) {
+                let options = Options::new(tr!("这个链接指向别处"))
+                    .message(tr!("显示的是\n{}\n\n实际要打开的是\n{}", shown, url))
+                    .confirm(tr!("仍然打开"));
+                let Ok(asked) = cx.update(|window, cx| prompts::confirm(window, cx, options)) else { return };
+                if !asked.await.unwrap_or(false) {
+                    return;
+                }
             }
+            let _ = cx.update(|_, cx| open_link(&url, cx));
         })
         .detach();
     }
@@ -812,7 +820,7 @@ impl TerminalView {
         }
     }
 
-    fn mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         // ⌘ 点链接那次的松开：不交给选区 / 程序，也不「选中即复制」。松开时才打开（按下就开的话浏览器抢走前台，
         // 这次松开收不到）；按下后拖开了不算点击
         if event.button == MouseButton::Left
@@ -820,7 +828,7 @@ impl TerminalView {
         {
             let moved = event.position - pressed;
             if moved.x.abs() <= px(4.) && moved.y.abs() <= px(4.) {
-                self.open_link_at(event.position, cx);
+                self.open_link_at(event.position, window, cx);
             }
             return;
         }

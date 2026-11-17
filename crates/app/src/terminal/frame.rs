@@ -339,12 +339,32 @@ fn link_spans(cells: &[(u16, u16)]) -> Vec<LinkSpan> {
     spans
 }
 
-/// ⌘ 点击时允许打开的链接：只开网页、FTP 和邮件（ASCII 不分大小写）；file:、javascript:、
+/// ⌘ 点击时允许打开的链接：只开网页和邮件（ASCII 不分大小写）；file:、javascript:、
 /// 打开系统设置之类的 scheme 一律不开（OSC 8 的链接是远端程序写的，不能由它决定打开什么）。
+/// ftp: 也不开：访达会直接去挂载对方的服务器。
 pub fn openable(url: &str) -> bool {
-    ["http://", "https://", "ftp://", "mailto:"]
+    ["http://", "https://", "mailto:"]
         .iter()
         .any(|scheme| url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme)))
+}
+
+/// 网址里的主机（小写，不带用户名和端口）；不是 `协议://主机…` 的形式是 None。
+fn link_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    // IPv6 写在方括号里，里面的冒号不是端口
+    let host = match host.strip_prefix('[').and_then(|v6| v6.split_once(']')) {
+        Some((v6, _)) => v6,
+        None => host.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// 屏幕上显示的是网址 `shown`，程序给它挂的超链接（OSC 8）却指向另一个站 `target`：打开前要让用户看到真正的目标。
+/// 悬停时看不到 OSC 8 的目标，服务器的输出可以写着 github.com、点下去开的是别处。同一个站（显示的是截断的网址）不算。
+pub fn disguised(shown: &str, target: &str) -> bool {
+    matches!((link_host(shown), link_host(target)), (Some(shown), Some(target)) if shown != target)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -690,11 +710,25 @@ mod tests {
         assert!(openable("https://example.com"));
         assert!(openable("HTTP://example.com"));
         assert!(openable("mailto:me@example.com"));
-        assert!(openable("ftp://example.com/file"));
+        assert!(!openable("ftp://example.com/file"), "访达会去挂载对方的服务器");
         assert!(!openable("file:///etc/passwd"));
         assert!(!openable("javascript:alert(1)"));
         assert!(!openable("x-apple.systempreferences:com.apple.preference"));
         assert!(!openable(""));
+    }
+
+    /// 程序给的链接（OSC 8）可以显示成一个网址、实际指向另一个：两边主机不一样要先问。
+    #[test]
+    fn a_link_shown_as_one_site_but_pointing_to_another_is_disguised() {
+        assert!(disguised("https://github.com/qfdk/sshl", "https://evil.example/qfdk/sshl"));
+        assert!(disguised("https://github.com/login", "https://github.com@evil.example/login"), "@ 前面的是用户名，不是主机");
+        assert!(disguised("http://bank.example", "https://bank.example.evil.example/"));
+        // 同一个站：显示的是截断的、大小写 / 端口 / 协议不同，都不算
+        assert!(!disguised("https://github.com/qfdk/ss", "https://github.com/qfdk/sshl/releases?x=1#top"));
+        assert!(!disguised("https://GitHub.com", "http://github.com:443/a"));
+        assert!(!disguised("https://[::1]:8080/a", "https://[::1]/b"));
+        // 邮件地址没有主机可比
+        assert!(!disguised("mailto:me@example.com", "https://example.com"));
     }
 
     #[test]

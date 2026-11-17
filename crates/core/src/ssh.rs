@@ -198,7 +198,8 @@ async fn connect_tcp(addr: &str) -> AppResult<TcpStream> {
                 Ok(result) => result,
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    format!("connect timed out after {}s", ATTEMPT_TIMEOUT.as_secs()),
+                    // 报给用户的是最后一次的错误：写明一共试了几次，不然看着像只等了 5 秒（实际约 22 秒）
+                    format!("connect timed out ({ATTEMPTS} attempts, {}s each)", ATTEMPT_TIMEOUT.as_secs()),
                 )),
             };
 

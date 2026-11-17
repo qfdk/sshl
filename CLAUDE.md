@@ -85,7 +85,8 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   松开时才打开，按下后拖开了不算——按下就开的话浏览器抢走前台，松开收不到）。
   纯文本网址在界面线程按帧识别（`frame::link_at`：沿软换行 `Row::wrapped` 拼出整条逻辑行再找，折成几行的长链接是一个；
   结尾的标点和没配对的右括号不算）；OSC 8 超链接不在帧里，只在点击时问终端线程（`Input::LinkAt`，查那一格的 `hyperlink_uri`），
-  所以悬停时只给纯文本网址画下划线。点击时 OSC 8 优先（程序明说的目标；显示的字可能是截断的或另一个网址），没有才用纯文本的。只开 http / https / ftp / mailto（`frame::openable`），file: / javascript: 之类一律不开。
+  所以悬停时只给纯文本网址画下划线。点击时 OSC 8 优先（程序明说的目标；显示的字可能是截断的或另一个网址），没有才用纯文本的。只开 http / https / mailto（`frame::openable`），file: / javascript: 之类一律不开，ftp: 也不开（访达会去挂载对方的服务器）。
+  OSC 8 的目标悬停时看不到：屏幕上显示的是一个站的网址、超链接却指向另一个站（`frame::disguised`，比主机）时先弹框给用户看真正的目标；同一个站（显示的是截断的网址）直接开。
   ⌘+（⌘=）/ ⌘- / ⌘0 放大 / 缩小 / 回默认字号：改的是全局字号并存盘（`settings::update`，所有终端一起变）。
 - **GNU screen 不进备用屏**（`terminal/gnu_screen.rs`，效果同 `~/.screenrc` 里的 `termcapinfo xterm* ti@:te@`，服务器上不用配）：
   screen 每次连上（启动、`screen -r`、挂起后 fg）都先发 is2（`\e[!p\e[?3;4l\e[4l\e>`）再紧跟 smcup，认出连着的这一整串就把 smcup 吞掉，之后它的 rmcup 也吞掉。
