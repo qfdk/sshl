@@ -3,7 +3,7 @@
 //
 // 密钥与密文分离：master.key 独立保管，库文件即便被拷走/同步，没有密钥也解不出密码。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -13,13 +13,18 @@ use rand::RngCore;
 use crate::db;
 use crate::error::{AppError, AppResult};
 
-fn dir() -> AppResult<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| AppError::Config("no home dir".into()))?;
-    Ok(home.join(".sshl"))
+fn key_path() -> AppResult<PathBuf> {
+    Ok(db::dir()?.join("master.key"))
 }
 
-fn key_path() -> AppResult<PathBuf> {
-    Ok(dir()?.join("master.key"))
+/// 把主密钥写进文件：建出来就是 0600。先按默认权限写、写完再改的话，中间有一下别的用户读得到。
+fn write_key(path: &Path, key: &[u8; 32]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    // 已有的文件（长度不对、要重写的）不会按上面的权限重建
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(key)
 }
 
 fn load_or_create_key() -> AppResult<[u8; 32]> {
@@ -31,15 +36,10 @@ fn load_or_create_key() -> AppResult<[u8; 32]> {
             return Ok(k);
         }
     }
-    std::fs::create_dir_all(dir()?)?;
+    db::private_dir(&db::dir()?)?;
     let mut k = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut k);
-    std::fs::write(&path, k)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    write_key(&path, &k)?;
     Ok(k)
 }
 
@@ -134,4 +134,27 @@ pub fn list_accounts(id: &str) -> Vec<String> {
         Ok(v)
     })
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_key;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_master_key_file_is_only_readable_by_its_owner() {
+        let dir = std::env::temp_dir().join(format!("sshl-master-key-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let fresh = dir.join("master.key");
+        write_key(&fresh, &[7; 32]).unwrap();
+        assert_eq!((mode(&fresh), std::fs::read(&fresh).unwrap()), (0o600, vec![7; 32]));
+        // 已有一个别人读得到的（坏掉的）文件：重写后也收紧
+        let loose = dir.join("loose.key");
+        std::fs::write(&loose, b"short").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_key(&loose, &[9; 32]).unwrap();
+        assert_eq!((mode(&loose), std::fs::read(&loose).unwrap()), (0o600, vec![9; 32]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

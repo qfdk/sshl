@@ -37,6 +37,9 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 bytes = "1"
 tracing = "0.1"
+# known_hosts：认 OpenSSH HashKnownHosts 格式的主机名（版本同 russh-keys，不新增下载）
+hmac = "0.12"
+sha1 = "0.10"
 # 本机终端：openpty / setsid / 进程信息（版本同依赖树里已有的）
 libc = "0.2"
 
@@ -44,8 +47,6 @@ libc = "0.2"
 # tokio::time::pause：SFTP 卡死检测的单元测试用虚拟时钟
 tokio = { version = "1", features = ["test-util"] }
 # known_hosts 测试：造 OpenSSH HashKnownHosts 格式的条目（版本同 russh-keys，不新增下载）
-hmac = "0.12"
-sha1 = "0.10"
 data-encoding = "2.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]

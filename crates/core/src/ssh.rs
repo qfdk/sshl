@@ -155,14 +155,24 @@ pub(crate) fn warm_key(host: &str, port: u16, username: &str) -> String {
 /// 刷屏时的积压不跟着变大。
 pub(crate) const CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
 
-fn russh_config() -> Arc<russh::client::Config> {
+/// `recorded`：known_hosts 里这台主机记过的密钥类型，握手时排在前面（见 [`host_key_algorithms`]）。
+fn russh_config(recorded: &[String]) -> Arc<russh::client::Config> {
     Arc::new(russh::client::Config {
         window_size: CONNECTION_WINDOW,
         inactivity_timeout: Some(Duration::from_secs(600)),
         keepalive_interval: Some(Duration::from_secs(10)),
         keepalive_max: 1,
+        preferred: russh::Preferred { key: host_key_algorithms(recorded).into(), ..Default::default() },
         ..Default::default()
     })
+}
+
+/// 握手时主机密钥算法的先后：这台主机记过的类型在前（同 OpenSSH），其余照 russh 默认的顺序。服务器按我们的顺序挑它有的第一种，
+/// 所以记录里只有 ecdsa / rsa 的老主机拿到的还是记过的那把，不会因为默认先要 ed25519 而被当成密钥变了。
+fn host_key_algorithms(recorded: &[String]) -> Vec<russh_keys::key::Name> {
+    let mut algorithms = russh::Preferred::DEFAULT.key.to_vec();
+    algorithms.sort_by_key(|name| !known_hosts::records_algorithm(recorded, name.0));
+    algorithms
 }
 
 fn is_transient_connect_error(error: &std::io::Error) -> bool {
@@ -264,8 +274,9 @@ pub(crate) async fn connect_unauthenticated(
     tcp.set_nodelay(true).ok();
 
     let rejected = Arc::new(std::sync::Mutex::new(None));
+    let recorded = known_hosts::recorded_types(host, port, &host_key.ours, host_key.openssh.as_deref());
     let handler = ClientHandler { host: host.to_string(), port, host_key, rejected: rejected.clone() };
-    russh::client::connect_stream(russh_config(), tcp, handler)
+    russh::client::connect_stream(russh_config(&recorded), tcp, handler)
         .await
         .map_err(|e| match rejected.lock().unwrap().take() {
             Some(HostKeyRejection::Declined) => AppError::HostKeyDeclined,
@@ -699,7 +710,21 @@ impl TerminalWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_home, is_transient_connect_error, TerminalWindow, GRANT_BATCH, TERMINAL_WINDOW};
+    use super::{expand_home, host_key_algorithms, is_transient_connect_error, TerminalWindow, GRANT_BATCH, TERMINAL_WINDOW};
+
+    #[test]
+    fn recorded_host_key_types_are_asked_for_first() {
+        let names = |recorded: &[&str]| -> Vec<&str> {
+            let recorded: Vec<String> = recorded.iter().map(|s| s.to_string()).collect();
+            host_key_algorithms(&recorded).iter().map(|name| name.0).collect()
+        };
+        let default = names(&[]);
+        assert_eq!(default[0], "ssh-ed25519", "没记录时照 russh 默认的顺序");
+        assert_eq!(names(&["ssh-ed25519"]), default);
+        assert_eq!(names(&["ssh-rsa"])[..3], ["rsa-sha2-256", "rsa-sha2-512", "ssh-ed25519"]);
+        assert_eq!(names(&["ecdsa-sha2-nistp521", "ssh-rsa"])[..3], ["ecdsa-sha2-nistp521", "rsa-sha2-256", "rsa-sha2-512"]);
+        assert_eq!(names(&["ssh-rsa"]).len(), default.len(), "只调顺序，不增不减");
+    }
 
     #[test]
     fn key_paths_may_start_from_home() {

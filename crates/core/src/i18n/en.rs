@@ -15,6 +15,7 @@ pub const TABLE: super::Table = &[
         "{} 设了密码，免密用不了：可以先 ssh-add 加进 SSH Agent，或改用「私钥」方式并填写私钥密码。",
         " {} is protected by a passphrase and can't be used automatically: add it to the SSH Agent with ssh-add, or choose a key file and enter its passphrase.",
     ),
+    ("服务器给出了不合法的文件名：{}", "The server sent an invalid file name: {}"),
     ("命令不能为空", "The command can't be empty"),
     ("账号名不能为空", "The account name can't be empty"),
     ("需要 {} 的密码", "The password for {} is required"),

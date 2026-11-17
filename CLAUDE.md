@@ -155,6 +155,9 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
 - **主机密钥**（`crates/core/src/known_hosts.rs`）：信任记在 `~/.sshl/known_hosts`；`~/.ssh/known_hosts` 只读不写，那里认过的直接信任。
   没记录 / 密钥变了由界面弹确认框（`HostKeyCheck` 的 prompt），确认才写入；拒绝报 `AppError::HostKeyDeclined`，界面不再弹「连接失败」。
   预热池没人可问（prompt 为 None），没确认过的主机不预热。测试用 `HostKeyCheck::trust_any_for_tests()`，不碰开发机的记录。
+  记录自己逐行读（不用 russh-keys 的 `check_known_hosts_path`）：这台主机有记录、但没有这次这把密钥，不管类型一不一样都算「变了」——
+  只比同类型的话，中间人换一种密钥类型，警告就降成普通的「第一次连接」。配套地，握手时把记录里有的密钥类型排在前面
+  （`ssh::host_key_algorithms`，同 OpenSSH），记录里只有 ecdsa / rsa 的老主机不会因为默认先要 ed25519 而误报。
 - **认证方式**（`config_store::AuthKind`，库里 `connections.auth` 列；空 = 旧数据，按有没有私钥推断）：界面上只分密码 / 私钥，
   私钥里再选「自动」（`AuthKind::Auto`，免密）或「指定文件」（`Key`，默认 `~/.ssh/id_rsa`，路径可写 `~/`）。
   自动（`auto_auth.rs`）依次试 none、SSH Agent、私钥文件，私钥和 Agent 按 `ssh -G` 解析的 `~/.ssh/config`
@@ -184,11 +187,15 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   `sftp_for` 再以同一身份重开。下载写 `.<name>.<rand>.sshl-part`，成功后改名，失败不留半截、不覆盖原文件。
   上传同理：先写远端同目录的 `.<name>.<rand>.sshl-part`，传完删旧文件再改名（SFTP rename 不覆盖），沿用原文件权限位；
   目标是符号链接、不归自己所有、或建不了临时文件时照旧直接写目标（换名会改属主 / 把链接换成文件）。
+  覆盖时临时文件建出来就带原文件的权限位（0600 的文件传的途中别人也读不到），传完在打开的句柄上补齐（fsetstat，不按路径改：
+  以 root 传时别的用户能把临时文件换成符号链接）。目录列表里带 `/` 的名字一律不认（`sftp::plain_name`）：名字是服务器给的，
+  `../../x`、绝对路径拼到本地路径上会写到下载目录外面。
   文件管理的传输走一个队列（`files/view.rs` 的 `enqueue`）：一次传一个，后加的排在后面；进度显示速度、剩余时间、还有几个，
   底栏和终端右下角的进度卡片都有停止（清空队列 + 停下正在传的）。目标已有同名的先问覆盖还是跳过（文件夹是合并），
   还有排队的时可勾「后面再遇到同名的也这样处理」（`prompts::confirm_with_check`），这一轮里都照办。
   传输可停止：`sftp::cancellable(flag, fut)` 用任务局部变量传停止开关，读写循环每块检查，停止走出错路径（`AppError::Cancelled`），临时文件照样清掉。
 - **SFTP 通道复用**：每个 SSH 会话缓存一个 SFTP 会话共用。
+- **数据目录权限**：`~/.sshl` 是 0700（`db::private_dir`，每次开库时保证），`master.key` 建出来就是 0600。
 - **文件管理跟随终端用户**：终端里 `su` / `sudo -i` 之后，文件管理以那个用户运行（`files/identity.rs`、
   `crates/core/src/terminal_user.rs`）。`file_switch_user` 用 su/sudo 起的 `sftp-server` 换掉缓存的 SFTP 会话；
   远程删除 / chmod / chown 必须走 `exec_as_file_user` / `file_shell`，不能用普通 exec。只自动用所需用户自己保存的密码，

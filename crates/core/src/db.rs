@@ -8,16 +8,28 @@
 // 不开 WAL（默认 rollback journal）→ 静止状态只有 sshl.db 一个文件。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-fn dir() -> AppResult<PathBuf> {
+pub(crate) fn dir() -> AppResult<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| AppError::Config("no home dir".into()))?;
     Ok(home.join(".sshl"))
+}
+
+/// 建好数据目录，并保证只有自己进得去（0700）。macOS 的家目录默认别的用户也能进：目录照默认的 0755 建的话，
+/// 这台机器上的其他账号读得到连接列表、设置、连过哪些主机，主密钥和库文件在刚建出来、还没改权限的那一下也读得到。
+pub(crate) fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    // 以前的版本、或界面先存设置时照默认权限建的：收紧
+    if std::fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 fn db_path() -> AppResult<PathBuf> {
@@ -63,8 +75,7 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connections (
         );";
 
 fn open() -> AppResult<Connection> {
-    let dir = dir()?;
-    std::fs::create_dir_all(&dir)?;
+    private_dir(&dir()?)?;
     let path = db_path()?;
     let conn =
         Connection::open(&path).map_err(|e| AppError::Config(format!("open sshl.db: {e}")))?;
@@ -196,4 +207,29 @@ fn migrate_from_json(conn: &Connection) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::private_dir;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn the_data_directory_is_only_for_its_owner() {
+        let root = std::env::temp_dir().join(format!("sshl-private-dir-{}", uuid::Uuid::new_v4()));
+        let mode = |dir: &std::path::Path| std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        // 新建的
+        let fresh = root.join("fresh");
+        private_dir(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        // 已经照默认权限建好的：收紧，里面的东西不动
+        let loose = root.join("loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(loose.join("sshl.db"), b"data").unwrap();
+        private_dir(&loose).unwrap();
+        assert_eq!(mode(&loose), 0o700);
+        assert_eq!(std::fs::read(loose.join("sshl.db")).unwrap(), b"data");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

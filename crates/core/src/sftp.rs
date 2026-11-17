@@ -359,7 +359,8 @@ pub async fn file_list(
     let listed: Vec<(String, String, Metadata)> = entries
         .filter_map(|e| {
             let name = e.file_name();
-            if name == "." || name == ".." { return None; }
+            // 带 `/` 的名字不列出来（见 plain_name）：对它做下载、删除、改名，路径都会指到别处去
+            if !plain_name(&name) { return None; }
             let full = join_remote(&path, &name);
             Some((name, full, e.metadata()))
         })
@@ -719,7 +720,10 @@ async fn upload_file(
     if existing.as_ref().is_some_and(|meta| meta.permissions.map(|mode| mode & 0o170000) != Some(0o100000)) {
         return upload_in_place(sftp, local_path, remote_path, on_progress).await;
     }
-    let Some((part, mut file)) = create_remote_part(sftp, remote_path).await else {
+    // 覆盖时临时文件从建出来起就是原文件的权限：先按默认权限建、传完再改的话，原来只有自己能读的文件（0600 的 .env）
+    // 在传的这段时间里别的用户也读得到新内容
+    let mode = existing.as_ref().and_then(|meta| meta.permissions).map(|mode| mode & 0o7777);
+    let Some((part, mut file)) = create_remote_part(sftp, remote_path, mode).await else {
         return upload_in_place(sftp, local_path, remote_path, on_progress).await;
     };
     if let Some(meta) = &existing {
@@ -732,6 +736,12 @@ async fn upload_file(
     }
     let written = async {
         stream_to_remote(local_path, &mut file, remote_path, on_progress).await?;
+        // 服务器的 umask 可能把建文件时给的权限削掉几位（0664 → 0644）：补回原样。改的是已经打开的这个文件（fsetstat）；
+        // 按路径改的话，以 root 传文件时目录里别的用户可以把临时文件换成指向 /etc/shadow 的符号链接，权限就改到那上面去了
+        if let Some(mode) = mode {
+            let attrs = russh_sftp::protocol::FileAttributes { permissions: Some(mode), ..Default::default() };
+            let _ = file.set_metadata(attrs).await;
+        }
         file.shutdown().await
             .map_err(|e| AppError::Sftp(format!("close {remote_path}: {e}")))
     }.await;
@@ -741,11 +751,7 @@ async fn upload_file(
         return Err(e);
     }
     // SFTP 的 rename 不覆盖已有文件（OpenSSH 用 link + unlink）：先删旧的再换名，空档只在这两个请求之间
-    if let Some(meta) = &existing {
-        if let Some(mode) = meta.permissions {
-            let attrs = russh_sftp::protocol::FileAttributes { permissions: Some(mode & 0o7777), ..Default::default() };
-            let _ = sftp.set_metadata(&part, attrs).await;
-        }
+    if existing.is_some() {
         if let Err(e) = sftp.remove_file(remote_path).await {
             let _ = sftp.remove_file(&part).await;
             return Err(AppError::Sftp(format!("replace {remote_path}: {e}")));
@@ -757,10 +763,12 @@ async fn upload_file(
 }
 
 /// 在目标旁边新建临时文件（不覆盖已有的）；建不了返回 None，调用方改为直接写目标。
-async fn create_remote_part(sftp: &SftpSession, remote_path: &str) -> Option<(String, russh_sftp::client::fs::File)> {
+/// `mode`：建出来就用这个权限（覆盖已有文件时是它的权限位）；None = 新文件，照服务器的默认。
+async fn create_remote_part(sftp: &SftpSession, remote_path: &str, mode: Option<u32>) -> Option<(String, russh_sftp::client::fs::File)> {
     let (dir, name) = split_remote(remote_path)?;
     let part = format!("{}/.{name}.{:08x}.sshl-part", dir.trim_end_matches('/'), rand::random::<u32>());
-    let file = sftp.open_with_flags(&part, OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE).await.ok()?;
+    let attrs = russh_sftp::protocol::FileAttributes { permissions: mode, ..Default::default() };
+    let file = sftp.open_with_flags_and_attributes(&part, OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE, attrs).await.ok()?;
     Some((part, file))
 }
 
@@ -1296,6 +1304,12 @@ async fn scan_local(local: PathBuf, remote: String) -> AppResult<DirPlan<PathBuf
     .map_err(|e| AppError::Other(format!("scan local directory: {e}")))?
 }
 
+/// 目录列表里的名字能不能当一个文件名用。名字是服务器给的，真实的文件名里不会有 `/`：带 `/` 的
+/// （`../../.zshrc`、`/Users/me/.ssh/authorized_keys`）拼到本地路径上会落到目标目录外面，绝对路径还会整个顶掉目标目录。
+fn plain_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
+}
+
 /// 列一个远端目录：(名称, 是否目录, 字节数)，供 scan_remote 用。
 async fn list_remote_dir(sftp: &SftpSession, dir: String) -> AppResult<Vec<(String, bool, u64)>> {
     let entries = sftp.read_dir(&dir).await
@@ -1341,6 +1355,10 @@ where
         for ((dir_remote, dir_local), entries) in level.iter().zip(listings) {
             for (name, is_dir, size) in entries {
                 if name == "." || name == ".." { continue; }
+                // 一个不对就整次不下：服务器在骗人，别的文件也不可信
+                if !plain_name(&name) {
+                    return Err(AppError::Sftp(crate::tr!("服务器给出了不合法的文件名：{}", name.escape_debug().to_string())));
+                }
                 let (child_remote, child_local) = (join_remote(dir_remote, &name), dir_local.join(&name));
                 if is_dir {
                     next.push((child_remote, child_local));
@@ -2708,6 +2726,27 @@ mod tests {
         assert!(matches!(missing, Err(AppError::Sftp(msg)) if msg.contains("/nope")));
     }
 
+    /// 目录项的名字是服务器给的：带 `/` 的（`../../.zshrc`、`/etc/x`）拼到本地路径上会写到目标目录外面，整次下载不做。
+    #[tokio::test]
+    async fn scan_remote_refuses_names_that_would_leave_the_local_directory() {
+        for bad in ["../../.zshrc", "sub/../../x", "/Users/me/.ssh/authorized_keys", "a/b", "nul\0byte", ""] {
+            for is_dir in [false, true] {
+                let list = |dir: String| async move {
+                    Ok(if dir == "/r" { vec![("ok.txt".to_string(), false, 1), (bad.to_string(), is_dir, 1)] } else { Vec::new() })
+                };
+                let result = scan_remote("/r".to_string(), PathBuf::from("/l"), list).await;
+                assert!(matches!(result, Err(AppError::Sftp(_))), "{bad:?} 应该被拒绝");
+            }
+        }
+        // 正常名字里的点、反斜杠、空格都是合法的文件名
+        let list = |dir: String| async move {
+            Ok(if dir == "/r" { vec![("..hidden".to_string(), false, 1), ("a\\b c".to_string(), false, 1), ("...".to_string(), true, 0)] } else { Vec::new() })
+        };
+        let plan = scan_remote("/r".to_string(), PathBuf::from("/l"), list).await.unwrap();
+        assert_eq!(plan.files.len(), 2);
+        assert_eq!(plan.dirs[1], [PathBuf::from("/l/...")]);
+    }
+
     /// 并发度探针：进入时计数、让出一轮、退出时减计数，记录峰值。
     #[derive(Default)]
     struct Concurrency {
@@ -3053,6 +3092,24 @@ mod tests {
             a.commit(&target).await.unwrap();
             assert_eq!(dir_names(&dir), ["big300.bin"]);
             std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        /// 恶意服务器在目录列表里给出 `../escaped.txt`、绝对路径这样的名字：下载报错，目标目录外面一个文件都不写。
+        #[tokio::test]
+        async fn directory_download_never_writes_outside_the_destination() {
+            let base = local_dir();
+            let outside = base.join("absolute.txt");
+            let sftp = serve(vec![
+                ("/r/ok.txt", b"fine".to_vec(), None),
+                ("/r/../escaped.txt", b"evil".to_vec(), None),
+            ]).await;
+            let err = download_tree(&sftp, "/r", &base.join("dest").to_string_lossy(), |_| {}).await.unwrap_err();
+            assert!(err.to_string().contains("../escaped.txt"), "{err}");
+            let absolute = format!("/r/{}", outside.to_string_lossy());
+            let sftp = serve(vec![(absolute.as_str(), b"evil".to_vec(), None)]).await;
+            download_tree(&sftp, "/r", &base.join("dest").to_string_lossy(), |_| {}).await.unwrap_err();
+            assert!(dir_names(&base).iter().all(|name| name == "dest"), "{:?}", dir_names(&base));
+            std::fs::remove_dir_all(&base).unwrap();
         }
 
         /// 读到一半出错：最终路径上不出现残缺的同名文件（真机上卡死报错后留下了 282MB 的 big300.bin），
@@ -3586,6 +3643,41 @@ mod tests {
             assert!(load_id_map(&sftp, "/etc/group").await.is_some());
             assert!(load_id_map(&sftp, "/nonexistent").await.is_none());
             assert_all_handles_released(&sftp, HANDLE_LIMIT).await;
+        }
+
+        /// 覆盖一个只有自己能读的文件（0600 的 .env）：传的过程中临时文件也只有自己能读，别的用户读不到新内容；
+        /// 传完权限和原来一模一样（原来是 0664，服务器的 umask 把建文件时给的权限削成 0644，传完要补回来）。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn overwriting_keeps_the_part_file_as_private_as_the_original() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let dir = temp_dir("private");
+            let big = dir.join("big.bin");
+            write(&big, &bytes(256 * TRANSFER_CHUNK, 5));
+            for mode in ["600", "664"] {
+                let target = format!("{base}/secret-{mode}.env");
+                exec(&h, &format!("printf old > {target} && chmod {mode} {target}")).await;
+                let stat = format!("stat -c %a {base}/.secret-{mode}.env.*.sshl-part 2>/dev/null || true");
+                let local = big.to_string_lossy();
+                let upload = upload_file(&sftp, &local, &target, |_| {});
+                tokio::pin!(upload);
+                let mut seen = Vec::new();
+                loop {
+                    tokio::select! {
+                        done = &mut upload => break done.unwrap(),
+                        part = exec(&h, &stat) => seen.extend(part.split_whitespace().map(str::to_string)),
+                    }
+                }
+                assert!(!seen.is_empty(), "前提：上传途中看到过临时文件");
+                // 0664 的在传的途中可以更严（umask），不能更宽
+                let allowed: &[&str] = if mode == "600" { &["600"] } else { &["644", "664"] };
+                assert!(seen.iter().all(|m| allowed.contains(&m.as_str())), "临时文件的权限：{seen:?}");
+                assert_eq!(exec(&h, &format!("stat -c %a {target}")).await.trim(), mode);
+                assert_eq!(exec(&h, &format!("ls -A {base} | grep -c sshl-part || true")).await.trim(), "0");
+            }
+            exec(&h, &format!("rm -rf {base}")).await;
+            std::fs::remove_dir_all(&dir).unwrap();
         }
 
         /// 单文件上传写失败（/dev/full 的写入报 ENOSPC）：出错文件自己的句柄也要关。写错误攒在 russh-sftp 的写确认里，

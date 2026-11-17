@@ -13,9 +13,9 @@ use russh_keys::key::PublicKey;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Known,
-    /// 没有这台主机这种密钥的记录（第一次连）。
+    /// 没有这台主机的记录（第一次连）。
     Unknown,
-    /// 记录里同类型的密钥和这次的不一样。
+    /// 这台主机有记录，但记的不是这把密钥（同类型的另一把，或只记了别的类型）。
     Changed,
 }
 
@@ -64,20 +64,70 @@ impl HostKeyCheck {
     }
 }
 
-fn check_file(host: &str, port: u16, key: &PublicKey, path: &Path) -> Verdict {
-    match russh_keys::check_known_hosts_path(host, port, key, path) {
-        Ok(true) => Verdict::Known,
-        Err(russh_keys::Error::KeyChanged { .. }) => Verdict::Changed,
-        Ok(false) => Verdict::Unknown,
-        Err(error) => {
-            tracing::warn!("known_hosts {}: {error}", path.display());
-            Verdict::Unknown
+/// `pattern`（记录的第一栏，逗号分开的几个名字）里有没有这台主机；认 HashKnownHosts 的 `|1|盐|HMAC-SHA1(盐, 主机)`。
+fn names_host(pattern: &str, field: &str) -> bool {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    pattern.split(',').any(|name| match name.strip_prefix("|1|").and_then(|hashed| hashed.split_once('|')) {
+        Some((salt, hash)) => {
+            let (Ok(salt), Ok(hash)) = (b64.decode(salt), b64.decode(hash)) else { return false };
+            Hmac::<sha1::Sha1>::new_from_slice(&salt).is_ok_and(|mac| mac.chain_update(field).verify_slice(&hash).is_ok())
         }
+        None => name == field,
+    })
+}
+
+/// 一份记录里这台主机的各行：(密钥类型, base64 的密钥)。`@revoked` / `@cert-authority` 行不算。
+fn records(host: &str, port: u16, path: &Path) -> Vec<(String, String)> {
+    let Ok(content) = fs::read_to_string(path) else { return Vec::new() };
+    let field = host_field(host, port);
+    content
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (hosts, kind, key) = (parts.next()?, parts.next()?, parts.next()?);
+            (!hosts.starts_with(['#', '@']) && names_host(hosts, &field)).then(|| (kind.to_string(), key.to_string()))
+        })
+        .collect()
+}
+
+/// 一份记录里这台主机的情况。自己逐行读，不用 russh-keys 的 `check_known_hosts_path`：它只在同类型的密钥不一样时才算「变了」，
+/// 记录里是 ed25519、对方只给 RSA 就成了「没记录」——中间人换一种密钥类型，警告就降成普通的第一次连接；
+/// 这台主机有一行它读不懂的密钥类型时，整份文件还都当成没记录。
+/// 这里：记录里有这把 = 认识；这台主机有记录但没有这把（不管什么类型）= 变了。
+fn check_file(host: &str, port: u16, key: &PublicKey, path: &Path) -> Verdict {
+    let records = records(host, port, path);
+    let (fingerprint, blob) = (key.fingerprint(), key.public_key_base64());
+    // 按指纹比（RSA 的同一把密钥，签名算法不同也是同一把）；读不懂的类型只能按原文比
+    let known = records.iter().any(|(_, theirs)| match russh_keys::parse_public_key_base64(theirs) {
+        Ok(theirs) => theirs.fingerprint() == fingerprint,
+        Err(_) => theirs.trim_end_matches('=') == blob.trim_end_matches('='),
+    });
+    match (known, records.is_empty()) {
+        (true, _) => Verdict::Known,
+        (false, true) => Verdict::Unknown,
+        (false, false) => Verdict::Changed,
     }
 }
 
+/// 两份记录里这台主机记过哪些类型的密钥（`ssh-ed25519`、`ssh-rsa`…）。握手时把这些类型排在前面（[`records_algorithm`]），同 OpenSSH：
+/// 不然记录里只有 ecdsa 的老主机，握手默认先要 ed25519，拿到一把没记过的，被当成「变了」。
+pub fn recorded_types(host: &str, port: u16, ours: &Path, openssh: Option<&Path>) -> Vec<String> {
+    let mut types: Vec<String> = [Some(ours), openssh].into_iter().flatten().flat_map(|path| records(host, port, path)).map(|(kind, _)| kind).collect();
+    types.sort();
+    types.dedup();
+    types
+}
+
+/// 握手用的主机密钥算法 `algorithm` 对应的密钥类型在不在记录里（`rsa-sha2-256` / `rsa-sha2-512` 用的都是 `ssh-rsa` 的密钥）。
+pub fn records_algorithm(recorded: &[String], algorithm: &str) -> bool {
+    let kind = if algorithm.starts_with("rsa-sha2-") { "ssh-rsa" } else { algorithm };
+    recorded.iter().any(|recorded| recorded == kind)
+}
+
 /// 任一份记录里有这把密钥就信任（OpenSSH 那边换过新密钥、SSHL 这边还是旧的，也以用户在 ssh 里的确认为准）；
-/// 都没有、而某份记录里同类型的是另一把，就是变了。
+/// 都没有、而某份记录里这台主机记的是别的密钥，就是变了。
 pub fn verdict(host: &str, port: u16, key: &PublicKey, ours: &Path, openssh: Option<&Path>) -> Verdict {
     let verdicts = [Some(check_file(host, port, key, ours)), openssh.map(|path| check_file(host, port, key, path))];
     let verdicts = verdicts.iter().flatten();
@@ -221,6 +271,57 @@ mod tests {
         let b64 = |b: &[u8]| data_encoding::BASE64.encode(b);
         fs::write(&openssh, line(&format!("|1|{}|{}", b64(&salt), b64(&hash)), &k)).unwrap();
         assert_eq!(verdict("hashed.example", 22, &k, &dir.0.join("ours"), Some(&openssh)), Verdict::Known);
+    }
+
+    /// 中间人只拿得出另一种类型的密钥（记录里是 ed25519，它给 RSA）：这台主机早就认过，不能当成第一次连接。
+    #[test]
+    fn another_key_type_for_a_known_host_is_a_change_not_a_first_connection() {
+        let dir = Dir::new();
+        let (ours, openssh) = (dir.0.join("ours"), dir.0.join("openssh"));
+        let rsa = KeyPair::generate_rsa(2048, russh_keys::key::SignatureHash::SHA2_256).unwrap().clone_public_key().unwrap();
+        trust("a.example", 22, &key(), &ours).unwrap();
+        assert_eq!(verdict("a.example", 22, &rsa, &ours, None), Verdict::Changed);
+        // 记录在 OpenSSH 那份里也一样
+        fs::write(&openssh, line("b.example", &key())).unwrap();
+        assert_eq!(verdict("b.example", 22, &rsa, &ours, Some(&openssh)), Verdict::Changed);
+        assert_eq!(verdict("c.example", 22, &rsa, &ours, Some(&openssh)), Verdict::Unknown, "没记录的主机还是第一次连接");
+        // 确认之后两种类型的都认
+        trust("a.example", 22, &rsa, &ours).unwrap();
+        assert_eq!(verdict("a.example", 22, &rsa, &ours, None), Verdict::Known);
+    }
+
+    /// 同一台主机可以记几把密钥（OpenSSH 允许）：读不懂的一行、同类型的另一把都不妨碍认出记录里有的那把。
+    #[test]
+    fn other_lines_for_the_same_host_do_not_hide_a_recorded_key() {
+        let dir = Dir::new();
+        let openssh = dir.0.join("openssh");
+        let (first, second) = (key(), key());
+        fs::write(
+            &openssh,
+            format!("h.example sk-unknown-type@example.com AAAAnotakey\n@revoked h.example ssh-ed25519 AAAA\n{}{}", line("h.example", &first), line("h.example,10.0.0.9", &second)),
+        )
+        .unwrap();
+        let ours = dir.0.join("ours");
+        assert_eq!(verdict("h.example", 22, &first, &ours, Some(&openssh)), Verdict::Known);
+        assert_eq!(verdict("h.example", 22, &second, &ours, Some(&openssh)), Verdict::Known);
+        assert_eq!(verdict("10.0.0.9", 22, &second, &ours, Some(&openssh)), Verdict::Known);
+        assert_eq!(verdict("h.example", 22, &key(), &ours, Some(&openssh)), Verdict::Changed);
+        // 只有一行读不懂的记录：这台主机认过，但认的不是这把
+        fs::write(&openssh, "odd.example sk-unknown-type@example.com AAAAnotakey\n").unwrap();
+        assert_eq!(verdict("odd.example", 22, &first, &ours, Some(&openssh)), Verdict::Changed);
+    }
+
+    #[test]
+    fn recorded_key_types_come_from_both_files() {
+        let dir = Dir::new();
+        let (ours, openssh) = (dir.0.join("ours"), dir.0.join("openssh"));
+        assert!(recorded_types("old.example", 22, &ours, Some(&openssh)).is_empty());
+        trust("old.example", 22, &key(), &ours).unwrap();
+        fs::write(&openssh, "old.example ssh-rsa AAAAB3Nza\nold.example ecdsa-sha2-nistp256 AAAAE2Vj\nother.example ecdsa-sha2-nistp521 AAAA\n").unwrap();
+        let recorded = recorded_types("old.example", 22, &ours, Some(&openssh));
+        assert_eq!(recorded, ["ecdsa-sha2-nistp256", "ssh-ed25519", "ssh-rsa"]);
+        assert!(records_algorithm(&recorded, "rsa-sha2-512") && records_algorithm(&recorded, "ssh-ed25519"));
+        assert!(!records_algorithm(&recorded, "ecdsa-sha2-nistp521"));
     }
 
     #[test]
