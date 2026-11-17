@@ -11,7 +11,7 @@ use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::channel::oneshot;
 use gpui::{
     AccessibleAction, App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, Corners, Element, ElementId, ElementInputHandler,
-    DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, GlobalElementId,
+    DragMoveEvent, Entity, EntityInputHandler, EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla,
     InspectorElementId, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Point, Render, ScrollEvent, SharedString,
     Role, StatefulInteractiveElement, StrikethroughStyle, Style, Styled, Subscription, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
@@ -24,6 +24,7 @@ use sshl_core::known_hosts::{HostKeyCheck, HostKeyPrompt, HostKeyQuestion};
 use sshl_core::local_shell::{self, LocalOptions, LocalShell};
 use sshl_core::ssh::{self, ConnectionDetails, ShellHandle, TerminalSink};
 
+use super::blocks::{self, Block};
 use super::engine::{self, GridSize, Input, MouseAction, MouseInput, TerminalHandle};
 use super::frame::{Frame, Link, LinkClick, MatchSpan, Rgb, SearchInfo, flags, link_at, link_click, openable};
 use super::keys;
@@ -1280,6 +1281,22 @@ impl Element for TerminalElement {
                 }
                 let start = x;
                 let matched = highlighted(row_spans, start);
+                // 方块字符自己画（字体画的拼起来有缝）；下划线、删除线照旧交给文字排版画在上面
+                if let Some(block) = cell.extra.is_none().then(|| blocks::block(cell.ch)).flatten() {
+                    let width = if cell.has(flags::WIDE) { 2 } else { 1 };
+                    let mut run = text_run(cell, 1, &fonts);
+                    if matched {
+                        run.color = hsla(theme::term::SEARCH_FG);
+                    }
+                    let bounds = Bounds::from_corners(point(cell_x(start), cell_y(y)), point(cell_x(start + width), cell_y(y + 1)));
+                    paint_block(window, block, bounds, run.color, m.scale);
+                    if decorated {
+                        let line = window.text_system().shape_line(" ".into(), m.font_size, &[run], Some(bounds.size.width));
+                        let _ = line.paint(bounds.origin, m.line_height, TextAlign::Left, None, window, cx);
+                    }
+                    x += 1;
+                    continue;
+                }
                 let mut text = String::new();
                 let force_width;
                 if cell.has(flags::WIDE) || cell.extra.is_some() {
@@ -1294,6 +1311,7 @@ impl Element for TerminalElement {
                         let next = &cells[x];
                         if next.flags & (flags::WIDE | flags::SPACER | flags::INVISIBLE) != 0
                             || next.extra.is_some()
+                            || blocks::block(next.ch).is_some()
                             || !same_style(cell, next)
                             || highlighted(row_spans, x) != matched
                         {
@@ -1348,14 +1366,18 @@ impl Element for TerminalElement {
                         window.paint_quad(fill(cell_bounds, color));
                         if let Some(cell) = frame.rows.get(usize::from(cursor.y)).and_then(|row| row.cells.get(usize::from(cursor.x)))
                             && (cell.ch != ' ' || cell.extra.is_some()) {
-                                let mut text = cell.ch.to_string();
-                                if let Some(extra) = &cell.extra {
-                                    text.push_str(extra);
+                                if let Some(block) = cell.extra.is_none().then(|| blocks::block(cell.ch)).flatten() {
+                                    paint_block(window, block, cell_bounds, hsla(cursor.text_color), m.scale);
+                                } else {
+                                    let mut text = cell.ch.to_string();
+                                    if let Some(extra) = &cell.extra {
+                                        text.push_str(extra);
+                                    }
+                                    let mut run = text_run(cell, text.len(), &fonts);
+                                    run.color = hsla(cursor.text_color);
+                                    let line = window.text_system().shape_line(text.into(), m.font_size, &[run], Some(width));
+                                    let _ = line.paint(point(cx0, cy0), m.line_height, TextAlign::Left, None, window, cx);
                                 }
-                                let mut run = text_run(cell, text.len(), &fonts);
-                                run.color = hsla(cursor.text_color);
-                                let line = window.text_system().shape_line(text.into(), m.font_size, &[run], Some(width));
-                                let _ = line.paint(point(cx0, cy0), m.line_height, TextAlign::Left, None, window, cx);
                             }
                     }
                 }
@@ -1420,6 +1442,14 @@ const STYLE_FLAGS: u16 = flags::BOLD
 
 fn same_style(a: &super::frame::Cell, b: &super::frame::Cell) -> bool {
     a.fg == b.fg && (a.flags & STYLE_FLAGS) == (b.flags & STYLE_FLAGS)
+}
+
+/// 方块字符（见 `blocks`）：在 `cell` 里涂几个矩形，░ ▒ ▓ 再乘上各自的透明度。
+fn paint_block(window: &mut Window, block: Block, cell: Bounds<Pixels>, mut color: Hsla, scale: f32) {
+    color.a *= block.alpha;
+    for bounds in block.bounds(cell, scale) {
+        window.paint_quad(fill(bounds, color));
+    }
 }
 
 fn text_run(cell: &super::frame::Cell, len: usize, fonts: &Fonts) -> TextRun {

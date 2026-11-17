@@ -1,3 +1,4 @@
+mod blocks;
 pub mod engine;
 pub mod frame;
 mod gnu_screen;

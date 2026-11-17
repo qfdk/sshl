@@ -112,6 +112,9 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   并把整行有底色的边缘行（除了最后一行往下）延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
   不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
   粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。
+  方块字符（U+2580–U+259F：▀ ▄ █ ▌ ▐ ▛ ▜ ░ ▒ ▓…）不用字体画，按格子自己涂矩形（`terminal/blocks.rs`，同 Ghostty 的 sprite font）：
+  字体里 █ 的宽是字体自己的字宽，比按设备像素取整的格子窄一点，相邻两格之间漏一条缝——Claude Code 标志（▐▛███▜▌）上的竖线，用户报过，
+  Ghostty 用同一套字体没有。░ ▒ ▓ 画成整格 25% / 50% / 75% 不透明（同 Ghostty），不是字体里的网点。画框线（─ │ ┼）还是字体画的。
 - **终端配色**（设置 →「终端」页的「配色」，`settings.terminal_theme` 存主题 id，默认 `carbonfox`）：内置主题在 `theme.rs` 的 `term::THEMES`
   （`term::Theme`：底色、前景、光标、选区底 / 字、16 色；`term::find` 查不到退回默认，存的 id 不改写）。默认的 Carbonfox 就是原来写死的那套
   （用户 Ghostty 配置），颜色一个都不能变（有测试盯着）。其他主题的颜色取自官方配置，出处写在每套上面；只有两处为了看得清偏离官方：
