@@ -12,6 +12,10 @@
 | --- | --- |
 | ![在回滚历史里查找，匹配处高亮](docs/screenshots/zh/find.png) | ![本地 / 远程双栏文件管理](docs/screenshots/zh/files.png) |
 
+| 系统（⌘P） | 深色外观 |
+| --- | --- |
+| ![负载、内存、磁盘、运行时间，下面是进程表](docs/screenshots/zh/system.png) | ![深色外观下的文件管理](docs/screenshots/zh/dark.png) |
+
 ## 赞助
 
 <a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>

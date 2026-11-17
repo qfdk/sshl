@@ -296,6 +296,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   和真实点击一样——`click` 是连着发的，「按下时就把被点的东西收掉」这类毛病它测不出来，菜单、弹层的点击要用 press / release 测），走 GPUI 完整的按键分发 + 输入法通道；无头测试终端输入用，不抢用户焦点。测 release 性能时用
   `cargo build -p sshl --release --features devhook`；`scripts/bundle.sh` 的正式构建不带这个 feature。macOS 的套接字路径上限 104 字节。
   `SSHL_DEV_DISPLAY=secondary` 把窗口开在副屏；`SSHL_DEV_SIZE=1440x880` 按这个大小开在屏幕中间、不铺满（README 截图用的就是这个尺寸，
-  英文图在 `docs/screenshots/`、中文图在 `docs/screenshots/zh/`，连的是 Docker 起的演示服务器，2 倍像素）。
+  英文图在 `docs/screenshots/`、中文图在 `docs/screenshots/zh/`，连的是 Docker 起的演示服务器，2 倍像素；
+  演示服务器的镜像和重拍步骤在 `docs/screenshots/demo/`，每套五张：terminal / find / files / system / dark）。
 - **Rust 后端规则**：core 不依赖界面；新增界面需求优先在 app 里做，确实要改 core 的行为（SFTP、sudo、known_hosts）
   要带测试。core 的集成测试用 `tests/fixtures-sudo.Dockerfile` 起的容器。

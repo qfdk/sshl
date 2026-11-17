@@ -12,6 +12,10 @@ A lightweight native SSH client for macOS: terminal and SFTP file manager in one
 | --- | --- |
 | ![Search the scrollback with highlighted matches](docs/screenshots/find.png) | ![Two-pane local / remote file manager](docs/screenshots/files.png) |
 
+| System (⌘P) | Dark mode |
+| --- | --- |
+| ![Load, memory, disk and uptime, with the process table below](docs/screenshots/system.png) | ![The file manager in the dark appearance](docs/screenshots/dark.png) |
+
 ## Sponsor
 
 <a href="https://voilapro.app/?ref=github-sshl"><img src="voila-banner.png" alt="Voilà Pro" width="500"/></a>
