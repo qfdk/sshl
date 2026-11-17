@@ -39,6 +39,19 @@ const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 const SEARCH_SLICE: Duration = Duration::from_millis(4);
 /// 匹配不超过这么多时，每次刷新都重新核对选中项和「第几个」（要取整张匹配列表）；再多就只在选中、跳转时算。
 const NEWEST_EXACT_MAX: usize = 20_000;
+/// 断线重连时写给终端的复位序列（见 `Engine::reset_modes`），只动模式、不动屏幕内容：
+/// Kitty 键盘标志清空；鼠标上报（X10 / 普通 / 按钮 / 任意移动，UTF-8 / SGR / urxvt / SGR 像素编码）、焦点事件、括号粘贴、
+/// 同步输出、配色变化报告、窗口内改尺寸报告关掉；光标键、小键盘、modifyOtherKeys 回普通；左右边距、滚动区回整屏
+/// （DECSTBM 会把光标移到左上角，所以用 DECSC / DECRC 包着；原点模式同理，而且 DECRC 会把它恢复回去，
+/// 所以不在这里、由 `reset_modes` 直接改模式位）；插入模式关，自动换行开；字符集回 ASCII；
+/// 字的样式清掉，光标显示出来、回默认样子；程序用 OSC 4 / 10 / 11 / 12 改过的颜色回到配色。
+const MODE_RESET: &[u8] = b"\x1b[<255u\
+\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\
+\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[?2031l\x1b[?2048l\
+\x1b[?1l\x1b>\x1b[>4;0m\
+\x1b7\x1b[?69l\x1b[r\x1b8\x1b[4l\x1b[?7h\
+\x1b(B\x0f\x1b[0m\x1b[?25h\x1b[0 q\
+\x1b]104\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\";
 /// 回滚历史上限。
 const SCROLLBACK_BYTES: usize = 20 * 1024 * 1024;
 
@@ -446,6 +459,16 @@ impl Engine {
                 match input {
                     Input::Shutdown => return,
                     Input::Output(bytes) => backlog.push_back(bytes),
+                    // 旧连接剩下还没解析的输出先解析完（里面可能还在开模式），再换通道、复位模式
+                    rebind @ Input::Rebind(_) => {
+                        for (i, bytes) in backlog.drain(..).enumerate() {
+                            self.write_output(&bytes[if i == 0 { offset } else { 0 }..]);
+                        }
+                        offset = 0;
+                        self.handle(rebind);
+                        dirty = true;
+                        touched = true;
+                    }
                     // 只读查询不改画面，不为它出帧
                     query @ (Input::Copy(_) | Input::LinkAt { .. }) => self.handle(query),
                     other => {
@@ -549,6 +572,7 @@ impl Engine {
                 // 旧通道没确认完的字节不能记到新通道头上
                 self.unacked = 0;
                 self.gnu_screen.reset();
+                self.reset_modes();
             }
             Input::Theme(theme) => {
                 if let Err(error) = apply_theme(&mut self.term, theme) {
@@ -561,6 +585,23 @@ impl Engine {
                     let _ = self.term.set_selection(Some(&all));
                 }
             }
+        }
+    }
+
+    /// 断线重连后接手的是一个新 shell：把断线时正跑着的程序（Codex、vim、htop）开着没关的模式都复位，
+    /// 屏幕上的字和回滚历史不动。不复位的话鼠标一动、方向键一按，新 shell 收到的是鼠标上报、Kitty 键盘协议的序列，
+    /// 原样显示成 `35;97;12M`、`1:1A` 这样的乱码；光标也可能还藏着，新 shell 的输出还可能画在备用屏上。
+    fn reset_modes(&mut self) {
+        // Kitty 键盘标志主屏、备用屏各一份：在备用屏上先清它的，退回主屏再清一遍
+        if self.term.active_screen().is_ok_and(|screen| screen == Screen::Alternate) {
+            self.write_output(b"\x1b[<255u\x1b[?1049l");
+        }
+        self.write_output(MODE_RESET);
+        // 用序列关原点模式会把光标移到左上角（新连接的输出就从屏幕顶上盖过去了），直接改模式位
+        let _ = self.term.set_mode(Mode::ORIGIN, false);
+        if self.painter.borrow().held_since.is_some() {
+            let _ = self.term.set_mode(Mode::SYNC_OUTPUT, false);
+            self.painter.borrow_mut().held_since = None;
         }
     }
 
@@ -1524,6 +1565,70 @@ mod tests {
         let c = cells(&shared);
         assert_eq!((c[0].fg, c[0].bg), (nord.foreground, Some(nord.selection_bg)));
         assert_eq!((c[1].fg, c[1].bg), (nord.ansi[2], Some(nord.selection_bg)), "选中的绿字还是绿的");
+    }
+
+    /// 断线时正跑着的全屏程序（Codex、vim）没机会收拾：鼠标上报、Kitty 键盘协议、备用屏、隐藏的光标都还开着。
+    /// 原地重连后接手的是一个新 shell，不复位的话鼠标一动、方向键一按，它收到的都是不认识的序列，原样显示成乱码
+    /// （用户报过：`35;97;12M`、`1:1A`）。屏幕上的字和回滚历史留着。
+    #[test]
+    fn reconnecting_clears_the_modes_the_dead_program_left_behind() {
+        let (mut engine, shared) = engine();
+        engine.write_output(b"$ codex\r\n");
+        // Codex / vim 这类程序开的：Kitty 键盘（带按下松开事件）、任意移动的 SGR 鼠标上报、焦点事件、括号粘贴、
+        // 应用光标键、窗口内改尺寸报告、滚动区、隐藏光标、不闪的方块光标；vim 还进了备用屏、在那边也开了 Kitty 键盘
+        engine.write_output(b"\x1b[>3u\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b[?2048h");
+        engine.write_output(b"\x1b[?1049h\x1b[>1u\x1b[2;10r\x1b[?25l\x1b[2 q\x1b[7mstatus");
+        assert!(engine.term.is_mouse_tracking().unwrap());
+        assert!(!engine.term.kitty_keyboard_flags().unwrap().is_empty());
+
+        let (shell, _rx) = sshl_core::ssh::shell_channel();
+        engine.handle(Input::Rebind(shell));
+
+        assert!(engine.term.active_screen().unwrap() == Screen::Primary, "回到主屏");
+        assert!(engine.term.kitty_keyboard_flags().unwrap().is_empty(), "Kitty 键盘协议关掉");
+        assert!(!engine.term.is_mouse_tracking().unwrap(), "鼠标不再上报");
+        for (mode, name) in [
+            (Mode::SGR_MOUSE, "SGR 鼠标"),
+            (Mode::FOCUS_EVENT, "焦点事件"),
+            (Mode::BRACKETED_PASTE, "括号粘贴"),
+            (Mode::DECCKM, "应用光标键"),
+            (Mode::IN_BAND_RESIZE, "改尺寸报告"),
+        ] {
+            assert!(!engine.term.mode(mode).unwrap(), "{name} 关掉");
+        }
+        engine.paint().unwrap();
+        let frame = shared.frame.lock().unwrap().clone();
+        let cursor = frame.cursor.expect("光标重新显示");
+        assert!(cursor.blinking && cursor.shape == CursorShape::Bar, "光标回到默认的闪烁竖线");
+        assert_eq!(first_row(&shared), "$ codex", "主屏上的字还在");
+        // 新 shell 的输出：没有残留的反色，滚动区也回到整屏（第 24 行换行会滚屏）
+        engine.write_output(b"\x1b[24;1Hlast\r\nprompt");
+        engine.paint().unwrap();
+        let frame = shared.frame.lock().unwrap().clone();
+        assert_eq!(frame.rows[23].text().trim_end(), "prompt");
+        assert_eq!(frame.rows[22].text().trim_end(), "last");
+        assert!(frame.rows[23].cells[0].bg.is_none(), "没有残留的反色");
+    }
+
+    /// 复位模式不能动光标（设滚动区、关原点模式按规范都会把光标移到左上角）：新连接的输出要接在原来的内容下面，
+    /// 不是从屏幕顶上盖过去。程序留在主屏上的情形（Codex 不进备用屏）。
+    #[test]
+    fn reconnecting_leaves_the_cursor_where_it_was() {
+        let (mut engine, shared) = engine();
+        engine.write_output(b"one\r\ntwo\r\n\x1b[>3u\x1b[?1003h\x1b[?1006h\x1b[2;10r\x1b[?6h\x1b[?69h\x1b[5;40s\x1b[4;7H");
+        engine.paint().unwrap();
+        let before = shared.frame.lock().unwrap().cursor.map(|c| (c.x, c.y));
+        let (shell, _rx) = sshl_core::ssh::shell_channel();
+        engine.handle(Input::Rebind(shell));
+        engine.paint().unwrap();
+        assert_eq!(shared.frame.lock().unwrap().cursor.map(|c| (c.x, c.y)), before, "光标没动");
+        assert!(!engine.term.mode(Mode::ORIGIN).unwrap(), "原点模式关掉");
+        assert!(!engine.term.is_mouse_tracking().unwrap());
+        // 滚动区、左右边距回到整屏：能写到第 1 列和最后一行
+        engine.write_output(b"\x1b[24;1Hbottom");
+        engine.paint().unwrap();
+        assert_eq!(shared.frame.lock().unwrap().rows[23].text().trim_end(), "bottom");
+        assert_eq!(first_row(&shared), "one", "原来的内容还在");
     }
 
     /// Claude Code 先用 DECRQM 问支不支持 2026，答了「支持」才发同步输出（它不认识 TERM_PROGRAM=SSHL）。

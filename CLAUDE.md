@@ -148,7 +148,9 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
 - **连接流程**（`workspace.rs`）：一个连接只开一个会话；连上才出标签，慢于 300ms 才显示连接遮罩（Esc / 取消可中止）。
   切换到已开会话是乐观切换，探活在后台，失效且用户仍停在该会话上时原地重连；用户主动断开不算失效。
   远端关闭 / 掉线时标签和屏幕留着（灰点），终端里提示按 Enter 原地重连（`TerminalView::reconnect`：新 shell 通道经
-  `Input::Rebind` 接到同一个终端引擎，回滚历史不丢）；侧栏双击、文件管理的「重新连接」也是原地重连。
+  `Input::Rebind` 接到同一个终端引擎，回滚历史不丢；
+  同时把断线时正跑着的程序留下的模式复位——鼠标上报、Kitty 键盘协议、括号粘贴、备用屏、隐藏的光标、滚动区等，`engine.rs` 的 `reset_modes`，
+  不然新 shell 把鼠标移动、方向键收成 `35;97;12M`、`1:1A` 这样的乱码）；侧栏双击、文件管理的「重新连接」也是原地重连。
   断开已连着的会话先确认，已断开的标签直接关。新建连接先连接、连上再保存。
 - **主机密钥**（`crates/core/src/known_hosts.rs`）：信任记在 `~/.sshl/known_hosts`；`~/.ssh/known_hosts` 只读不写，那里认过的直接信任。
   没记录 / 密钥变了由界面弹确认框（`HostKeyCheck` 的 prompt），确认才写入；拒绝报 `AppError::HostKeyDeclined`，界面不再弹「连接失败」。
