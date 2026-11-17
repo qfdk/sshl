@@ -15,7 +15,7 @@ rust-toolchain.toml   Rust 1.100.0（只在本仓库固定）
 crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框架
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
-  src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）
+  src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）：view.rs 只放状态和整体布局，做法按功能分在 view/ 下
 assets/               内置字体、Lucide 图标（线宽 2.5）、应用图标、Info.plist 模板
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
 scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
@@ -199,7 +199,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   覆盖时临时文件建出来就带原文件的权限位（0600 的文件传的途中别人也读不到），传完在打开的句柄上补齐（fsetstat，不按路径改：
   以 root 传时别的用户能把临时文件换成符号链接）。目录列表里带 `/` 的名字一律不认（`sftp::plain_name`）：名字是服务器给的，
   `../../x`、绝对路径拼到本地路径上会写到下载目录外面。
-  文件管理的传输走一个队列（`files/view.rs` 的 `enqueue`）：一次传一个，后加的排在后面；进度显示速度、剩余时间、还有几个，
+  文件管理的传输走一个队列（`files/view/transfer.rs` 的 `enqueue`）：一次传一个，后加的排在后面；进度显示速度、剩余时间、还有几个，
   底栏和终端右下角的进度卡片都有停止（清空队列 + 停下正在传的）。目标已有同名的先问覆盖还是跳过（文件夹是合并），
   还有排队的时可勾「后面再遇到同名的也这样处理」（`prompts::confirm_with_check`），这一轮里都照办。
   传输可停止：`sftp::cancellable(flag, fut)` 用任务局部变量传停止开关，读写循环每块检查，停止走出错路径（`AppError::Cancelled`），临时文件照样清掉。
