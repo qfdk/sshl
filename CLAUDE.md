@@ -210,6 +210,13 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   （`config_store::move_bookmarks`，本地栏用本机标签那份 `LOCAL_SCOPE`）。
   ↵ 改名只绑在文件列表（`FILE_LIST_CONTEXT`）上，改名框里的 ↵ / Esc 也自己绑（`FileRename > Input`）：gpui-base 的单行输入框
   处理完回车还 `cx.propagate()`，绑在整个文件管理上的话，地址栏、对话框、改名框里按回车会顺带把选中的那项再改一次名。
+- **文件管理里打开文件**（`files/view/open.rs`，规则在 `files/open.rs`）：双击文件或右键「打开」。本地的交给默认程序（同 Finder）。
+  远程的先下载到 `~/Library/Caches/SSHL/open/<随机>/<原名>`（目录 0700，这次运行第一次打开时清掉上次留下的），再交给本机打开：
+  文本（开头 8KB 没有零字节，含没扩展名的配置、日志）一律 `open -t` 进默认文本编辑器——`.command` 这类也只当文字打开，不会被执行；
+  二进制只放行图片、PDF、音视频（`open` 给预览 / QuickTime），别的（`.jar`、`.pkg`、`.dmg`…交给默认程序会被执行、安装、挂载）拒绝打开。
+  超过 50MB 先问。打开后每秒看一眼副本的修改时间，连着两轮一样（编辑器写完了）就传回原路径（`upload_with_sudo`：文件管理当前身份，
+  没权限时问要不要 sudo）。传回前比服务器上的大小 + 修改时间（`sftp::file_remote_stamp`），和打开 / 上次传回时不一样就先问覆盖还是不传。
+  传失败、取消、不传都算处理过这一版（不每秒重试、重复弹框），下次保存再传。会话没了就不再传回。测试口开着时只记日志 `open file: …`、不启动别的程序。
 - **SFTP 通道复用**：每个 SSH 会话缓存一个 SFTP 会话共用。
 - **数据目录权限**：`~/.sshl` 是 0700（`db::private_dir`，每次开库时保证），`master.key` 建出来就是 0600。
 - **文件管理跟随终端用户**：终端里 `su` / `sudo -i` 之后，文件管理以那个用户运行（`files/identity.rs`、

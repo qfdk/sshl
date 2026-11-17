@@ -1557,6 +1557,26 @@ async fn download_tree(
     Ok(())
 }
 
+/// 服务器上一个文件此刻的样子（大小 + 修改时间，秒）：打开编辑的文件传回去之前比一比，看这期间有没有被别人改过。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteStamp {
+    pub size: u64,
+    pub modified: Option<u32>,
+}
+
+/// 不在了（或看不到）是 None。跟随符号链接，同下载、上传。
+pub async fn file_remote_stamp(state: &AppState, session_id: String, path: String) -> AppResult<Option<RemoteStamp>> {
+    let session = state.get(&session_id).await
+        .ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+    let sftp = sftp_for(&session).await?;
+    Ok(remote_stamp(&sftp, &path).await)
+}
+
+async fn remote_stamp(sftp: &SftpSession, path: &str) -> Option<RemoteStamp> {
+    let meta = sftp.metadata(path).await.ok()?;
+    Some(RemoteStamp { size: meta.size.unwrap_or(0), modified: meta.mtime })
+}
+
 /// 改名（以文件管理当前身份：终端 sudo -i 之后就是 root）。
 pub async fn file_rename(state: &AppState, session_id: String, from: String, to: String) -> AppResult<()> {
     let session = state.get(&session_id).await
@@ -3279,7 +3299,7 @@ mod tests {
     /// `SSHL_SFTP_IT=127.0.0.1:2231 cargo test --lib real_sftp -- --ignored --nocapture`
     mod real_sftp {
         use super::super::{
-            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, remote_exists, rename_remote, scan_remote,
+            download_large, download_small, download_tree, exec_capture, list_remote_dir, load_id_map, new_sftp, remote_exists, remote_stamp, rename_remote, scan_remote,
             stream_to_remote, upload_file, upload_tree, DirCounts, DIR_FILE_CONCURRENCY, DIR_OP_CONCURRENCY,
             DOWNLOAD_SEGMENTS, SEGMENTED_DOWNLOAD_MIN, TRANSFER_CHUNK,
         };
@@ -3473,6 +3493,32 @@ mod tests {
             exec(&h, &format!("rm -rf -- '{base}'")).await;
             std::fs::remove_dir_all(&src).unwrap();
             std::fs::remove_dir_all(&dst).unwrap();
+        }
+
+        /// 文件的「戳」：内容或修改时间一变就不一样（打开编辑的文件据此判断服务器上有没有被别人改过），不在了是 None。
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+        async fn a_files_stamp_changes_when_it_is_edited() {
+            let Some((h, sftp)) = connect().await else { return };
+            let base = exec(&h, "mktemp -d /home/alice/sshl-it.XXXXXXXX").await.trim().to_string();
+            let file = format!("{base}/nginx.conf");
+            exec(&h, &format!("printf 'listen 80;' > '{file}' && touch -d '2026-01-01 00:00:00' '{file}'")).await;
+            let first = remote_stamp(&sftp, &file).await.expect("文件在");
+            assert_eq!(first.size, 10);
+            assert_eq!(remote_stamp(&sftp, &file).await, Some(first), "没动过就一样");
+
+            // 同样大小、只改了内容：修改时间变了
+            exec(&h, &format!("printf 'listen 81;' > '{file}'")).await;
+            let edited = remote_stamp(&sftp, &file).await.unwrap();
+            assert_eq!(edited.size, first.size);
+            assert_ne!(edited, first);
+            // 修改时间被改回去了、内容变长：大小不一样
+            exec(&h, &format!("printf 'listen 8080;' > '{file}' && touch -d '2026-01-01 00:00:00' '{file}'")).await;
+            assert_ne!(remote_stamp(&sftp, &file).await.unwrap(), first);
+
+            exec(&h, &format!("rm -f '{file}'")).await;
+            assert_eq!(remote_stamp(&sftp, &file).await, None, "删了是 None");
+            exec(&h, &format!("rm -rf -- '{base}'")).await;
         }
 
         /// 改名：文件、文件夹都不覆盖已有的；只差大小写的跳过预先检查，交给服务器（也不覆盖）；没有写权限报 Permission denied。

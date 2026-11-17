@@ -5,6 +5,7 @@ mod delete;
 mod drag;
 mod identity;
 mod model;
+mod open;
 mod progress;
 mod rename;
 mod sudo;

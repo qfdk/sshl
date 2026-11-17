@@ -79,12 +79,21 @@ impl FileManager {
             PaneKind::Local => |fm, items, w, cx| fm.start_rename(PaneKind::Local, &items[0], w, cx),
             PaneKind::Remote => |fm, items, w, cx| fm.start_rename(PaneKind::Remote, &items[0], w, cx),
         };
-        vec![
+        let open: fn(&mut FileManager, Vec<FileEntry>, &mut Window, &mut Context<FileManager>) = match kind {
+            PaneKind::Local => |fm, items, w, cx| fm.open_file(PaneKind::Local, &items[0], w, cx),
+            PaneKind::Remote => |fm, items, w, cx| fm.open_file(PaneKind::Remote, &items[0], w, cx),
+        };
+        let mut entries = Vec::new();
+        if !item.is_directory {
+            entries.push(MenuEntry::Item(MenuItem::new(tr!("打开"), with_items(vec![item.clone()], open)).icon(Icon::FileText)));
+        }
+        entries.extend([
             MenuEntry::Item(MenuItem::new(label.0, with_items(vec![item.clone()], transfer)).icon(label.1)),
             MenuEntry::Item(MenuItem::new(tr!("重命名"), with_items(vec![item.clone()], rename)).icon(Icon::Pencil)),
             MenuEntry::Item(MenuItem::new(tr!("复制路径"), with_items(vec![item.clone()], copy)).icon(Icon::Copy)),
             MenuEntry::Item(refresh),
             MenuEntry::Item(MenuItem::new(delete_label, with_items(vec![item], delete)).icon(Icon::Trash)),
-        ]
+        ]);
+        entries
     }
 }

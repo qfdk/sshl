@@ -49,6 +49,7 @@ mod dragging;
 mod follow;
 mod load;
 mod menu;
+mod open;
 mod ops;
 mod pane;
 mod path_bar;
@@ -57,6 +58,7 @@ mod transfer;
 
 use dialogs::{NewFolderDialog, PermissionDialog};
 use dragging::DragState;
+use open::OpenedFile;
 use rename::RenameState;
 use transfer::Job;
 
@@ -243,6 +245,10 @@ pub struct FileManager {
     permission: Option<PermissionDialog>,
     new_folder: Option<NewFolderDialog>,
     rename: Option<RenameState>,
+    /// 从服务器打开、保存后要传回去的文件。
+    opened: Vec<OpenedFile>,
+    /// 在每秒看一眼 `opened`。
+    watching: bool,
     dragging: Option<DragState>,
     hover_pane: Option<PaneKind>,
     hover_row: Option<(PaneKind, String)>,
@@ -318,6 +324,8 @@ impl FileManager {
             permission: None,
             new_folder: None,
             rename: None,
+            opened: Vec::new(),
+            watching: false,
             dragging: None,
             hover_pane: None,
             hover_row: None,
@@ -410,6 +418,7 @@ impl FileManager {
     /// 会话被移除（断开 / 远端关闭 / 失效丢弃）：丢掉它的文件管理身份、拒绝记录和远程目录。
     pub fn forget_session(&mut self, session_id: &str) {
         self.records.remove(session_id);
+        self.forget_opened(session_id);
     }
 
     // ---------------------------------------------------------------- 状态工具

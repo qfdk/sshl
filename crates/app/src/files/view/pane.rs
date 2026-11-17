@@ -104,6 +104,8 @@ impl FileManager {
                     }
                     if event.click_count() >= 2 && click_entry.is_directory {
                         this.open_entry(kind, &click_entry, window, cx);
+                    } else if event.click_count() == 2 {
+                        this.open_file(kind, &click_entry, window, cx);
                     }
                     cx.notify();
                 }))
