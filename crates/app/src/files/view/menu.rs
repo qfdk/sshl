@@ -52,6 +52,7 @@ impl FileManager {
             PaneKind::Local => |fm, items, w, cx| fm.delete_items(PaneKind::Local, items, w, cx),
             PaneKind::Remote => |fm, items, w, cx| fm.delete_items(PaneKind::Remote, items, w, cx),
         };
+        let copy: fn(&mut FileManager, Vec<FileEntry>, &mut Window, &mut Context<FileManager>) = |fm, items, _, cx| fm.copy_paths(items, cx);
         let transfer: fn(&mut FileManager, Vec<FileEntry>, &mut Window, &mut Context<FileManager>) = match kind {
             PaneKind::Local => |fm, items, w, cx| fm.upload_items(items, None, w, cx),
             PaneKind::Remote => |fm, items, w, cx| fm.download_items(items, None, w, cx),
@@ -61,6 +62,7 @@ impl FileManager {
             let (label, glyph) = if kind == PaneKind::Remote { (tr!("下载 {} 个项目", count), Icon::Download) } else { (tr!("上传 {} 个项目", count), Icon::Upload) };
             return vec![
                 MenuEntry::Item(MenuItem::new(label, with_items(selected.clone(), transfer)).icon(glyph)),
+                MenuEntry::Item(MenuItem::new(tr!("复制 {} 个路径", count), with_items(selected.clone(), copy)).icon(Icon::Copy)),
                 MenuEntry::Item(MenuItem::new(tr!("删除 {} 个项目", count), with_items(selected, delete)).icon(Icon::Trash)),
                 MenuEntry::Item(refresh),
             ];
@@ -80,6 +82,7 @@ impl FileManager {
         vec![
             MenuEntry::Item(MenuItem::new(label.0, with_items(vec![item.clone()], transfer)).icon(label.1)),
             MenuEntry::Item(MenuItem::new(tr!("重命名"), with_items(vec![item.clone()], rename)).icon(Icon::Pencil)),
+            MenuEntry::Item(MenuItem::new(tr!("复制路径"), with_items(vec![item.clone()], copy)).icon(Icon::Copy)),
             MenuEntry::Item(refresh),
             MenuEntry::Item(MenuItem::new(delete_label, with_items(vec![item], delete)).icon(Icon::Trash)),
         ]

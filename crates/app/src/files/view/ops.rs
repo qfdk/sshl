@@ -1,8 +1,16 @@
-//! 对选中的文件 / 目录做的事：删除（确认文案和远程命令在 `files::delete`）。
+//! 对选中的文件 / 目录做的事：删除（确认文案和远程命令在 `files::delete`）、复制路径。重命名在 `rename.rs`。
+
+use gpui::ClipboardItem;
 
 use super::*;
 
 impl FileManager {
+    /// 复制完整路径（远程栏是服务器上的路径），多选时一行一个。原样复制、不加引号：同 Finder 的「拷贝为路径名称」。
+    pub(super) fn copy_paths(&mut self, items: Vec<FileEntry>, cx: &mut Context<Self>) {
+        let text = items.iter().map(|item| item.path.as_str()).collect::<Vec<_>>().join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
     pub(super) fn delete_items(&mut self, kind: PaneKind, items: Vec<FileEntry>, window: &mut Window, cx: &mut Context<Self>) {
         if items.is_empty() {
             return;

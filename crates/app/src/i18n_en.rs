@@ -85,6 +85,8 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("新建文件夹失败", "Couldn't create the folder"),
     ("无法重命名", "Can't rename"),
     ("重命名失败", "Couldn't rename"),
+    ("复制路径", "Copy path"),
+    ("复制 {} 个路径", "Copy {0} {0?path|paths}"),
     ("名称不能包含斜杠。", "A name can't contain a slash."),
     ("名称不能是「.」或「..」。", "A name can't be “.” or “..”."),
     ("修改权限失败", "Couldn't change permissions"),

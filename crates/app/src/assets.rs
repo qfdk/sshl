@@ -38,6 +38,7 @@ icons! {
     ChevronUp => "chevron-up",
     Clock => "clock",
     CodeXml => "code-xml",
+    Copy => "copy",
     Download => "download",
     FileText => "file-text",
     Folder => "folder",
