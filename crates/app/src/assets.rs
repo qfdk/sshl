@@ -71,7 +71,7 @@ icons! {
     Zap => "zap",
 }
 
-/// 服务端软件的标志（Simple Icons 16.36.0，CC0，单色路径 + 品牌标准色）：进程列表认出常见软件时画它（`brands.rs`）。
+/// 服务端软件的标志（Simple Icons 16.36.0，Redis 是 12.0.0；CC0，单色路径 + 品牌标准色）：进程列表认出常见软件时画它（`brands.rs`）。
 macro_rules! brands {
     ($($variant:ident => $file:literal, $hex:literal, $title:literal),* $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -160,7 +160,8 @@ brands! {
     Prometheus => "prometheus", 0xe6522c, "Prometheus",
     Python => "python", 0x3776ab, "Python",
     QBittorrent => "qbittorrent", 0x2f67ba, "qbittorrent",
-    Redis => "redis", 0xff4438, "Redis",
+    // Redis 用 12.0.0 的经典叠方块标志：16.x 里换成了 2024 年的新「R」，用户看着「不太对」
+    Redis => "redis", 0xdc382d, "Redis",
     Ruby => "ruby", 0xcc342d, "Ruby",
     Syncthing => "syncthing", 0x0891d1, "Syncthing",
     Tailscale => "tailscale", 0x242424, "Tailscale",

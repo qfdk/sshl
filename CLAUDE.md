@@ -16,7 +16,7 @@ crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
   src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）：view.rs 只放状态和整体布局，做法按功能分在 view/ 下
-assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件标志（icons/brands，Simple Icons 16.36.0，CC0）、应用图标、Info.plist 模板
+assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件标志（icons/brands，Simple Icons 16.36.0，CC0；Redis 用 12.0.0 的经典标志）、应用图标、Info.plist 模板
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
 scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
 tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
