@@ -14,9 +14,9 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, AppContext, AsyncWindowContext, BoxShadow, Bounds, ClickEvent, Context,
     DragMoveEvent, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, InteractiveElement,
     IntoElement, KeyBinding, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    PathPromptOptions, Pixels, Point, Render, Role, ScrollStrategy, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Task, Transformation, UniformListScrollHandle, WeakEntity, Window, actions, anchored, canvas,
-    deferred, div, percentage, point, prelude::FluentBuilder, px, svg, uniform_list,
+    PathPromptOptions, Pixels, Point, Render, Role, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, Transformation, WeakEntity, Window, actions, anchored, canvas,
+    deferred, div, list, percentage, point, prelude::FluentBuilder, px, svg,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use sshl_core::config_store;
@@ -130,7 +130,8 @@ struct Pane {
     listing: Option<(String, Vec<FileEntry>)>,
     listing_requested: Option<String>,
     list_focus: FocusHandle,
-    scroll: UniformListScrollHandle,
+    /// 文件列表（行高跟着内容：名字长了折行）。
+    rows: kit::Rows,
     /// 上次进入的目录：进入新目录时回到顶部，同目录刷新保留滚动位置。
     listed_path: String,
     selected: HashSet<String>,
@@ -154,7 +155,7 @@ impl Pane {
             listing: None,
             listing_requested: None,
             list_focus: cx.focus_handle(),
-            scroll: UniformListScrollHandle::new(),
+            rows: kit::Rows::default(),
             listed_path: String::new(),
             selected: HashSet::new(),
             hidden: 0,

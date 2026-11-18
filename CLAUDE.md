@@ -150,6 +150,15 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
 - **图标**：`ui::icon` 画 Lucide SVG，不传颜色时用继承的文字颜色（currentColor）。gpui 自带 `svg()` 只认自身的
   text_color、不继承，别直接用。图标在 `assets.rs` 的 `icons!` 表里登记。
   位图（`img()`）是双线性采样、没有 mipmap，大图缩小会发毛：侧栏标志用按 2 倍屏缩好的 `assets/sidebar-logo.png`（60px 画 30pt）。
+- **字不截断**（用户 2026-11-18：「不要截断不要截断」）：界面上的字一律写全，不用 `truncate()`、不出「…」。放不下就在自己那一格里折行，行 / 卡片跟着长高
+  （写死的 `.h(px(N))` 改成 `.min_h`）；按钮式的东西（标签、分区按钮）不折行，按内容变宽，所在的那一排本身会换行；面包屑放不下换到下一行。
+  短值不从中间拆：数字和单位之间是不断行空格（`format_bytes` / `format_file_size` 用 U+00A0，折行时不会拆成「3.3」「GB」），
+  两格并排时短的那格（地址、用户名）`flex_shrink_0` + 不换行，长的那格去折；指标卡片的数值按整段（负载的三个数各一段）换行。
+  实在太长又不重要的（远程进程的完整命令行，可能几千字）整段放得下才显示、放不下就不显示，悬停看全文；小地方（矩形树图的块）先量字宽再决定，
+  见磁盘页那条。表格（文件列表、进程 / 端口 / 服务、磁盘列表）因此是 gpui 的 `list`（可变行高），不是 `uniform_list`：状态用 `kit::Rows`，
+  每帧 `sync(行数)`（多了少了只动末尾，滚动位置不变）、换一整张表 `reset()`；看得见的行每帧都重画重量，内容变了不用另外通知。
+  系统页的行数据在 `render` 里算一次放进 `Rc`（`Table`），各行从里面取——`list` 按行调渲染函数，别在里面重新过滤排序整张表。
+  气泡（`kit::tooltip`）最宽 480pt，长的折行。可编辑的输入框（地址栏）不算：内容随光标滚动。
 - **圆角**：gpui 的 `overflow_hidden` 只按矩形裁，不裁圆角。卡片里贴边的有底色子元素（对话框底部按钮条、设置左栏）
   要自己加对应的 `rounded_*`。
 - **提示框**：一律用 `prompts::alert / confirm / password`（应用内模态框，排队显示，回车确认、Esc 取消，关掉后焦点还给
@@ -230,7 +239,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
   同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
 - **「系统」页**（⌘P，顶栏顺序 终端（⌘I）/ 文件管理（⌘O）/ 系统，系统不常用放最后，`system_panel.rs` + core 的 `server_info.rs` / `services.rs`）：负载 / 内存 / 磁盘 / 运行时间，
-  下面四个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、macOS 用 netstat -anvl、再否则 lsof）、systemd 服务（list-units + list-unit-files，
+  下面四个列表：进程（`ps -eo`；Linux 的 procps 默认把用户名截到 8 个字加「+」（systemd-resolve → systemd+），先拿 `ps -o user:64= -p $$` 试，认得才用宽的——macOS 不认时只警告一句、照样输出缺了用户列的行，所以不能失败了再跑一遍）、监听端口（有 ss 用 ss、否则 Linux netstat -p、macOS 用 netstat -anvl、再否则 lsof）、systemd 服务（list-units + list-unit-files，
   没被载入的已停服务也列出）、磁盘（分区用量和目录占用，见下一条）。可结束进程、启停 / 重启服务、开关开机启动（停止、重启先确认）。容器管理做过又删了：用户用不到。
   看哪台机器是 `server_info::Machine`：远程会话（`Remote`）的命令走 `run_as_file_user`，切过来时先同步文件管理身份，终端 sudo -i 之后就以 root 跑；
   本机标签（`Local`）看这台 Mac，命令以 SSHL 自己的身份用 /bin/sh 跑，结束进程直接 kill(2)（`local_pid`：0 和负数是进程组，不发），
@@ -259,7 +268,8 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   认不出的同本机：系统目录下的、或不是登录用户自己跑的算系统服务（齿轮），其余终端。本机不在 .app 里的命令行程序（claude、node）也用标志。
   新加一个软件：从 Simple Icons 同一版本下 SVG 放进 `assets/icons/brands/`，`assets.rs` 的 `brands!` 表登记（带品牌色），`brands.rs` 的名字表加一行。
   数字用界面字体的等宽数字（`tnum`），等宽字体只留给命令行和监听地址。「进程」列按进程名排（不按命令行路径；本机的应用按显示名）。
-  窄窗口：指标两段一组（每段至少 `SEGMENT_MIN_WIDTH`），放不下一排四段就 2 × 2；进程名先放全，命令行拿剩下的宽度（窄了先缩没）。
+  窄窗口：指标两段一组（每段至少 `SEGMENT_MIN_WIDTH`），放不下一排四段就 2 × 2；进程名先放全（比整格还长就折行），命令行拿剩下的宽度，整段放得下才显示：
+  它在一行高、能换行、超出就裁掉的格子里，前面垫一个零宽的元素，放不下时整段挤到第二行被裁掉——不会出现半截；藏起来时悬停那块空白看全文。
   进程名按 ps 的 comm 切（`ProcessInfo::program`）：macOS 的程序路径里常有空格（Chrome / Docker 的 Helper），只按第一个空格切会只剩「Google」。
   macOS（本机和远程的 Mac 一样）：端口用 `netstat -anvl`——不是 root 也带每个端口的 `进程名:pid`（lsof 只看得到自己的），名字是 16 字节的 p_comm，
   被截断的用 `ps -axo comm`（argv[0]，redis 这类会改写）里以它开头的补全；内存用 vm_stat，已用同活动监视器（匿名页 - 可清除 + 联动 + 压缩）；

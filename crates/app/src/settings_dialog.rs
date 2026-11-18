@@ -1094,8 +1094,9 @@ impl SettingsDialog {
                             )
                         })
                         .child(kit::icon_sized(Icon::Server, 14.))
+                        // 名字长了折行；地址短，整段一行写，不从中间断开
                         .child(div().min_w_0().child(name.clone()))
-                        .child(div().min_w_0().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{}@{}", m.username, m.host)))
+                        .child(div().flex_shrink_0().whitespace_nowrap().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{}@{}", m.username, m.host)))
                         .on_drag(DraggedMember { id: drag_id, name: name.clone() }, |dragged, _, _, cx| {
                             let name = dragged.name.clone();
                             cx.new(|_| DragPreview(name))

@@ -74,9 +74,10 @@ impl FileManager {
                 .id(("file-row", ix))
                 .role(Role::Row)
                 .aria_label(SharedString::from(entry.name.clone()))
-                // uniform_list 的行默认按内容收缩，不撑满就和表头的列对不齐
+                // 不撑满就和表头的列对不齐；名字长了折行，行跟着长高
                 .w_full()
-                .h(px(ROW_HEIGHT))
+                .min_h(px(ROW_HEIGHT))
+                .py(px(6.))
                 .flex()
                 .items_center()
                 .text_size(px(12.))
@@ -162,7 +163,7 @@ impl FileManager {
                 .child(icon)
                 .child(match self.rename_field(kind, &entry.path, cx) {
                     Some(field) => field,
-                    None => div().min_w_0().truncate().child(entry.name.clone()).into_any_element(),
+                    None => div().min_w_0().child(entry.name.clone()).into_any_element(),
                 });
             if selected {
                 name = name.font_weight(FontWeight::MEDIUM);
@@ -175,7 +176,7 @@ impl FileManager {
                 .when(shown.date, |row| row.child(div().w(px(DATE_WIDTH)).flex_shrink_0().px_3().text_color(muted).child(date)));
             if shown.owner {
                 let owner = if parent { String::new() } else { entry.owner.clone().unwrap_or_else(|| "-".into()) };
-                row = row.child(div().w(px(OWNER_WIDTH)).flex_shrink_0().px_3().min_w_0().truncate().text_color(muted).child(owner));
+                row = row.child(div().w(px(OWNER_WIDTH)).flex_shrink_0().px_3().min_w_0().text_color(muted).child(owner));
             }
             if shown.permissions {
                 let permissions = if parent { String::new() } else { format_permissions(entry.permissions) };
@@ -231,7 +232,7 @@ impl FileManager {
         let rows = pane.row_count();
         let hidden = if pane.loading { 0 } else { pane.hidden };
         let list_focus = pane.list_focus.clone();
-        let scroll = pane.scroll.clone();
+        let list_rows = pane.rows.clone();
         let empty: Option<AnyElement> = if loading {
             None
         } else if remote && let (Some(connection), Some(message)) = (self.remote_empty_connection.clone(), self.remote_empty) {
@@ -408,11 +409,16 @@ impl FileManager {
                     .text_color(theme::color(ui::MUTED_FOREGROUND))
                     .child(message)
                     .into_any_element(),
-                None => uniform_list(("rows", kind as usize), rows, cx.processor(move |this, range, window, cx| this.render_rows(kind, range, window, cx)))
-                    .track_scroll(&scroll)
+                None => {
+                    list_rows.sync(rows);
+                    let entity = cx.entity();
+                    list(list_rows.state(), move |ix, window, cx| {
+                        entity.update(cx, |this, cx| this.render_rows(kind, ix..ix + 1, window, cx)).pop().unwrap_or_else(|| div().into_any_element())
+                    })
                     .w_full()
                     .flex_1()
-                    .into_any_element(),
+                    .into_any_element()
+                }
             })
             .when(hidden > 0, |d| {
                 d.child(

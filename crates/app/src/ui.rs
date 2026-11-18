@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, ClickEvent, Div, Element, ElementId, Entity, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Role, SharedString, Stateful,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, ListAlignment, ListState, ParentElement, Pixels, Role, SharedString, Stateful,
     StatefulInteractiveElement, Style, Styled, TransformationMatrix, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{Input, InputState};
@@ -150,6 +150,38 @@ pub fn mini_button(id: impl Into<ElementId>, glyph: Icon, title: impl Into<Share
         .child(icon_sized(glyph, 14.))
 }
 
+/// 表格用的可变行高列表（gpui 的 `list`）的状态：行跟着内容长高，名字长了折行，不截断。
+#[derive(Clone)]
+pub struct Rows(ListState);
+
+impl Default for Rows {
+    fn default() -> Self {
+        Self(ListState::new(0, ListAlignment::Top, px(200.)))
+    }
+}
+
+impl Rows {
+    /// 告诉列表现在有几行：多了少了只动末尾，滚动位置不变（每 3 秒刷新的表不跳回顶部）。
+    /// 看得见的行每帧都重新画、重新量，内容变了不用另外通知。
+    pub fn sync(&self, count: usize) {
+        let old = self.0.item_count();
+        if count > old {
+            self.0.splice(old..old, count - old);
+        } else if count < old {
+            self.0.splice(count..old, 0);
+        }
+    }
+
+    /// 换了一整张表（换目录、换标签、搜索）：回到顶部，重新量。
+    pub fn reset(&self) {
+        self.0.reset(0);
+    }
+
+    pub fn state(&self) -> ListState {
+        self.0.clone()
+    }
+}
+
 pub fn tooltip(text: SharedString, _window: &mut Window, cx: &mut App) -> gpui::AnyView {
     cx.new(|_| Tooltip(text)).into()
 }
@@ -158,7 +190,9 @@ struct Tooltip(SharedString);
 
 impl gpui::Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        // 长的（完整命令行、路径）折成几行写全，不铺成横穿屏幕的一长条
         div()
+            .max_w(px(480.))
             .px_2()
             .py_1()
             .rounded(px(6.))
@@ -410,4 +444,30 @@ pub fn menu_panel(entries: Vec<MenuEntry>, dismiss: impl Fn(&mut Window, &mut Ap
             }
         }))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::ListOffset;
+
+    /// 每 3 秒刷新一次的表：行数变了只动末尾，停在中间看的地方不跳回顶部。
+    #[test]
+    fn syncing_row_count_keeps_the_scroll_position() {
+        let rows = Rows::default();
+        let state = rows.state();
+        rows.sync(100);
+        assert_eq!(state.item_count(), 100);
+        state.scroll_to(ListOffset { item_ix: 40, offset_in_item: px(5.) });
+        rows.sync(120);
+        assert_eq!(state.item_count(), 120);
+        assert_eq!(state.logical_scroll_top(), ListOffset { item_ix: 40, offset_in_item: px(5.) }, "多了几行");
+        rows.sync(90);
+        assert_eq!(state.item_count(), 90);
+        assert_eq!(state.logical_scroll_top(), ListOffset { item_ix: 40, offset_in_item: px(5.) }, "少了几行");
+        rows.sync(90);
+        assert_eq!(state.logical_scroll_top().item_ix, 40, "没变");
+        rows.reset();
+        assert_eq!((state.item_count(), state.logical_scroll_top().item_ix), (0, 0), "换了一整张表：回到顶部");
+    }
 }

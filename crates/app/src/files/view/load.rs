@@ -142,7 +142,7 @@ impl FileManager {
         let pane = self.pane_mut(kind);
         if pane.listed_path != pane.path {
             pane.listed_path = pane.path.clone();
-            pane.scroll.scroll_to_item(0, ScrollStrategy::Top);
+            pane.rows.reset();
             self.local.selected.clear();
             self.remote.selected.clear();
             self.last_selected = None;

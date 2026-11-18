@@ -130,7 +130,8 @@ pub(super) struct DiskState {
     /// `scans` / `files` 每变一次加一：`listing` 据此知道要重算。
     version: u64,
     listing: Option<Listing>,
-    scroll: UniformListScrollHandle,
+    /// 列表（行高跟着内容：名字长了折行）。
+    rows: kit::Rows,
     hovered: Option<Hover>,
 }
 
@@ -334,7 +335,7 @@ impl SystemPanel {
         }
         self.stop_scans(cx);
         self.disk.at.insert(machine, (mount.clone(), mount));
-        self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.disk.rows.reset();
         self.disk.hovered = None;
         cx.notify();
     }
@@ -455,7 +456,7 @@ impl SystemPanel {
         let Some(at) = self.disk.at.get_mut(&machine) else { return };
         at.1 = path.clone();
         let key = (machine, at.0.clone());
-        self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.disk.rows.reset();
         self.disk.hovered = None;
         let needs_scan = match self.disk.scans.get_mut(&key) {
             Some(Scan::Done { tree, deeper, .. }) => {
@@ -877,11 +878,14 @@ impl SystemPanel {
             let query = self.search.read(cx).value().trim().to_string();
             empty_message(if query.is_empty() { tr!("这个目录是空的") } else { tr!("没有匹配的结果") })
         } else {
-            uniform_list("disk-rows", rows.len(), cx.processor(move |this, range: Range<usize>, _, cx| this.render_tree_rows(range, !split, cx)))
-                .track_scroll(&self.disk.scroll)
-                .flex_1()
-                .w_full()
-                .into_any_element()
+            self.disk.rows.sync(rows.len());
+            let entity = cx.entity();
+            list(self.disk.rows.state(), move |ix, _, cx| {
+                entity.update(cx, |this, cx| this.render_tree_rows(ix..ix + 1, !split, cx)).pop().unwrap_or_else(|| div().into_any_element())
+            })
+            .flex_1()
+            .w_full()
+            .into_any_element()
         };
         let list_width = if split { (width * LIST_SHARE).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH) } else { width };
         let list = div().w(px(list_width)).h_full().flex_shrink_0().flex().flex_col().pb_2().child(header).child(body);
@@ -1117,7 +1121,7 @@ impl SystemPanel {
                         .gap(px(8.))
                         .when(muted, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
                         .child(kit::icon_sized(icon, 14.).text_color(theme::color(if muted { ui::MUTED_FOREGROUND } else { color })))
-                        .child(div().min_w_0().truncate().when(!muted, |d| d.font_weight(FontWeight::MEDIUM)).child(super::highlighted(name, &query)))
+                        .child(div().min_w_0().when(!muted, |d| d.font_weight(FontWeight::MEDIUM)).child(super::highlighted(name, &query)))
                         .when(has_children, |d| d.child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))),
                 )
                 .when(bars, |d| d.child(usage_cell(size as f32 / largest as f32, color)))

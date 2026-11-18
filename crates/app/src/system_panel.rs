@@ -6,14 +6,15 @@
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels,
-    Point, Render, Role, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement, StyledText, Styled, Task, UniformListScrollHandle,
-    Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder, px, size, svg, uniform_list,
+    Point, Render, Role, SharedString, Stateful, StatefulInteractiveElement, StyledText, Styled, Task,
+    Window, anchored, canvas, deferred, div, img, list, point, prelude::FluentBuilder, px, size, svg,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use sshl_core::server_info::{self, Machine, Overview, PortInfo, ProcessInfo};
@@ -36,6 +37,8 @@ use disk::DiskState;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const ROW_HEIGHT: f32 = 34.;
+/// 进程名后面那段（命令行）一行的高度。
+const DETAIL_LINE: f32 = 18.;
 /// 命令行、监听地址用等宽字；数字用界面字体的等宽数字（[`TABULAR`]）。
 const MONO: &str = "Menlo";
 const PID_WIDTH: f32 = 76.;
@@ -145,6 +148,7 @@ enum AppIcon {
 }
 
 /// 一行用哪个图标：应用（路径）的、软件的标志，或者线条图标。
+#[derive(Clone)]
 enum RowIcon {
     App(String),
     Brand(Brand),
@@ -161,7 +165,16 @@ fn process_icon(name: &str, program: &str, user: &str, me: Option<&str>, kernel:
     RowIcon::Glyph(if system { Icon::Settings } else { Icon::SquareTerminal })
 }
 
+/// 当前这张表的行：每帧在 `render` 里算一次，可变行高的列表按行从里面取。
+enum Table {
+    Processes(Rc<Vec<ProcessRow>>),
+    Ports(Rc<Vec<PortInfo>>),
+    Services(Rc<Vec<ServiceInfo>>),
+    None,
+}
+
 /// 进程列表要画的一行（从进程 / 应用里取出来，不借着面板）。
+#[derive(Clone)]
 struct ProcessRow {
     /// 应用那一行是主进程的。
     pid: u32,
@@ -296,7 +309,8 @@ pub struct SystemPanel {
     search_focused: bool,
     menu: Option<MenuState>,
     request: u64,
-    scroll: UniformListScrollHandle,
+    /// 进程 / 端口 / 服务表（行高跟着内容）。
+    rows: kit::Rows,
     focus: FocusHandle,
     _refresh: Option<Task<()>>,
     _subscription: gpui::Subscription,
@@ -631,7 +645,7 @@ impl SystemPanel {
         let search = kit::input(|| tr!("搜索…"), window, cx);
         let subscription = cx.subscribe_in(&search, window, |this, _, event: &InputEvent, _, cx| match event {
             InputEvent::Change => {
-                this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                this.rows.reset();
                 cx.notify();
             }
             InputEvent::Focus => {
@@ -668,7 +682,7 @@ impl SystemPanel {
             search_focused: false,
             menu: None,
             request: 0,
-            scroll: UniformListScrollHandle::new(),
+            rows: kit::Rows::default(),
             focus: cx.focus_handle(),
             _refresh: None,
             _subscription: subscription,
@@ -797,7 +811,7 @@ impl SystemPanel {
         }
         self.view = view;
         self.menu = None;
-        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.rows.reset();
         self.restart(cx);
         cx.notify();
     }
@@ -1126,9 +1140,9 @@ impl SystemPanel {
             .collect()
     }
 
-    fn render_process_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// `rows` 是从第 `start` 行开始的几行（整张表在 `render` 里算一次）。
+    fn render_process_rows(&mut self, rows: Vec<ProcessRow>, start: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.search.read(cx).value().to_string();
-        let rows: Vec<ProcessRow> = self.process_rows(&query).into_iter().skip(range.start).take(range.len()).collect();
         // 还没有图标的应用去后台取（取到了重画）
         let missing: Vec<String> = rows
             .iter()
@@ -1146,7 +1160,7 @@ impl SystemPanel {
         rows.into_iter()
             .enumerate()
             .map(|(i, row)| {
-                let ix = range.start + i;
+                let ix = start + i;
                 let ProcessRow { pid, user, cpu, rss_kb, name, detail, command, icon, app, member, kernel } = row;
                 let (menu_name, menu_command) = (name.clone(), command);
                 let line = table_row(("process", ix)).on_mouse_down(
@@ -1204,24 +1218,38 @@ impl SystemPanel {
                                     .into_any_element(),
                             })
                         })
-                        // 名字放全，剩下的给后面那段；窄了那段先缩没
+                        // 名字放全（比整格还长就折行），剩下的给后面那段
                         .child(
                             div()
                                 .flex_shrink_0()
                                 .max_w_full()
-                                .truncate()
                                 .font_weight(if member { FontWeight::MEDIUM } else { FontWeight::SEMIBOLD })
                                 .when(kernel, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
                                 .child(highlighted(name.clone(), &query)),
                         )
+                        // 后面那段（远程是完整命令行，可能几千字）整段放得下才显示，不截成半截：一行高的能换行的格子，前面垫一个零宽的，
+                        // 放不下时它整段换到第二行、被裁掉。藏起来时悬停这块空白看全文，右键也能复制。
                         .when_some(detail, |d, detail| {
+                            let tip: SharedString = detail.clone().into();
                             d.child(
                                 div()
+                                    .id(("process-detail", ix))
                                     .min_w_0()
-                                    .truncate()
-                                    .when(app.is_none(), |d| d.font_family(MONO).text_size(px(11.)))
-                                    .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                    .child(highlighted(detail, &query)),
+                                    .h(px(DETAIL_LINE))
+                                    .overflow_hidden()
+                                    .flex()
+                                    .flex_wrap()
+                                    .content_start()
+                                    .child(div().w(px(0.)).h(px(DETAIL_LINE)))
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .line_height(px(DETAIL_LINE))
+                                            .when(app.is_none(), |d| d.font_family(MONO).text_size(px(11.)))
+                                            .text_color(theme::color(ui::MUTED_FOREGROUND))
+                                            .child(highlighted(detail, &query)),
+                                    )
+                                    .tooltip(move |window, cx| kit::tooltip(tip.clone(), window, cx)),
                             )
                         })
                         .when_some(toggle, |d, (_, open)| {
@@ -1270,14 +1298,12 @@ impl SystemPanel {
         cx.notify();
     }
 
-    fn render_port_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_port_rows(&mut self, rows: Vec<PortInfo>, start: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.search.read(cx).value().to_string();
-        let rows: Vec<PortInfo> =
-            filter_ports(self.ports.as_deref().unwrap_or(&[]), &query, self.port_sort).into_iter().skip(range.start).take(range.len()).cloned().collect();
         rows.into_iter()
             .enumerate()
             .map(|(i, p)| {
-                let ix = range.start + i;
+                let ix = start + i;
                 let name = p.process.clone().unwrap_or_else(|| "—".into());
                 table_row(("port", ix))
                     .when_some(p.pid, |d, pid| {
@@ -1311,7 +1337,7 @@ impl SystemPanel {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().min_w_0().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(highlighted(p.address.clone(), &query)))
+                            .child(div().min_w_0().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(highlighted(p.address.clone(), &query)))
                             .map(|d| match address_scope(&p.address) {
                                 // 所有地址 = 对外开放，橙色提醒；只听本机的灰色
                                 AddressScope::All => d.child(pill(ui::WARNING_FOREGROUND, theme::alpha(ui::WARNING, 0.12)).child(tr!("所有地址"))),
@@ -1335,7 +1361,6 @@ impl SystemPanel {
                             .flex_1()
                             .min_w_0()
                             .px_3()
-                            .truncate()
                             .map(|d| if p.pid.is_some() { d.font_weight(FontWeight::SEMIBOLD) } else { d.text_color(theme::color(ui::MUTED_FOREGROUND)) })
                             .child(if p.pid.is_some() { highlighted(name.clone(), &query) } else { StyledText::new(tr!("看不到进程（需要 root）")) }),
                     )
@@ -1373,14 +1398,12 @@ impl SystemPanel {
             .child(label)
     }
 
-    fn render_service_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_service_rows(&mut self, rows: Vec<ServiceInfo>, start: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.search.read(cx).value().to_string();
-        let rows: Vec<ServiceInfo> =
-            filter_services(self.services.as_deref().unwrap_or(&[]), &query, self.service_sort).into_iter().skip(range.start).take(range.len()).cloned().collect();
         rows.into_iter()
             .enumerate()
             .map(|(i, service)| {
-                let ix = range.start + i;
+                let ix = start + i;
                 let name = service.name().to_string();
                 let busy = self.busy.as_deref() == Some(service.unit.as_str());
                 let (status, color) = if busy { (tr!("处理中…"), ui::WARNING) } else { service_status(&service) };
@@ -1434,8 +1457,8 @@ impl SystemPanel {
                                 .child(status),
                         ),
                     )
-                    .child(div().w(px(220.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::SEMIBOLD).child(highlighted(name.clone(), &query)))
-                    .child(div().flex_1().min_w_0().px_3().truncate().text_color(theme::color(ui::MUTED_FOREGROUND)).child(highlighted(service.description.clone(), &query)))
+                    .child(div().w(px(220.)).flex_shrink_0().px_3().font_weight(FontWeight::SEMIBOLD).child(highlighted(name.clone(), &query)))
+                    .child(div().flex_1().min_w_0().px_3().text_color(theme::color(ui::MUTED_FOREGROUND)).child(highlighted(service.description.clone(), &query)))
                     .child(
                         div()
                             .w(px(BOOT_WIDTH))
@@ -1510,13 +1533,14 @@ fn paint_ring(bounds: Bounds<Pixels>, ratio: f32, color: Hsla, track: Hsla, wind
     }
 }
 
-/// 表格的一行：细线分隔，鼠标停着时铺浅蓝；行尾按钮悬停才出来（group「system-row」）。
+/// 表格的一行：细线分隔，鼠标停着时铺浅蓝；行尾按钮悬停才出来（group「system-row」）。名字长了折行，行跟着长高。
 fn table_row(id: impl Into<ElementId>) -> Stateful<Div> {
     let hover = theme::alpha(ui::PRIMARY, ROW_HOVER[usize::from(theme::is_dark())]);
     div()
         .id(id)
         .group("system-row")
-        .h(px(ROW_HEIGHT))
+        .min_h(px(ROW_HEIGHT))
+        .py(px(6.))
         .w_full()
         .flex()
         .items_center()
@@ -1543,7 +1567,7 @@ fn table_header() -> Div {
 
 /// 用户列：root 橙色标签、登录用户蓝色标签、系统账号淡色。标签往左挪出内边距，字和表头对齐。
 fn user_label(user: &str, me: Option<&str>, query: &str) -> Div {
-    let label = div().ml(px(-7.)).px(px(7.)).py(px(1.)).rounded(px(5.)).truncate().child(highlighted(user.to_string(), query));
+    let label = div().min_w_0().ml(px(-7.)).px(px(7.)).py(px(1.)).rounded(px(5.)).child(highlighted(user.to_string(), query));
     match user_kind(user, me) {
         UserKind::Root => label.bg(theme::alpha(ui::WARNING, 0.13)).text_color(theme::color(ui::WARNING_FOREGROUND)).font_weight(FontWeight::SEMIBOLD),
         UserKind::Me => label.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND)).font_weight(FontWeight::MEDIUM),
@@ -1568,7 +1592,8 @@ fn cpu_label(cpu: f32) -> Div {
 impl Render for SystemPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search.read(cx).value().to_string();
-        let process_count = self.processes.is_some().then(|| self.process_rows(&query).len());
+        let process_rows = self.processes.is_some().then(|| Rc::new(self.process_rows(&query)));
+        let process_count = process_rows.as_ref().map(|rows| rows.len());
         let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query, self.port_sort).len());
         let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query, self.service_sort).len());
         let disk_count = self.disk_count();
@@ -1707,20 +1732,33 @@ impl Render for SystemPanel {
                 .text_color(theme::color(ui::MUTED_FOREGROUND))
                 .child(message)
                 .into_any_element(),
-            None => uniform_list(
-                "system-rows",
-                count,
-                cx.processor(move |this, range, window, cx| match view {
-                    View::Processes => this.render_process_rows(range, window, cx),
-                    View::Ports => this.render_port_rows(range, window, cx),
-                    View::Services => this.render_service_rows(range, window, cx),
-                    View::Disk => Vec::new(),
-                }),
-            )
-            .track_scroll(&self.scroll)
-            .flex_1()
-            .w_full()
-            .into_any_element(),
+            None => {
+                // 行高跟着内容（名字长了折行）：整张表在这里算一次，每一行从里面取
+                let table = match view {
+                    View::Processes => Table::Processes(process_rows.clone().unwrap_or_default()),
+                    View::Ports => Table::Ports(Rc::new(filter_ports(self.ports.as_deref().unwrap_or(&[]), &query, self.port_sort).into_iter().cloned().collect())),
+                    View::Services => Table::Services(Rc::new(
+                        filter_services(self.services.as_deref().unwrap_or(&[]), &query, self.service_sort).into_iter().cloned().collect(),
+                    )),
+                    View::Disk => Table::None,
+                };
+                self.rows.sync(count);
+                let entity = cx.entity();
+                list(self.rows.state(), move |ix, _, cx| {
+                    entity
+                        .update(cx, |this, cx| match &table {
+                            Table::Processes(rows) => this.render_process_rows(rows.get(ix).cloned().into_iter().collect(), ix, cx),
+                            Table::Ports(rows) => this.render_port_rows(rows.get(ix).cloned().into_iter().collect(), ix, cx),
+                            Table::Services(rows) => this.render_service_rows(rows.get(ix).cloned().into_iter().collect(), ix, cx),
+                            Table::None => Vec::new(),
+                        })
+                        .pop()
+                        .unwrap_or_else(|| div().into_any_element())
+                })
+                .flex_1()
+                .w_full()
+                .into_any_element()
+            }
         };
 
         let menu = self.menu.as_ref().map(|menu| {
