@@ -220,6 +220,11 @@ impl Workspace {
             // 系统页：没权限时的 sudo 命令、看服务日志，都发到终端
             cx.subscribe_in(&system_panel, window, |this, _, event: &SystemPanelEvent, window, cx| match event {
                 SystemPanelEvent::RunInTerminal(command) => this.run_in_terminal(command, true, window, cx),
+                // 先让文件管理去那个目录再切过去：切过去时它从当前路径接着列，不会先跳到别处
+                SystemPanelEvent::OpenInFiles(path) => {
+                    this.file_manager.update(cx, |files, cx| files.open_bookmark(path.clone(), window, cx));
+                    this.set_main_tab(MainTab::Files, window, cx);
+                }
             }),
             cx.subscribe_in(&file_manager, window, |this, _, event: &FileManagerEvent, window, cx| match event {
                 FileManagerEvent::Reconnect(connection_id) => this.connect_to_saved(connection_id, window, cx),

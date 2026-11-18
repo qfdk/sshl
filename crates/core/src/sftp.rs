@@ -233,7 +233,7 @@ async fn wait_for_sftp_ready(
 }
 
 /// 以文件管理当前身份跑一条命令（删除 / chmod / chown）：终端切换过用户就经 su / sudo 以他身份执行。
-async fn exec_as_file_user(session: &SshSession, cmd: &str) -> AppResult<(u32, String, String)> {
+pub(crate) async fn exec_as_file_user(session: &SshSession, cmd: &str) -> AppResult<(u32, String, String)> {
     let elevation = session.elevation.lock().await.clone();
     let channel = open_exec_channel(session).await?;
     let Some(e) = elevation else { return exec_capture(channel, cmd, None).await };

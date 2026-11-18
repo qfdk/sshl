@@ -9,7 +9,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 /// 「系统」页看的是哪台机器。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Machine {
     /// SSH 会话（会话 id）那台服务器。
     Remote(String),
@@ -360,23 +360,29 @@ pub fn kill_command(pid: u32, force: bool) -> String {
 }
 
 pub(crate) async fn run(state: &AppState, machine: &Machine, command: &str) -> AppResult<String> {
+    let (status, out, err) = exec(state, machine, command).await?;
+    if status != 0 {
+        let err = err.trim();
+        return Err(AppError::Other(if err.is_empty() { format!("`{command}` exited {status}") } else { err.to_string() }));
+    }
+    Ok(out)
+}
+
+/// 跑一条命令，退出码、stdout、stderr 都要（退出码非 0 也照样给输出：du 读不了某些目录时就是这样）。
+/// 远程以文件管理当前身份，本机以 SSHL 自己的身份用 /bin/sh。
+pub(crate) async fn exec(state: &AppState, machine: &Machine, command: &str) -> AppResult<(u32, String, String)> {
     match machine {
         Machine::Remote(session_id) => {
             let session = state.get(session_id).await.ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
-            crate::sftp::run_as_file_user(&session, command).await
+            crate::sftp::exec_as_file_user(&session, command).await
         }
-        Machine::Local => run_local(command).await,
+        Machine::Local => {
+            let output = tokio::process::Command::new("/bin/sh").arg("-c").arg(command).stdin(std::process::Stdio::null()).output().await?;
+            // 被信号杀掉的没有退出码：按 255 算
+            let status = output.status.code().map_or(255, |code| code as u32);
+            Ok((status, String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned()))
+        }
     }
-}
-
-/// 本机：以 SSHL 自己的身份用 /bin/sh 跑。失败时的报错同远程：stderr，没有就说退出码。
-async fn run_local(command: &str) -> AppResult<String> {
-    let output = tokio::process::Command::new("/bin/sh").arg("-c").arg(command).stdin(std::process::Stdio::null()).output().await?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::Other(if err.is_empty() { format!("`{command}` {}", output.status) } else { err }));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 pub async fn processes(state: &AppState, machine: &Machine) -> AppResult<Vec<ProcessInfo>> {
@@ -605,7 +611,7 @@ Pages stored in compressor:                   128894.\nPages occupied by compres
     #[tokio::test]
     #[ignore = "测试程序要用 Developer ID 签名（ad-hoc 签名的进程起的 netstat 看不到端口）"]
     async fn local_ports_of_every_user_when_signed() {
-        let out = run_local(PORTS_COMMAND).await.unwrap();
+        let out = run(&AppState::new(), &Machine::Local, PORTS_COMMAND).await.unwrap();
         assert!(out.starts_with("@@darwin"), "走的是 netstat：{}", out.lines().next().unwrap_or(""));
         let ports = parse_ports(&out);
         let mdns = ports.iter().find(|p| p.process.as_deref() == Some("mDNSResponder")).unwrap_or_else(|| panic!("别的用户（_mdnsresponder）的端口也列出来：{ports:?}"));

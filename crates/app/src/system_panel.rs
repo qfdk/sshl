@@ -24,6 +24,10 @@ use crate::prompts::{self, Options};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem};
 
+mod disk;
+
+use disk::DiskState;
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const ROW_HEIGHT: f32 = 34.;
 /// 命令行、监听地址用等宽字；数字用界面字体的等宽数字（[`TABULAR`]）。
@@ -54,6 +58,8 @@ pub enum View {
     Processes,
     Ports,
     Services,
+    /// 分区用量和目录占用（见 `disk.rs`）。
+    Disk,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +108,8 @@ pub enum PortSortKey {
 enum MenuTarget {
     Process { pid: u32, name: String, command: Option<String> },
     Service(ServiceInfo),
+    /// 磁盘页里的一个目录：远程的能在文件管理里打开，本机的在访达里显示。
+    Directory { path: String, remote: bool },
 }
 
 struct MenuState {
@@ -112,6 +120,8 @@ struct MenuState {
 pub enum SystemPanelEvent {
     /// 发到终端执行（没权限时的 sudo 命令、看服务日志）。
     RunInTerminal(String),
+    /// 在文件管理里打开这个远程目录（磁盘页的右键菜单）。
+    OpenInFiles(String),
 }
 
 /// 一次刷新读到的列表。
@@ -120,6 +130,7 @@ enum Loaded {
     Ports(Vec<PortInfo>),
     /// None = 没有 systemd。
     Services(Option<Vec<ServiceInfo>>),
+    Filesystems(Vec<sshl_core::disk_usage::Filesystem>),
 }
 
 pub struct SystemPanel {
@@ -133,6 +144,7 @@ pub struct SystemPanel {
     processes: Option<Vec<ProcessInfo>>,
     ports: Option<Vec<PortInfo>>,
     services: Option<Vec<ServiceInfo>>,
+    disk: DiskState,
     no_systemd: bool,
     /// 正在启停的服务（状态列显示「处理中…」）。
     busy: Option<String>,
@@ -180,11 +192,11 @@ pub fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// 这台机器有哪几个列表：本机（macOS）没有 systemd 服务。没连着时照旧三个（只显示空状态）。
+/// 这台机器有哪几个列表：本机（macOS）没有 systemd 服务。没连着时照旧全列（只显示空状态）。
 pub fn views_for(machine: Option<&Machine>) -> &'static [View] {
     match machine {
-        Some(Machine::Local) => &[View::Processes, View::Ports],
-        _ => &[View::Processes, View::Ports, View::Services],
+        Some(Machine::Local) => &[View::Processes, View::Ports, View::Disk],
+        _ => &[View::Processes, View::Ports, View::Services, View::Disk],
     }
 }
 
@@ -499,6 +511,7 @@ impl SystemPanel {
             processes: None,
             ports: None,
             services: None,
+            disk: DiskState::default(),
             no_systemd: false,
             busy: None,
             error: None,
@@ -532,6 +545,8 @@ impl SystemPanel {
         self.processes = None;
         self.ports = None;
         self.services = None;
+        // 扫描结果按机器留着，分区列表随机器换
+        self.disk.filesystems = None;
         self.no_systemd = false;
         self.busy = None;
         self.error = None;
@@ -581,6 +596,7 @@ impl SystemPanel {
                 View::Processes => server_info::processes(state, &machine).await.map(Loaded::Processes),
                 View::Ports => server_info::ports(state, &machine).await.map(Loaded::Ports),
                 View::Services => services::services(state, &machine).await.map(Loaded::Services),
+                View::Disk => sshl_core::disk_usage::filesystems(state, &machine).await.map(Loaded::Filesystems),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -602,6 +618,7 @@ impl SystemPanel {
                                 this.no_systemd = services.is_none();
                                 this.services = Some(services.unwrap_or_default());
                             }
+                            Loaded::Filesystems(filesystems) => this.disk.filesystems = Some(filesystems),
                         }
                     }
                     Some(Err(error)) => this.error = Some(error.to_string().into()),
@@ -1274,10 +1291,12 @@ impl Render for SystemPanel {
         let process_count = self.processes.as_deref().map(|p| filter_processes(p, &query, self.sort).len());
         let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query, self.port_sort).len());
         let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query, self.service_sort).len());
+        let disk_count = self.disk_count(&query);
         let (count, loaded) = match self.view {
             View::Processes => (process_count.unwrap_or(0), self.processes.is_some()),
             View::Ports => (port_count.unwrap_or(0), self.ports.is_some()),
             View::Services => (service_count.unwrap_or(0), self.services.is_some()),
+            View::Disk => (disk_count.unwrap_or(0), self.disk.filesystems.is_some()),
         };
         // 几个列表的标签：选中的实心蓝底，后面是条数
         let tabs = div()
@@ -1295,6 +1314,7 @@ impl Render for SystemPanel {
                     View::Processes => (trc!("标签页", "进程"), process_count),
                     View::Ports => (trc!("标签页", "端口"), port_count),
                     View::Services => (trc!("标签页", "服务"), service_count),
+                    View::Disk => (trc!("标签页", "磁盘"), disk_count),
                 };
                 let active = view == self.view;
                 let aria: SharedString = match count {
@@ -1357,6 +1377,8 @@ impl Render for SystemPanel {
         let toolbar = div().flex().items_center().gap_3().p_3().child(tabs).child(search);
 
         let header = match self.view {
+            // 磁盘页自己画表头和内容（`render_disk`）
+            View::Disk => table_header(),
             View::Processes => table_header()
                 .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(PID_WIDTH), Align::End, cx))
                 .child(self.header_cell(tr!("用户"), Some(SortColumn::Process(SortKey::User)), Some(USER_WIDTH), Align::Start, cx))
@@ -1411,6 +1433,7 @@ impl Render for SystemPanel {
                     View::Processes => this.render_process_rows(range, window, cx),
                     View::Ports => this.render_port_rows(range, window, cx),
                     View::Services => this.render_service_rows(range, window, cx),
+                    View::Disk => Vec::new(),
                 }),
             )
             .track_scroll(&self.scroll)
@@ -1465,6 +1488,22 @@ impl Render for SystemPanel {
                         MenuEntry::Item(MenuItem::new(tr!("复制名称"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(unit.clone())))),
                     ]
                 }
+                MenuTarget::Directory { path, remote } => {
+                    let (open_weak, open_path, copied) = (weak.clone(), path.clone(), path.clone());
+                    let open = if *remote {
+                        MenuItem::new(tr!("在文件管理中打开"), move |_, cx| {
+                            let _ = open_weak.update(cx, |this, cx| {
+                                this.menu = None;
+                                cx.emit(SystemPanelEvent::OpenInFiles(open_path.clone()));
+                            });
+                        })
+                    } else {
+                        MenuItem::new(tr!("在访达中显示"), move |_, cx| disk::reveal_in_finder(&open_path, cx))
+                    };
+                    let mut entries = vec![MenuEntry::Item(open.icon(Icon::FolderOpen))];
+                    entries.push(MenuEntry::Item(MenuItem::new(tr!("复制路径"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))).icon(Icon::Copy)));
+                    entries
+                }
             };
             let dismiss = {
                 let weak = weak.clone();
@@ -1506,7 +1545,11 @@ impl Render for SystemPanel {
                     .border_color(theme::color(ui::BORDER))
                     .bg(theme::color(ui::CARD))
                     .child(toolbar)
-                    .child(div().flex_1().min_h_0().flex().flex_col().pb_2().child(header).child(body)),
+                    .child(if view == View::Disk {
+                        self.render_disk(&query, cx)
+                    } else {
+                        div().flex_1().min_h_0().flex().flex_col().pb_2().child(header).child(body).into_any_element()
+                    }),
             )
             .when_some(menu, |d, menu| d.child(menu))
     }
@@ -1643,9 +1686,10 @@ mod tests {
     #[test]
     fn the_local_machine_has_processes_and_ports_but_no_services() {
         let (local, remote) = (Machine::Local, Machine::Remote("s1".into()));
-        assert_eq!(views_for(Some(&local)), [View::Processes, View::Ports], "macOS 没有 systemd");
-        assert_eq!(views_for(Some(&remote)), [View::Processes, View::Ports, View::Services]);
-        assert_eq!(views_for(None), [View::Processes, View::Ports, View::Services], "没连着时照旧三个");
+        assert_eq!(views_for(Some(&local)), [View::Processes, View::Ports, View::Disk], "macOS 没有 systemd");
+        assert_eq!(views_for(Some(&remote)), [View::Processes, View::Ports, View::Services, View::Disk]);
+        assert_eq!(views_for(None), [View::Processes, View::Ports, View::Services, View::Disk], "没连着时照旧全列");
+        assert_eq!(view_on(Some(&local), View::Disk), View::Disk, "本机也能看磁盘");
         assert_eq!(view_on(Some(&local), View::Services), View::Processes, "从服务器的服务列表切到本机：回到进程");
         assert_eq!(view_on(Some(&local), View::Ports), View::Ports, "两边都有的留在原处");
         assert_eq!(view_on(Some(&remote), View::Services), View::Services);

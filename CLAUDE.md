@@ -230,11 +230,11 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   逐个 `ssh -G -F ~/.ssh/config 别名` 解析主机 / 用户 / 端口 / 私钥；写了 IdentityFile 的导入为私钥方式，没写的导入为自动；
   同一 用户@主机:端口 已有就不重复导入；导入到分组「ssh config」。
 - **「系统」页**（⌘P，顶栏顺序 终端（⌘I）/ 文件管理（⌘O）/ 系统，系统不常用放最后，`system_panel.rs` + core 的 `server_info.rs` / `services.rs`）：负载 / 内存 / 磁盘 / 运行时间，
-  下面三个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、macOS 用 netstat -anvl、再否则 lsof）、systemd 服务（list-units + list-unit-files，
-  没被载入的已停服务也列出）。可结束进程、启停 / 重启服务、开关开机启动（停止、重启先确认）。容器管理做过又删了：用户用不到。
+  下面四个列表：进程（`ps -eo`）、监听端口（有 ss 用 ss、否则 Linux netstat -p、macOS 用 netstat -anvl、再否则 lsof）、systemd 服务（list-units + list-unit-files，
+  没被载入的已停服务也列出）、磁盘（分区用量和目录占用，见下一条）。可结束进程、启停 / 重启服务、开关开机启动（停止、重启先确认）。容器管理做过又删了：用户用不到。
   看哪台机器是 `server_info::Machine`：远程会话（`Remote`）的命令走 `run_as_file_user`，切过来时先同步文件管理身份，终端 sudo -i 之后就以 root 跑；
   本机标签（`Local`）看这台 Mac，命令以 SSHL 自己的身份用 /bin/sh 跑，结束进程直接 kill(2)（`local_pid`：0 和负数是进程组，不发），
-  只有进程 / 端口两个列表（`system_panel::views_for`，macOS 没有 systemd）。没权限（`services::needs_root`）时不只报错，
+  有进程 / 端口 / 磁盘（`system_panel::views_for`，macOS 没有 systemd）。没权限（`services::needs_root`）时不只报错，
   而是提议「在终端里用 sudo 执行」，把 sudo 命令发到终端（`SystemPanelEvent::RunInTerminal`），密码在终端里输或点填充密码。
   看服务日志（journalctl -f）也发到终端。只在这页显示时每 3 秒刷新。
   外观是用户在 Claude Design 画布上从五个方案里挑的（2026-11-16，「上面 B 的卡片、下面 C 的表格」；嫌原来「太白」，A 的表格首字母方块 + 数据条又「太密」）：
@@ -253,6 +253,16 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   Developer ID 签了再跑（单测见 `local_ports_of_every_user_when_signed` 的说明）。Homebrew 的 python / perl 也是 ad-hoc 的，从它们里面跑 netstat 同样是空的。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
+- **磁盘页**（系统页的「磁盘」标签，`system_panel/disk.rs` + core 的 `disk_usage.rs`，用户 2026-11-18 要的「看服务器空间占用」，比自动更新重要）：
+  先列分区（`df -kP`；只留块设备、网络盘和 /，去掉 tmpfs、snap 的 loop、/proc /sys /dev /run /etc（容器里 bind mount 进来的 /etc/hosts）、
+  macOS 的系统卷（/System/Volumes 下只留 Data）；同一设备挂了几处只留路径最短的），点一个分区整个扫一遍，然后像 ncdu 按大小往下点，
+  最后一行是「这一层的文件」。用户要「速度快、别因为太大卡顿」：`du -xk` 只列 4 层（`SCAN_DEPTH`；GNU 老版本只认 `--max-depth`，
+  BusyBox / macOS 只认 `-d`，拿 /dev/null 试），du 照样走完整棵树（总数准），输出几万行以内；第 4 层的目录记成「边上的」（`frontier`），
+  点进去只补扫那一个目录再 `merge` 回树上。子目录建树时排好；当前这一层的列表按（机器, 目录, 搜索词, 扫描版本）缓存，每帧只画看得见的行。
+  服务器上挂在 `ionice -c3 -t` + `nice -n 19` 下跑。命令以文件管理当前身份跑（`server_info::exec`，du 读不了某些目录时退出码 1 但照样有输出，
+  记下读不了几个，提示 sudo -i 后重扫）。扫描结果按（机器, 分区）留着，切走再回来不重扫；重新扫描时停在深处的话退到新树上最深的祖先再补扫。
+  右键目录：远程「在文件管理中打开」（`SystemPanelEvent::OpenInFiles`），本机「在访达中显示」。本机也有这页（用户要的）：
+  第一次扫描时 macOS 可能问「文稿」「桌面」等文件夹的访问权限，界面上提示了；不允许的算进「读不了」。
 - **本机终端**（⌘N——用户开终端的第一反应是它；新建连接是 ⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
   接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
