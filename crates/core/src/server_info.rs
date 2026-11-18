@@ -58,9 +58,10 @@ pub struct Overview {
 }
 
 /// 全部进程。args 放最后：命令行里有空格。后面附每个进程的 comm（macOS 上是程序的完整路径，用来切出带空格的程序名），
-/// 读不到 comm 不算失败。
-pub const PROCESSES_COMMAND: &str =
-    "sh -c 'LC_ALL=C ps -eo pid=,ppid=,user=,pcpu=,pmem=,rss=,args= && { echo @@comm; LC_ALL=C ps -eo pid=,comm= 2>/dev/null; true; }'";
+/// 读不到 comm 不算失败。用户列：Linux 的 ps 默认只给 8 个字、长的截成「systemd+」，认得 `user:64` 时用宽的；
+/// macOS / BusyBox 不认（macOS 只警告一句、照样输出缺了这一列的行，所以先拿自己试一下，不能失败了再跑一遍）。
+pub const PROCESSES_COMMAND: &str = "sh -c 'u=user; LC_ALL=C ps -o user:64= -p $$ >/dev/null 2>&1 && u=user:64; \
+LC_ALL=C ps -eo pid=,ppid=,$u=,pcpu=,pmem=,rss=,args= && { echo @@comm; LC_ALL=C ps -eo pid=,comm= 2>/dev/null; true; }'";
 
 pub fn parse_processes(out: &str) -> Vec<ProcessInfo> {
     let (list, comm) = out.split_once("\n@@comm\n").unwrap_or((out, ""));
@@ -726,6 +727,9 @@ Pages stored in compressor:                   128894.\nPages occupied by compres
         };
         let procs = parse_processes(&exec(PROCESSES_COMMAND.into()).await.1);
         assert!(procs.len() > 5 && procs.iter().any(|p| p.pid == 1), "{} 个进程", procs.len());
+        // Linux 的 ps 默认把用户名截到 8 个字加「+」（systemd-resolve → systemd+）
+        let cut: Vec<&str> = procs.iter().map(|p| p.user.as_str()).filter(|user| user.ends_with('+')).collect();
+        assert!(cut.is_empty(), "用户名被截断了：{cut:?}");
         let (_, out, _) = exec(PORTS_COMMAND.into()).await;
         assert!(out.starts_with("@@"), "{out}");
         let ports = parse_ports(&out);
@@ -746,6 +750,17 @@ Pages stored in compressor:                   128894.\nPages occupied by compres
         assert!(!parse_processes(&exec(PROCESSES_COMMAND.into()).await.1).iter().any(|p| p.pid == pid), "结束了");
         let (status, _, err) = exec(kill_command(1, false)).await;
         assert_ne!(status, 0, "普通用户结束不了 1 号进程：{err}");
+    }
+
+    /// 本机（macOS 的 ps 不认 `user:64` 这种宽度写法，只警告一句、照样输出缺了用户列的行）：退回普通写法，用户照样读得出来。
+    #[test]
+    fn process_list_reads_users_on_this_machine() {
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(PROCESSES_COMMAND).output().unwrap();
+        let procs = parse_processes(&String::from_utf8_lossy(&out.stdout));
+        let init = procs.iter().find(|p| p.pid == 1).expect("有 1 号进程");
+        assert_eq!(init.user, "root");
+        let me = std::env::var("USER").unwrap();
+        assert!(procs.iter().any(|p| p.user == me), "有自己的进程");
     }
 
     #[test]
