@@ -253,10 +253,14 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   Developer ID 签了再跑（单测见 `local_ports_of_every_user_when_signed` 的说明）。Homebrew 的 python / perl 也是 ad-hoc 的，从它们里面跑 netstat 同样是空的。
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
-- **磁盘页**（系统页的「磁盘」标签，`system_panel/disk.rs` + core 的 `disk_usage.rs`，用户 2026-11-18 要的「看服务器空间占用」，比自动更新重要）：
-  先列分区（`df -kP`；只留块设备、网络盘和 /，去掉 tmpfs、snap 的 loop、/proc /sys /dev /run /etc（容器里 bind mount 进来的 /etc/hosts）、
-  macOS 的系统卷（/System/Volumes 下只留 Data）；同一设备挂了几处只留路径最短的），点一个分区整个扫一遍，然后像 ncdu 按大小往下点，
-  最后一行是「这一层的文件」。用户要「速度快、别因为太大卡顿」：`du -xk` 只列 4 层（`SCAN_DEPTH`；GNU 老版本只认 `--max-depth`，
+- **磁盘页**（系统页的「磁盘」标签，`system_panel/disk.rs` + core 的 `disk_usage.rs` / `disk_scan.rs`，用户 2026-11-18 要的「看服务器空间占用」，比自动更新重要）：
+  用途是磁盘快满时找出哪个文件夹、哪个文件占得多。点开就看默认分区（/，没有就用得最多的那个）并开始扫，像 ncdu 按大小往下点；
+  别的分区在顶上一排按钮切换（带使用率）。不要先列一张分区表（用户：「弄了多种目录就很奇怪」），也不按 lsblk 的物理盘分组（做过又撤了：
+  用户要的是占用，不是盘的结构）。每一层子目录（来自扫描）和文件（打开那一层时现列：远程走 SFTP、本机按块算，`disk_usage::files_in`）
+  放在一起从大到小（`disk::rows`），最多列 200 个最大的文件、其余合成「其余 N 个文件」，文件还没列出来时用「这一层的文件」总和代替；
+  所有目录都能点进去（没有子目录也有文件）。分区列表来自 `df -kP`（只留块设备、网络盘和 /，去掉 tmpfs、snap 的 loop、/proc /sys /dev /run /etc、
+  macOS 上 nobrowse 的卷和只读系统卷 /；同一设备挂了几处只留路径最短的）。
+  用户要「速度快、别因为太大卡顿」：远程 `du -xk` 只列 4 层（`SCAN_DEPTH`；GNU 老版本只认 `--max-depth`，
   BusyBox / macOS 只认 `-d`，拿 /dev/null 试），du 照样走完整棵树（总数准），输出几万行以内；第 4 层的目录记成「边上的」（`frontier`），
   点进去只补扫那一个目录再 `merge` 回树上。子目录建树时排好；当前这一层的列表按（机器, 目录, 搜索词, 扫描版本）缓存，每帧只画看得见的行。
   本机不用 du，在 SSHL 里多线程并行走目录（`disk_scan.rs`，同 gdu / dua；共享队列后进先出、每个线程先记自己的账最后合、
@@ -264,7 +268,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   扫描中显示已扫多少文件、多大（`ScanProgress`）。远程服务器上跑不了我们的代码，还是 du（要并行得把扫描程序传到服务器上，没做，等用户定）。
   服务器上挂在 `ionice -c3 -t`（Linux）或 `taskpolicy -b`（macOS）+ `nice -n 19` 下跑。命令以文件管理当前身份跑（`server_info::exec`，du 读不了某些目录时退出码 1 但照样有输出，
   记下读不了几个，提示 sudo -i 后重扫）。扫描结果按（机器, 分区）留着，切走再回来不重扫；重新扫描时停在深处的话退到新树上最深的祖先再补扫。
-  右键目录：远程「在文件管理中打开」（`SystemPanelEvent::OpenInFiles`），本机「在访达中显示」。本机也有这页（用户要的）：
+  右键目录或文件：远程「在文件管理中打开」（文件打开它所在的目录，`SystemPanelEvent::OpenInFiles`），本机「在访达中显示」。本机也有这页（用户要的）：
   第一次扫描时 macOS 可能问「文稿」「桌面」等文件夹的访问权限，界面上提示了；不允许的算进「读不了」。
 - **本机终端**（⌘N——用户开终端的第一反应是它；新建连接是 ⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
   接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；

@@ -263,6 +263,37 @@ pub(crate) fn normalize(path: &str) -> String {
     if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() }
 }
 
+/// 一个目录里直接放着的文件（不含子目录）：(名字, 大小)，从大到小。磁盘页每一层把它们和子目录放在一起排，看得出是哪个文件占的。
+/// 远程走文件管理的 SFTP（当前身份，大小是文件长度）；本机按实际占的块算（同扫描）。
+pub async fn files_in(state: &AppState, machine: &Machine, path: &str) -> AppResult<Vec<(String, u64)>> {
+    let mut files: Vec<(String, u64)> = match machine {
+        Machine::Remote(session_id) => crate::sftp::file_list(state, session_id.clone(), path.to_string())
+            .await?
+            .into_iter()
+            .filter(|entry| !entry.is_directory)
+            .map(|entry| (entry.name, entry.size))
+            .collect(),
+        Machine::Local => {
+            let path = path.to_string();
+            tokio::task::spawn_blocking(move || local_files(&path)).await.map_err(|e| AppError::Other(format!("list: {e}")))??
+        }
+    };
+    files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(files)
+}
+
+fn local_files(path: &str) -> AppResult<Vec<(String, u64)>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)?.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_dir() {
+            files.push((entry.file_name().to_string_lossy().into_owned(), meta.blocks() * 512));
+        }
+    }
+    Ok(files)
+}
+
 /// 扫 `root`。本机多线程并行扫（`disk_scan`，`progress` 跟着走）；远程用 du：没权限读的目录 du 会报错（退出码 1）
 /// 但照样给出读得到的部分，有输出就算成功，记下读不了几个。
 pub async fn scan(state: &AppState, machine: &Machine, root: &str, progress: std::sync::Arc<ScanProgress>) -> AppResult<DiskTree> {
@@ -342,6 +373,20 @@ devices -- file:///Users/me/Library/Containers/com.apple.CoreDevice.CoreDeviceSe
 ";
         let mounts: Vec<String> = parse_filesystems(out).into_iter().map(|fs| fs.mount).collect();
         assert_eq!(mounts, ["/System/Volumes/Data", "/Volumes/My Backup"]);
+    }
+
+    /// 本机：只要文件（子目录、子目录里的不要），从大到小。
+    #[tokio::test]
+    async fn files_in_a_folder_biggest_first() {
+        let root = std::env::temp_dir().join(format!("sshl-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("small.txt"), vec![1u8; 100]).unwrap();
+        std::fs::write(root.join("big.log"), vec![1u8; 300_000]).unwrap();
+        std::fs::write(root.join("sub/inner.bin"), vec![1u8; 900_000]).unwrap();
+        let files = files_in(&AppState::new(), &Machine::Local, &root.to_string_lossy()).await.unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(files.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["big.log", "small.txt"]);
+        assert!(files[0].1 >= 300_000, "按占的块算");
     }
 
     /// Linux 的 mount 输出（「on 挂载点 type 类型」）不影响：照 df 的规则来。
@@ -443,7 +488,9 @@ devices -- file:///Users/me/Library/Containers/com.apple.CoreDevice.CoreDeviceSe
             && head -c 65536 /dev/zero > top.bin && chmod 000 locked";
         server_info::run(&state, &machine, &format!("cd '{base}' && {setup}")).await.unwrap();
         let tree = scan(&state, &machine, &base, Default::default()).await.unwrap();
+        let files = files_in(&state, &machine, &base).await.unwrap();
         server_info::run(&state, &machine, &format!("chmod 755 '{base}/locked' && rm -rf -- '{base}'")).await.unwrap();
+        assert_eq!(files, [("top.bin".to_string(), 65536)], "这一层只有 top.bin（子目录不算）");
 
         assert_eq!(tree.root(), base);
         let entries = tree.entries(&base);

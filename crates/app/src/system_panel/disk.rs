@@ -1,18 +1,18 @@
-//! 「系统」页的「磁盘」：先列各分区用了多少，点一个分区整个扫一遍（`du`，见 `sshl_core::disk_usage`），之后像 ncdu
-//! 一样按大小一层层往下点。
+//! 「系统」页的「磁盘」：看磁盘空间被什么占了（磁盘快满时找是哪个文件夹、哪个文件）。点开就扫默认分区（/，没有就用得最多的那个），
+//! 像 ncdu 一样按大小一层层往下点；每一层子目录和文件放在一起排，大文件一眼看得到。别的分区在顶上切换。
 //!
-//! 要快、不卡：一次只列 4 层（du 照样走完整棵树，总数是准的，输出几万行以内）；点到更深的目录时只补扫那一个目录。
-//! 子目录建树时就排好；当前这一层的列表缓存着，换目录、改搜索词、扫描结果变了才重算，每帧只画看得见的几行。
-//! du 在服务器上挂在最低的 IO / CPU 优先级下跑。扫描结果按机器和分区留着：切走再回来不用重扫，要新的点「重新扫描」。
+//! 要快、不卡：远程一次只列 4 层（du 照样走完整棵树，总数是准的，输出几万行以内），点到更深的目录时只补扫那一个目录；
+//! 本机多线程并行扫（`sshl_core::disk_scan`）。每一层的文件在打开那一层时才列（一个目录，很快）。
+//! 当前这一层的列表缓存着，换目录、改搜索词、扫描或文件列表变了才重算，每帧只画看得见的几行。
+//! 远程的 du 挂在最低的 IO / CPU 优先级下跑。扫描结果按机器和分区留着：切走再回来不用重扫，要新的点「重新扫描」。
 //!
 //! 本机标签也有：第一次扫描时 macOS 可能会问 SSHL 能不能访问「文稿」「桌面」这些文件夹，不允许的就算不进来。
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use gpui::{Animation, AnimationExt, Transformation, percentage, svg};
-use std::sync::atomic::Ordering;
-
 use sshl_core::disk_usage::{self, DiskEntry, DiskTree, Filesystem, ScanProgress};
 
 use super::*;
@@ -20,7 +20,8 @@ use super::*;
 const USAGE_WIDTH: f32 = 220.;
 const SIZE_WIDTH: f32 = 96.;
 const SHARE_WIDTH: f32 = 72.;
-const STATE_WIDTH: f32 = 120.;
+/// 每一层最多列这么多个文件（最大的那些），其余的合成一行。
+pub const FILES_SHOWN: usize = 200;
 
 /// 一个分区的扫描。
 pub(super) enum Scan {
@@ -40,12 +41,37 @@ pub(super) enum Scan {
     Failed(String),
 }
 
-/// 当前这一层要画的东西：(机器, 目录, 搜索词, 扫描版本) 变了才重算。
+/// 一个目录里直接放着的文件。
+enum Files {
+    Loading,
+    Loaded(Arc<Vec<(String, u64)>>),
+    Failed,
+}
+
+/// 一层里的一行。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    Dir(DiskEntry),
+    File { name: String, path: String, size: u64 },
+    /// 列不下的那些文件合成一行。
+    MoreFiles { count: usize, size: u64 },
+    /// 文件还没列出来（或列失败）：这一层文件的总和。
+    Files(u64),
+}
+
+impl Row {
+    fn size(&self) -> u64 {
+        match self {
+            Row::Dir(entry) => entry.size,
+            Row::File { size, .. } | Row::MoreFiles { size, .. } | Row::Files(size) => *size,
+        }
+    }
+}
+
+/// 当前这一层要画的东西：(机器, 目录, 搜索词, 版本) 变了才重算。
 struct Listing {
     key: (Machine, String, String, u64),
-    entries: Arc<Vec<DiskEntry>>,
-    /// 直接放在这一层的文件（搜索时不显示，算 0）。
-    files: u64,
+    rows: Arc<Vec<Row>>,
     total: u64,
 }
 
@@ -55,9 +81,11 @@ pub(super) struct DiskState {
     pub(super) filesystems: Option<Vec<Filesystem>>,
     /// (机器, 分区挂载点) → 扫描。
     scans: HashMap<(Machine, String), Scan>,
-    /// 每台机器点开了哪个分区、看到了哪一层：(挂载点, 目录)。没有 = 在分区列表。
+    /// 每台机器看的哪个分区、到了哪一层：(挂载点, 目录)。
     at: HashMap<Machine, (String, String)>,
-    /// `scans` 每变一次加一：`listing` 据此知道要重算。
+    /// (机器, 目录) → 里面的文件。
+    files: HashMap<(Machine, String), Files>,
+    /// `scans` / `files` 每变一次加一：`listing` 据此知道要重算。
     version: u64,
     listing: Option<Listing>,
     scroll: UniformListScrollHandle,
@@ -108,13 +136,37 @@ pub fn group_digits(n: u64) -> String {
     out
 }
 
-/// 搜索：名字里含关键字（不分大小写）。
-pub fn filter_entries(entries: Vec<DiskEntry>, query: &str) -> Vec<DiskEntry> {
+/// 这一层：子目录和文件放在一起从大到小（一样大时目录在前）。文件最多列 [`FILES_SHOWN`] 个最大的，其余合成一行；
+/// 文件还没列出来时用一行「这一层的文件」总和代替（搜索时不显示）。搜索：名字里含关键字（不分大小写）。
+pub fn rows(dirs: Vec<DiskEntry>, files: Option<&[(String, u64)]>, files_total: u64, dir: &str, query: &str) -> Vec<Row> {
     let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return entries;
+    let matches = |name: &str| query.is_empty() || name.to_lowercase().contains(&query);
+    let mut out: Vec<Row> = dirs.into_iter().filter(|entry| matches(&entry.name)).map(Row::Dir).collect();
+    let mut tail = None;
+    match files {
+        Some(files) => {
+            let mut matching = files.iter().filter(|(name, _)| matches(name));
+            for (name, size) in matching.by_ref().take(FILES_SHOWN) {
+                let path = if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") };
+                out.push(Row::File { name: name.clone(), path, size: *size });
+            }
+            let (count, size) = matching.fold((0, 0), |(count, total), (_, size)| (count + 1, total + size));
+            if count > 0 {
+                tail = Some(Row::MoreFiles { count, size });
+            }
+        }
+        None if query.is_empty() && files_total > 0 => tail = Some(Row::Files(files_total)),
+        None => {}
     }
-    entries.into_iter().filter(|entry| entry.name.to_lowercase().contains(&query)).collect()
+    // 稳定排序：一样大时目录（先放进去的）在前
+    out.sort_by_key(|row| std::cmp::Reverse(row.size()));
+    out.extend(tail);
+    out
+}
+
+/// 点开磁盘页时先看哪个分区：有 / 就是 /，没有（Mac 上是数据卷）就是用得最多的那个。
+pub fn default_volume(filesystems: &[Filesystem]) -> Option<String> {
+    filesystems.iter().find(|fs| fs.mount == "/").or_else(|| filesystems.iter().max_by_key(|fs| fs.used)).map(|fs| fs.mount.clone())
 }
 
 /// 重新扫描后树只有前几层：`path` 不在树上了就退到树上最深的祖先（不会退出分区根）。
@@ -128,11 +180,6 @@ pub fn deepest_known(tree: &DiskTree, mount: &str, path: &str) -> String {
         };
     }
     if current.len() < mount.len() { mount.to_string() } else { current }
-}
-
-fn filter_filesystems<'a>(filesystems: &'a [Filesystem], query: &str) -> Vec<&'a Filesystem> {
-    let query = query.trim().to_lowercase();
-    filesystems.iter().filter(|fs| query.is_empty() || fs.mount.to_lowercase().contains(&query) || fs.device.to_lowercase().contains(&query)).collect()
 }
 
 fn spinner(size: f32) -> impl IntoElement {
@@ -156,7 +203,7 @@ fn bar(ratio: f32, color: ui::Token) -> Div {
         .child(div().h_full().rounded_full().w(gpui::relative(ratio.clamp(0., 1.))).bg(theme::color(color)))
 }
 
-/// 本机：在访达里选中这个目录。测试口开着时只记日志，不去开访达。
+/// 本机：在访达里选中这个目录 / 文件。测试口开着时只记日志，不去开访达。
 pub(super) fn reveal_in_finder(path: &str, cx: &mut App) {
     tracing::info!("reveal: {path}");
     #[cfg(any(debug_assertions, feature = "devhook"))]
@@ -167,12 +214,12 @@ pub(super) fn reveal_in_finder(path: &str, cx: &mut App) {
 }
 
 impl SystemPanel {
-    /// 分区列表里的个数（标签上的数字）。
-    pub(super) fn disk_count(&self, query: &str) -> Option<usize> {
-        self.disk.filesystems.as_deref().map(|filesystems| filter_filesystems(filesystems, query).len())
+    /// 标签上的数字：几个分区。
+    pub(super) fn disk_count(&self) -> Option<usize> {
+        self.disk.filesystems.as_ref().map(Vec::len)
     }
 
-    /// 点开一个分区：没扫过（或上次失败）就开始扫。
+    /// 看这个分区：没扫过（或上次失败）就开始扫。
     fn open_filesystem(&mut self, mount: String, cx: &mut Context<Self>) {
         let Some(machine) = self.machine.clone() else { return };
         self.disk.at.insert(machine.clone(), (mount.clone(), mount.clone()));
@@ -183,9 +230,11 @@ impl SystemPanel {
         cx.notify();
     }
 
-    /// 扫整个分区（第一次点开、点「重新扫描」）。
+    /// 扫整个分区（第一次看、点「重新扫描」）。之前列过的文件作废（重新扫描就是要新的）。
     fn start_scan(&mut self, mount: String, cx: &mut Context<Self>) {
         let Some(machine) = self.machine.clone() else { return };
+        let below = if mount == "/" { "/".to_string() } else { format!("{mount}/") };
+        self.disk.files.retain(|(owner, path), _| *owner != machine || (*path != mount && !path.starts_with(&below)));
         let key = (machine.clone(), mount.clone());
         let progress = Arc::new(ScanProgress::default());
         self.disk.scans.insert(key.clone(), Scan::Running { started: Instant::now(), progress: progress.clone() });
@@ -242,6 +291,28 @@ impl SystemPanel {
         .detach();
     }
 
+    /// 列一个目录里的文件（打开那一层时）。
+    fn load_files(&mut self, machine: Machine, path: String, cx: &mut Context<Self>) {
+        let key = (machine.clone(), path.clone());
+        self.disk.files.insert(key.clone(), Files::Loading);
+        let listed = backend::spawn(async move { disk_usage::files_in(&backend::get().state, &machine, &path).await });
+        cx.spawn(async move |this, cx| {
+            let files = match listed.await {
+                Some(Ok(files)) => Files::Loaded(Arc::new(files)),
+                _ => Files::Failed,
+            };
+            let _ = this.update(cx, |this, cx| {
+                // 期间重新扫描过（列表被清掉了）：结果不要
+                if matches!(this.disk.files.get(&key), Some(Files::Loading)) {
+                    this.disk.files.insert(key, files);
+                    this.disk.version += 1;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// 扫描中每秒画一次（显示用了多久；页面的 3 秒刷新太慢）。
     fn tick_while_scanning(&mut self, key: (Machine, String), cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -287,120 +358,91 @@ impl SystemPanel {
         cx.notify();
     }
 
-    fn back_to_filesystems(&mut self, cx: &mut Context<Self>) {
-        if let Some(machine) = &self.machine {
-            self.disk.at.remove(machine);
-            cx.notify();
-        }
-    }
-
-    /// 当前这一层的列表（见 [`Listing`]）。
-    fn listing(&mut self, cx: &App) -> Option<(Arc<Vec<DiskEntry>>, u64, u64)> {
+    /// 当前这一层的行和总大小（见 [`Listing`]）。这一层的文件还没列就去列（列好了版本一变，这里重算）。
+    fn listing(&mut self, cx: &mut Context<Self>) -> Option<(Arc<Vec<Row>>, u64)> {
         let machine = self.machine.clone()?;
         let (mount, path) = self.disk.at.get(&machine).cloned()?;
         let query = self.search.read(cx).value().trim().to_string();
         let key = (machine.clone(), path.clone(), query.clone(), self.disk.version);
         if let Some(listing) = self.disk.listing.as_ref().filter(|listing| listing.key == key) {
-            return Some((listing.entries.clone(), listing.files, listing.total));
+            return Some((listing.rows.clone(), listing.total));
         }
-        let Some(Scan::Done { tree, .. }) = self.disk.scans.get(&(machine, mount)) else { return None };
-        let entries = Arc::new(filter_entries(tree.entries(&path), &query));
-        let files = if query.is_empty() { tree.files_size(&path) } else { 0 };
+        let Some(Scan::Done { tree, .. }) = self.disk.scans.get(&(machine.clone(), mount)) else { return None };
+        let tree = tree.clone();
+        if !tree.needs_scan(&path) && !self.disk.files.contains_key(&(machine.clone(), path.clone())) {
+            self.load_files(machine.clone(), path.clone(), cx);
+        }
+        let files = match self.disk.files.get(&(machine, path.clone())) {
+            Some(Files::Loaded(files)) => Some(files.clone()),
+            _ => None,
+        };
+        let rows = Arc::new(rows(tree.entries(&path), files.as_deref().map(Vec::as_slice), tree.files_size(&path), &path, &query));
         let total = tree.size(&path).unwrap_or(0);
-        self.disk.listing = Some(Listing { key, entries: entries.clone(), files, total });
-        Some((entries, files, total))
+        self.disk.listing = Some(Listing { key, rows: rows.clone(), total });
+        Some((rows, total))
     }
 
-    /// 整个「磁盘」页（标签栏下面的部分）。
-    pub(super) fn render_disk(&mut self, query: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// 整个「磁盘」页（标签栏下面的部分）。第一次看这台机器时直接打开默认分区开始扫。
+    pub(super) fn render_disk(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(machine) = self.machine.clone() else { return empty_message(tr!("连接服务器后显示它的进程、端口和服务")) };
-        match self.disk.at.get(&machine).cloned() {
-            None => self.render_filesystems(&machine, query, cx),
-            Some((mount, path)) => self.render_scan(&machine, mount, path, cx),
+        if !self.disk.at.contains_key(&machine) {
+            match self.disk.filesystems.as_deref().and_then(default_volume) {
+                Some(mount) => self.open_filesystem(mount, cx),
+                None => {
+                    return match &self.error {
+                        Some(error) => empty_message(list_error_message(error)),
+                        None if self.disk.filesystems.is_some() => empty_message(tr!("没有内容")),
+                        None => empty_message(tr!("正在读取…")),
+                    };
+                }
+            }
         }
+        let Some((mount, path)) = self.disk.at.get(&machine).cloned() else { return empty_message(tr!("正在读取…")) };
+        self.render_scan(&machine, mount, path, cx)
     }
 
-    fn render_filesystems(&mut self, machine: &Machine, query: &str, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(error) = &self.error {
-            return empty_message(list_error_message(error));
-        }
-        let Some(filesystems) = self.disk.filesystems.as_deref() else { return empty_message(tr!("正在读取…")) };
-        let shown = filter_filesystems(filesystems, query);
-        if shown.is_empty() {
-            return empty_message(if query.trim().is_empty() { tr!("没有内容") } else { tr!("没有匹配的结果") });
-        }
-        let header = table_header()
-            .child(self.header_cell(tr!("分区"), None, None, Align::Start, cx))
-            .child(self.header_cell(tr!("用量"), None, Some(USAGE_WIDTH), Align::Start, cx))
-            .child(self.header_cell(tr!("已用"), None, Some(SIZE_WIDTH), Align::End, cx))
-            .child(self.header_cell(tr!("总量"), None, Some(SIZE_WIDTH), Align::End, cx))
-            .child(self.header_cell(tr!("可用"), None, Some(SIZE_WIDTH), Align::End, cx))
-            .child(div().w(px(STATE_WIDTH)).flex_shrink_0());
-        let rows: Vec<AnyElement> = shown
-            .into_iter()
-            .enumerate()
-            .map(|(index, fs)| {
-                let ratio = fs.used as f32 / fs.total.max(1) as f32;
-                let color = usage_color(ratio, ui::TEAL);
-                let state = match self.disk.scans.get(&(machine.clone(), fs.mount.clone())) {
-                    Some(Scan::Running { .. }) => div().flex().items_center().gap(px(6.)).child(spinner(13.)).child(tr!("扫描中…")).into_any_element(),
-                    Some(Scan::Done { .. }) => div().text_color(theme::color(ui::PRIMARY)).child(tr!("查看占用")).into_any_element(),
-                    _ => div().child(tr!("扫描占用")).into_any_element(),
-                };
-                let mount = fs.mount.clone();
-                table_row(("disk-fs", index))
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(fs.mount.clone()))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_filesystem(mount.clone(), cx)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            // 挂载点先放全，放不下就截断（不能压到后面几列上）；设备名拿剩下的宽度，先缩没
-                            .child(div().flex_shrink_0().max_w_full().truncate().font_family(MONO).font_weight(FontWeight::SEMIBOLD).child(fs.mount.clone()))
-                            .child(div().min_w_0().truncate().font_family(MONO).text_size(px(11.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(fs.device.clone())),
-                    )
-                    .child(
-                        div()
-                            .w(px(USAGE_WIDTH))
-                            .flex_shrink_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(bar(ratio, color))
-                            .child(
-                                div()
-                                    .w(px(38.))
-                                    .flex()
-                                    .justify_end()
-                                    .font_features(TABULAR.clone())
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::color(readable(color)))
-                                    .child(format!("{:.0}%", ratio * 100.)),
-                            ),
-                    )
-                    .child(size_cell(fs.used))
-                    .child(size_cell(fs.total))
-                    .child(size_cell(fs.available))
-                    .child(div().w(px(STATE_WIDTH)).flex_shrink_0().px_3().flex().justify_end().text_color(theme::color(ui::MUTED_FOREGROUND)).child(state))
-                    .into_any_element()
-            })
-            .collect();
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .pb_2()
-            .child(header)
-            .child(div().id("disk-filesystems").flex_1().min_h_0().overflow_y_scroll().children(rows))
-            .into_any_element()
+    /// 别的分区：一排按钮，带用了多少；正在看的那个蓝色。只有一个分区时不显示。
+    fn volume_switcher(&self, current: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let filesystems = self.disk.filesystems.as_deref().filter(|filesystems| filesystems.len() > 1)?;
+        Some(
+            div()
+                .flex_shrink_0()
+                .px_3()
+                .pb_2()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.))
+                .children(filesystems.iter().enumerate().map(|(index, fs)| {
+                    let active = fs.mount == current;
+                    let ratio = fs.used as f32 / fs.total.max(1) as f32;
+                    let color = usage_color(ratio, ui::TEAL);
+                    let mount = fs.mount.clone();
+                    div()
+                        .id(("disk-volume", index))
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(fs.mount.clone()))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(10.))
+                        .py(px(4.))
+                        .rounded(px(7.))
+                        .text_size(px(12.))
+                        .border_1()
+                        .cursor_pointer()
+                        .map(|d| {
+                            if active {
+                                d.border_color(theme::color(ui::PRIMARY)).bg(theme::alpha(ui::PRIMARY, 0.08)).text_color(theme::color(ui::PRIMARY))
+                            } else {
+                                d.border_color(theme::color(ui::BORDER)).hover(|s| s.bg(theme::alpha(ui::FOREGROUND, 0.05)))
+                            }
+                        })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_filesystem(mount.clone(), cx)))
+                        .child(div().max_w(px(260.)).truncate().font_family(MONO).font_weight(FontWeight::SEMIBOLD).child(fs.mount.clone()))
+                        .child(div().font_features(TABULAR.clone()).text_color(theme::color(readable(color))).child(format!("{:.0}%", ratio * 100.)))
+                }))
+                .into_any_element(),
+        )
     }
 
     fn render_scan(&mut self, machine: &Machine, mount: String, path: String, cx: &mut Context<Self>) -> AnyElement {
@@ -433,7 +475,8 @@ impl SystemPanel {
         let local = *machine == Machine::Local;
         let rescan_mount = mount.clone();
         let full_scan = matches!(shown, Shown::Scanning(..));
-        // 面包屑：所有分区 › 分区 › 目录 › 目录 … 右边是重新扫描
+        let switcher = self.volume_switcher(&mount, cx);
+        // 面包屑：分区 › 目录 › 目录 … 右边是重新扫描
         let crumbs_bar = div()
             .flex_shrink_0()
             .px_3()
@@ -442,24 +485,6 @@ impl SystemPanel {
             .items_center()
             .gap(px(6.))
             .text_size(px(13.))
-            .child(
-                div()
-                    .id("disk-back")
-                    .role(Role::Button)
-                    .aria_label(tr!("所有分区"))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .px(px(8.))
-                    .py(px(3.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .text_color(theme::color(ui::PRIMARY))
-                    .hover(|s| s.bg(theme::alpha(ui::PRIMARY, 0.08)))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.back_to_filesystems(cx)))
-                    .child(kit::icon_sized(Icon::Server, 13.))
-                    .child(tr!("所有分区")),
-            )
             .children(crumbs(&mount, &path).into_iter().enumerate().map(|(index, (name, target))| {
                 let last = target == path;
                 div()
@@ -467,7 +492,7 @@ impl SystemPanel {
                     .items_center()
                     .gap(px(6.))
                     .min_w_0()
-                    .child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))
+                    .when(index > 0, |d| d.child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND))))
                     .child(
                         div()
                             .id(("disk-crumb", index))
@@ -532,13 +557,12 @@ impl SystemPanel {
             Shown::Failed(error) => empty_message(tr!("扫描失败：{}", error.trim())),
             Shown::Done(at, unreadable) => self.render_tree(at, unreadable, local, cx),
         };
-        div().flex_1().min_h_0().flex().flex_col().child(crumbs_bar).child(body).into_any_element()
+        div().flex_1().min_h_0().flex().flex_col().children(switcher).child(crumbs_bar).child(body).into_any_element()
     }
 
     fn render_tree(&mut self, at: Instant, unreadable: usize, local: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some((entries, files, _)) = self.listing(cx) else { return empty_message(tr!("正在读取…")) };
+        let Some((rows, _)) = self.listing(cx) else { return empty_message(tr!("正在读取…")) };
         let query = self.search.read(cx).value().trim().to_string();
-        let rows = entries.len() + usize::from(files > 0);
         let mut note = scanned_ago(at.elapsed().as_secs());
         if unreadable > 0 {
             let reason = if local {
@@ -553,10 +577,10 @@ impl SystemPanel {
             .child(self.header_cell(tr!("占用"), None, Some(USAGE_WIDTH), Align::Start, cx))
             .child(self.header_cell(tr!("大小"), None, Some(SIZE_WIDTH), Align::End, cx))
             .child(self.header_cell(tr!("占比"), None, Some(SHARE_WIDTH), Align::End, cx));
-        let body = if rows == 0 {
+        let body = if rows.is_empty() {
             empty_message(if query.is_empty() { tr!("这个目录是空的") } else { tr!("没有匹配的结果") })
         } else {
-            uniform_list("disk-rows", rows, cx.processor(move |this, range: Range<usize>, _, cx| this.render_tree_rows(range, cx)))
+            uniform_list("disk-rows", rows.len(), cx.processor(move |this, range: Range<usize>, _, cx| this.render_tree_rows(range, cx)))
                 .track_scroll(&self.disk.scroll)
                 .flex_1()
                 .w_full()
@@ -576,60 +600,67 @@ impl SystemPanel {
 
     fn render_tree_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(machine) = self.machine.clone() else { return Vec::new() };
-        let Some((entries, files, total)) = self.listing(cx) else { return Vec::new() };
+        let Some((rows, total)) = self.listing(cx) else { return Vec::new() };
+        let folder = self.disk.at.get(&machine).map(|(_, path)| path.clone()).unwrap_or_default();
         // 条的长度按这一层最大的那项算，看得出谁大；占比按这一层的总量
-        let largest = entries.first().map_or(0, |entry| entry.size).max(files).max(1);
+        let largest = rows.iter().map(Row::size).max().unwrap_or(0).max(1);
         let remote = matches!(machine, Machine::Remote(_));
         range
-            .map(|ix| match entries.get(ix) {
-                Some(entry) => {
-                    let (target, menu_path) = (entry.path.clone(), entry.path.clone());
-                    let has_children = entry.has_children;
-                    table_row(("disk-entry", ix))
-                        .when(has_children, |row| {
-                            row.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(target.clone(), cx)))
-                        })
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                this.open_menu(event.position, MenuTarget::Directory { path: menu_path.clone(), remote }, cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(kit::icon_sized(Icon::Folder, 14.).text_color(theme::color(ui::PRIMARY)))
-                                .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(entry.name.clone()))
-                                .when(has_children, |d| d.child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))),
-                        )
-                        .child(usage_cell(entry.size as f32 / largest as f32, ui::PRIMARY))
-                        .child(size_cell(entry.size))
-                        .child(share_cell(entry.size, total))
-                        .into_any_element()
-                }
-                // 最后一行：直接放在这一层的文件
-                None => table_row(("disk-files", ix))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .text_color(theme::color(ui::MUTED_FOREGROUND))
-                            .child(kit::icon_sized(Icon::FileText, 14.))
-                            .child(tr!("这一层的文件")),
-                    )
-                    .child(usage_cell(files as f32 / largest as f32, ui::MUTED_FOREGROUND))
-                    .child(size_cell(files))
-                    .child(share_cell(files, total))
-                    .into_any_element(),
+            .filter_map(|ix| rows.get(ix).map(|row| (ix, row)))
+            .map(|(ix, row)| {
+                let size = row.size();
+                let line = table_row(("disk-row", ix));
+                let (icon, name, muted) = match row {
+                    Row::Dir(entry) => (Icon::Folder, entry.name.clone(), false),
+                    Row::File { name, .. } => (Icon::FileText, name.clone(), false),
+                    Row::MoreFiles { count, .. } => (Icon::FileText, tr!("其余 {} 个文件", group_digits(*count as u64)), true),
+                    Row::Files(_) => (Icon::FileText, tr!("这一层的文件").to_string(), true),
+                };
+                // 每个目录都能点进去：没有子目录也有文件要看（大日志常在最底下一层）
+                let has_children = matches!(row, Row::Dir(_));
+                let menu = match row {
+                    Row::Dir(entry) => Some((entry.path.clone(), entry.path.clone())),
+                    Row::File { path, .. } => Some((path.clone(), folder.clone())),
+                    _ => None,
+                };
+                let line = match row {
+                    Row::Dir(entry) => {
+                        let target = entry.path.clone();
+                        line.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(target.clone(), cx)))
+                    }
+                    _ => line,
+                };
+                let line = match menu {
+                    Some((path, open)) => line.on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.open_menu(event.position, MenuTarget::Directory { path: path.clone(), folder: open.clone(), remote }, cx);
+                        }),
+                    ),
+                    None => line,
+                };
+                let color = match row {
+                    Row::Dir(_) => ui::PRIMARY,
+                    Row::File { .. } => ui::VIOLET,
+                    _ => ui::MUTED_FOREGROUND,
+                };
+                line.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .when(muted, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
+                        .child(kit::icon_sized(icon, 14.).text_color(theme::color(if muted { ui::MUTED_FOREGROUND } else { color })))
+                        .child(div().min_w_0().truncate().when(!muted, |d| d.font_weight(FontWeight::MEDIUM)).child(name))
+                        .when(has_children, |d| d.child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))),
+                )
+                .child(usage_cell(size as f32 / largest as f32, color))
+                .child(size_cell(size))
+                .child(share_cell(size, total))
+                .into_any_element()
             })
             .collect()
     }
@@ -672,6 +703,65 @@ fn usage_cell(ratio: f32, color: ui::Token) -> Div {
 mod tests {
     use super::*;
 
+    fn dir(name: &str, size: u64) -> DiskEntry {
+        DiskEntry { name: name.into(), path: format!("/var/{name}"), size, has_children: true }
+    }
+
+    fn names(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Dir(entry) => format!("{}/", entry.name),
+                Row::File { name, .. } => name.clone(),
+                Row::MoreFiles { count, size } => format!("+{count}={size}"),
+                Row::Files(size) => format!("files={size}"),
+            })
+            .collect()
+    }
+
+    /// 子目录和文件放在一起从大到小：一个 8G 的日志排在小目录前面，一眼看得到。
+    #[test]
+    fn folders_and_files_are_ranked_together() {
+        let files = [("huge.log".to_string(), 8000), ("small.txt".to_string(), 5)];
+        let rows = rows(vec![dir("lib", 9000), dir("cache", 100)], Some(&files), 8005, "/var", "");
+        assert_eq!(names(&rows), ["lib/", "huge.log", "cache/", "small.txt"]);
+        assert_eq!(rows[1], Row::File { name: "huge.log".into(), path: "/var/huge.log".into(), size: 8000 });
+        // 根目录下的文件路径
+        let rows = super::rows(Vec::new(), Some(&files), 0, "/", "");
+        assert_eq!(rows[0], Row::File { name: "huge.log".into(), path: "/huge.log".into(), size: 8000 });
+    }
+
+    #[test]
+    fn many_small_files_are_folded_into_one_line() {
+        let files: Vec<(String, u64)> = (0..250).map(|i| (format!("f{i:03}"), 1000 - i)).collect();
+        let rows = rows(Vec::new(), Some(&files), 0, "/tmp", "");
+        assert_eq!(rows.len(), FILES_SHOWN + 1);
+        let rest: u64 = (200..250).map(|i| 1000 - i).sum();
+        assert_eq!(rows.last(), Some(&Row::MoreFiles { count: 50, size: rest }), "最大的 200 个之外的合成一行，放在最后");
+    }
+
+    #[test]
+    fn before_files_are_listed_their_total_stands_in() {
+        let rows = rows(vec![dir("lib", 10)], None, 500, "/var", "");
+        assert_eq!(names(&rows), ["lib/", "files=500"]);
+        assert_eq!(names(&super::rows(vec![dir("lib", 10)], None, 0, "/var", "")), ["lib/"], "没有文件就不要这一行");
+    }
+
+    #[test]
+    fn search_filters_folders_and_files_by_name() {
+        let files = [("Docker.log".to_string(), 50), ("other".to_string(), 7)];
+        let rows = rows(vec![dir("docker", 10), dir("log", 99)], Some(&files), 57, "/var", "dock");
+        assert_eq!(names(&rows), ["Docker.log", "docker/"]);
+        assert_eq!(names(&super::rows(vec![dir("lib", 1)], None, 500, "/var", "x")), Vec::<String>::new(), "搜索时不显示文件总和");
+    }
+
+    #[test]
+    fn the_root_volume_is_opened_first() {
+        let fs = |mount: &str, used: u64| Filesystem { device: "/dev/x".into(), mount: mount.into(), total: 100, used, available: 100 - used };
+        assert_eq!(default_volume(&[fs("/boot", 50), fs("/", 10)]).as_deref(), Some("/"));
+        assert_eq!(default_volume(&[fs("/Volumes/USB", 5), fs("/System/Volumes/Data", 60)]).as_deref(), Some("/System/Volumes/Data"), "没有 / 用用得最多的");
+        assert_eq!(default_volume(&[]), None);
+    }
+
     #[test]
     fn crumbs_walk_from_the_mount_point_down() {
         let names = |root: &str, path: &str| crumbs(root, path).into_iter().map(|(name, path)| format!("{name}={path}")).collect::<Vec<_>>();
@@ -703,14 +793,6 @@ mod tests {
         assert_eq!(group_digits(1000), "1,000");
         assert_eq!(group_digits(644498), "644,498");
         assert_eq!(group_digits(4544185), "4,544,185");
-    }
-
-    #[test]
-    fn entries_are_searched_by_name() {
-        let entry = |name: &str| DiskEntry { name: name.into(), path: format!("/{name}"), size: 1, has_children: false };
-        let found = filter_entries(vec![entry("Docker"), entry("log"), entry("lib")], "dock");
-        assert_eq!(found.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["Docker"]);
-        assert_eq!(filter_entries(vec![entry("a"), entry("b")], "  ").len(), 2);
     }
 
     /// 在深处点了「重新扫描」：新树只有前 4 层，退到树上最深的祖先，不退出分区。

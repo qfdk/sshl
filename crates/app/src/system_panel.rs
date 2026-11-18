@@ -109,7 +109,8 @@ enum MenuTarget {
     Process { pid: u32, name: String, command: Option<String> },
     Service(ServiceInfo),
     /// 磁盘页里的一个目录：远程的能在文件管理里打开，本机的在访达里显示。
-    Directory { path: String, remote: bool },
+    /// `folder` 是在文件管理里要打开的目录（文件就是它所在的目录）。
+    Directory { path: String, folder: String, remote: bool },
 }
 
 struct MenuState {
@@ -1291,7 +1292,7 @@ impl Render for SystemPanel {
         let process_count = self.processes.as_deref().map(|p| filter_processes(p, &query, self.sort).len());
         let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query, self.port_sort).len());
         let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query, self.service_sort).len());
-        let disk_count = self.disk_count(&query);
+        let disk_count = self.disk_count();
         let (count, loaded) = match self.view {
             View::Processes => (process_count.unwrap_or(0), self.processes.is_some()),
             View::Ports => (port_count.unwrap_or(0), self.ports.is_some()),
@@ -1488,17 +1489,17 @@ impl Render for SystemPanel {
                         MenuEntry::Item(MenuItem::new(tr!("复制名称"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(unit.clone())))),
                     ]
                 }
-                MenuTarget::Directory { path, remote } => {
-                    let (open_weak, open_path, copied) = (weak.clone(), path.clone(), path.clone());
+                MenuTarget::Directory { path, folder, remote } => {
+                    let (open_weak, open_folder, reveal, copied) = (weak.clone(), folder.clone(), path.clone(), path.clone());
                     let open = if *remote {
                         MenuItem::new(tr!("在文件管理中打开"), move |_, cx| {
                             let _ = open_weak.update(cx, |this, cx| {
                                 this.menu = None;
-                                cx.emit(SystemPanelEvent::OpenInFiles(open_path.clone()));
+                                cx.emit(SystemPanelEvent::OpenInFiles(open_folder.clone()));
                             });
                         })
                     } else {
-                        MenuItem::new(tr!("在访达中显示"), move |_, cx| disk::reveal_in_finder(&open_path, cx))
+                        MenuItem::new(tr!("在访达中显示"), move |_, cx| disk::reveal_in_finder(&reveal, cx))
                     };
                     let mut entries = vec![MenuEntry::Item(open.icon(Icon::FolderOpen))];
                     entries.push(MenuEntry::Item(MenuItem::new(tr!("复制路径"), move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))).icon(Icon::Copy)));
@@ -1546,7 +1547,7 @@ impl Render for SystemPanel {
                     .bg(theme::color(ui::CARD))
                     .child(toolbar)
                     .child(if view == View::Disk {
-                        self.render_disk(&query, cx)
+                        self.render_disk(cx)
                     } else {
                         div().flex_1().min_h_0().flex().flex_col().pb_2().child(header).child(body).into_any_element()
                     }),
