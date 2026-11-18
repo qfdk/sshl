@@ -1,10 +1,15 @@
 //! 本机的磁盘扫描：多线程并行走目录（同 gdu / dua 的做法），比单线程的 du 快几倍。远程服务器上跑不了我们的代码，还是 du。
 //! 结果和 `du -xk -d <depth>` 一模一样：占用按实际占的块算（st_blocks），不跨分区，不跟随符号链接，硬链接只算一次，
 //! 只列到第 depth 层（更深的算进第 depth 层那个目录）。
+//!
+//! macOS 上列目录用 `getattrlistbulk`（同 Mole 的 Mac 版）：一次系统调用拿回一批目录项的名字、类型、设备、inode、链接数和占用，
+//! 不用每个文件再单独 lstat 一次（`read_dir` + `metadata` 是两次系统调用 / 项）。别的系统用 `read_dir`。
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -77,8 +82,14 @@ impl Queue {
     }
 }
 
+type Lister = fn(&Path, &ScanProgress) -> io::Result<Vec<Item>>;
+
 /// 并行扫 `root`（阻塞，放在后台线程里调）。中途叫停（[`ScanProgress::stop`]）返回 `Cancelled`。
 pub fn scan_parallel(root: &str, depth: usize, progress: &ScanProgress) -> AppResult<DiskTree> {
+    scan_with(root, depth, progress, list)
+}
+
+fn scan_with(root: &str, depth: usize, progress: &ScanProgress, list: Lister) -> AppResult<DiskTree> {
     let root = normalize(root);
     let meta = std::fs::symlink_metadata(&root)?;
     let device = meta.dev();
@@ -88,7 +99,7 @@ pub fn scan_parallel(root: &str, depth: usize, progress: &ScanProgress) -> AppRe
     let queue = Queue { state: Mutex::new((vec![start], 0)), ready: Condvar::new() };
     let hardlinks = Mutex::new(HashSet::new());
     let unreadable = AtomicU64::new(0);
-    let shared = Shared { queue: &queue, device, depth, hardlinks: &hardlinks, unreadable: &unreadable, progress };
+    let shared = Shared { queue: &queue, list, device, depth, hardlinks: &hardlinks, unreadable: &unreadable, progress };
     let parts: Vec<HashMap<Arc<str>, u64>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads).map(|_| scope.spawn(|| work(&shared))).collect();
         workers.into_iter().map(|worker| worker.join().unwrap_or_default()).collect()
@@ -108,6 +119,8 @@ pub fn scan_parallel(root: &str, depth: usize, progress: &ScanProgress) -> AppRe
 
 struct Shared<'a> {
     queue: &'a Queue,
+    /// 怎么列一个目录（测试里两种列法都跑一遍比结果）。
+    list: Lister,
     device: u64,
     depth: usize,
     hardlinks: &'a Mutex<HashSet<(u64, u64)>>,
@@ -125,6 +138,163 @@ fn yield_to_interactive_work() {
     }
 }
 
+/// 目录里的一项：扫描只要这些。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Item {
+    name: OsString,
+    dir: bool,
+    /// 实际占的字节（块数 × 512）。
+    bytes: u64,
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+}
+
+/// 列一个目录（不跟随符号链接：链接本身算一项）。中途叫停了就少列一些（调用的人照样会收手）。
+#[cfg(target_os = "macos")]
+fn list(dir: &Path, progress: &ScanProgress) -> io::Result<Vec<Item>> {
+    bulk::list(dir, progress)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn list(dir: &Path, progress: &ScanProgress) -> io::Result<Vec<Item>> {
+    list_each(dir, progress)
+}
+
+/// `read_dir` + 每项一个 lstat。
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn list_each(dir: &Path, progress: &ScanProgress) -> io::Result<Vec<Item>> {
+    let mut items = Vec::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        // 一个目录里几百万个文件也不用等它列完才停
+        if progress.stopped() {
+            break;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        // 目录的链接数用不到（只有文件的硬链接要查重），同批量列法记成 1
+        let nlink = if meta.is_dir() { 1 } else { meta.nlink() };
+        items.push(Item { name: entry.file_name(), dir: meta.is_dir(), bytes: meta.blocks() * 512, dev: meta.dev(), ino: meta.ino(), nlink });
+    }
+    Ok(items)
+}
+
+/// macOS：`getattrlistbulk` 一次拿回一批目录项和要的属性（格式见 getattrlist(2)）。
+#[cfg(target_os = "macos")]
+mod bulk {
+    use std::ffi::{CString, OsString};
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
+
+    use super::{Item, ScanProgress};
+
+    /// vnode 类型里的目录（sys/vnode.h 的 VDIR）。
+    const VDIR: u32 = 2;
+    /// 一次取多少字节的目录项：一项一百字节上下，一次一千多项。
+    const BUFFER: usize = 128 * 1024;
+
+    pub(super) fn list(dir: &Path, progress: &ScanProgress) -> io::Result<Vec<Item>> {
+        let path = CString::new(dir.as_os_str().as_bytes())?;
+        // SAFETY: path 是以 NUL 结尾的路径；只读打开目录
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: 刚打开的、只归这里的描述符
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut request = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: libc::ATTR_CMN_RETURNED_ATTRS | libc::ATTR_CMN_NAME | libc::ATTR_CMN_DEVID | libc::ATTR_CMN_OBJTYPE | libc::ATTR_CMN_FILEID,
+            volattr: 0,
+            dirattr: libc::ATTR_DIR_ALLOCSIZE,
+            fileattr: libc::ATTR_FILE_LINKCOUNT | libc::ATTR_FILE_ALLOCSIZE,
+            forkattr: 0,
+        };
+        let mut buffer = vec![0u8; BUFFER];
+        let mut items = Vec::new();
+        while !progress.stopped() {
+            // SAFETY: request、buffer 都活着且大小如实给出；内核往 buffer 里最多写 BUFFER 字节
+            let count = unsafe {
+                libc::getattrlistbulk(fd.as_raw_fd(), (&raw mut request).cast(), buffer.as_mut_ptr().cast(), buffer.len(), 0)
+            };
+            if count < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if count == 0 {
+                break;
+            }
+            let mut at = 0;
+            for _ in 0..count {
+                let Some(length) = read_u32(&buffer, at).map(|length| length as usize).filter(|length| *length > 0) else { break };
+                if let Some(item) = parse(buffer.get(at..at + length).unwrap_or_default()) {
+                    items.push(item);
+                }
+                at += length;
+            }
+        }
+        Ok(items)
+    }
+
+    /// 一项：长度、实际返回了哪些属性（attribute_set_t），再按位从小到大排着各个属性；每个属性 4 字节对齐（8 字节的也只按 4 对齐）。
+    fn parse(entry: &[u8]) -> Option<Item> {
+        let returned = |group: usize| read_u32(entry, 4 + group * 4).unwrap_or(0);
+        let (common, dirs, files) = (returned(0), returned(2), returned(3));
+        let mut at = 4 + 20;
+        let mut name = None;
+        if common & libc::ATTR_CMN_NAME != 0 {
+            // attrreference_t：数据相对这个结构自己的偏移、长度（含结尾的 NUL）
+            let offset = i32::from_ne_bytes(entry.get(at..at + 4)?.try_into().ok()?);
+            let length = read_u32(entry, at + 4)? as usize;
+            let start = usize::try_from(at as i64 + i64::from(offset)).ok()?;
+            let bytes = entry.get(start..start + length.saturating_sub(1))?;
+            name = Some(OsString::from_vec(bytes.to_vec()));
+            at += 8;
+        }
+        let mut dev = 0;
+        if common & libc::ATTR_CMN_DEVID != 0 {
+            // dev_t 是 i32：同 std 的 MetadataExt::dev（有符号扩展）
+            dev = i32::from_ne_bytes(entry.get(at..at + 4)?.try_into().ok()?) as u64;
+            at += 4;
+        }
+        let mut kind = 0;
+        if common & libc::ATTR_CMN_OBJTYPE != 0 {
+            kind = read_u32(entry, at)?;
+            at += 4;
+        }
+        let mut ino = 0;
+        if common & libc::ATTR_CMN_FILEID != 0 {
+            ino = read_u64(entry, at)?;
+            at += 8;
+        }
+        let dir = kind == VDIR;
+        let (mut nlink, mut bytes) = (1, 0);
+        if dir {
+            if dirs & libc::ATTR_DIR_ALLOCSIZE != 0 {
+                bytes = read_u64(entry, at)?;
+            }
+        } else {
+            if files & libc::ATTR_FILE_LINKCOUNT != 0 {
+                nlink = u64::from(read_u32(entry, at)?);
+                at += 4;
+            }
+            if files & libc::ATTR_FILE_ALLOCSIZE != 0 {
+                bytes = read_u64(entry, at)?;
+            }
+        }
+        Some(Item { name: name?, dir, bytes, dev, ino, nlink })
+    }
+
+    fn read_u32(buffer: &[u8], at: usize) -> Option<u32> {
+        Some(u32::from_ne_bytes(buffer.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    fn read_u64(buffer: &[u8], at: usize) -> Option<u64> {
+        Some(u64::from_ne_bytes(buffer.get(at..at + 8)?.try_into().ok()?))
+    }
+}
+
 /// 一个线程：拿目录、列出来、文件的块数记账、子目录放回队列。账先记在自己这份表里，最后再合（不抢锁）。
 fn work(shared: &Shared) -> HashMap<Arc<str>, u64> {
     yield_to_interactive_work();
@@ -132,36 +302,29 @@ fn work(shared: &Shared) -> HashMap<Arc<str>, u64> {
     while let Some(task) = shared.queue.pop(shared.progress) {
         let (mut here, mut files) = (0u64, 0u64);
         let mut found = Vec::new();
-        match std::fs::read_dir(&task.path) {
+        match (shared.list)(&task.path, shared.progress) {
             Err(_) => {
                 shared.unreadable.fetch_add(1, Ordering::Relaxed);
             }
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    // 一个目录里几百万个文件也不用等它列完才停
-                    if shared.progress.stopped() {
-                        break;
-                    }
-                    // 不跟随符号链接（同 du）
-                    let Ok(meta) = entry.metadata() else { continue };
+            Ok(items) => {
+                for item in items {
                     // 别的分区挂在这里（du -x）：整个不算
-                    if meta.dev() != shared.device {
+                    if item.dev != shared.device {
                         continue;
                     }
-                    let size = meta.blocks() * 512;
-                    if meta.is_dir() {
+                    if item.dir {
                         let level = task.level + 1;
-                        let path = entry.path();
+                        let path = task.path.join(&item.name);
                         let node: Arc<str> = if level <= shared.depth { Arc::from(path.to_string_lossy().as_ref()) } else { task.node.clone() };
                         // 目录本身占的块记在它名下（也让空目录、读不了的目录出现在树上）
-                        *sizes.entry(node.clone()).or_default() += size;
+                        *sizes.entry(node.clone()).or_default() += item.bytes;
                         found.push(Task { path, level, node });
                     } else {
                         // 硬链接只算一次：只有链接数大于 1 的才去查（少见，锁不常拿）
-                        if meta.nlink() > 1 && !shared.hardlinks.lock().unwrap_or_else(|e| e.into_inner()).insert((meta.dev(), meta.ino())) {
+                        if item.nlink > 1 && !shared.hardlinks.lock().unwrap_or_else(|e| e.into_inner()).insert((item.dev, item.ino)) {
                             continue;
                         }
-                        here += size;
+                        here += item.bytes;
                         files += 1;
                     }
                 }
@@ -231,6 +394,41 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// 两种列法（macOS 的批量、通用的逐个 lstat）列出来的一模一样：普通文件、空文件、子目录、符号链接、硬链接、中文名，
+    /// 加上 3000 个文件（批量的一次取不完，要取好几次）。
+    #[test]
+    fn both_ways_of_listing_agree() {
+        let root = temp_dir("list");
+        write(&root.join("data.bin"), 123_456);
+        write(&root.join("空的"), 0);
+        write(&root.join("中文 名字.txt"), 5_000);
+        std::fs::create_dir_all(root.join("sub/deeper")).unwrap();
+        std::fs::hard_link(root.join("data.bin"), root.join("same.bin")).unwrap();
+        std::os::unix::fs::symlink(root.join("data.bin"), root.join("link")).unwrap();
+        std::os::unix::fs::symlink("/nowhere", root.join("dangling")).unwrap();
+        for i in 0..3000 {
+            write(&root.join(format!("many-{i:04}-with-a-longer-name-to-fill-the-buffer.txt")), 10 + i % 7000);
+        }
+        let progress = ScanProgress::default();
+        let sorted = |mut items: Vec<Item>| {
+            items.sort_by(|a, b| a.name.cmp(&b.name));
+            items
+        };
+        let each = sorted(list_each(&root, &progress).unwrap());
+        let listed = sorted(list(&root, &progress).unwrap());
+        assert_eq!(each.len(), 3007);
+        assert_eq!(listed.len(), each.len());
+        for (a, b) in listed.iter().zip(&each) {
+            assert_eq!(a, b);
+        }
+        let data = each.iter().find(|item| item.name == "data.bin").unwrap();
+        assert!(data.nlink == 2 && data.bytes >= 123_456 && !data.dir);
+        assert!(each.iter().find(|item| item.name == "sub").unwrap().dir);
+        assert!(!each.iter().find(|item| item.name == "link").unwrap().dir, "符号链接不跟过去");
+        assert!(list(&root.join("nope"), &progress).is_err(), "读不了的报错（算进读不了的目录里）");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn unreadable_folders_are_counted_and_the_rest_still_scanned() {
         let root = temp_dir("scan-locked");
@@ -276,21 +474,25 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 实测速度：`SSHL_SCAN_BENCH=/System/Volumes/Data cargo test --release -p sshl-core bench_parallel_scan -- --ignored --nocapture`
+    /// 实测速度：两种列法交替各扫两遍（第一遍可能吃冷缓存）。
+    /// `SSHL_SCAN_BENCH=$HOME/Library cargo test --release -p sshl-core bench_parallel_scan -- --ignored --nocapture`
     #[test]
     #[ignore = "要 SSHL_SCAN_BENCH 指向一个大目录"]
     fn bench_parallel_scan() {
         let Ok(path) = std::env::var("SSHL_SCAN_BENCH") else { return };
-        let started = std::time::Instant::now();
-        let progress = ScanProgress::default();
-        let tree = scan_parallel(&path, 4, &progress).unwrap();
-        println!(
-            "parallel: {:.1}s, {} files, {} GB, {} unreadable, root {} GB",
-            started.elapsed().as_secs_f64(),
-            progress.files.load(Ordering::Relaxed),
-            progress.bytes.load(Ordering::Relaxed) / 1_000_000_000,
-            tree.unreadable,
-            tree.size(&path).unwrap_or(0) / 1_000_000_000
-        );
+        for round in 1..=2 {
+            for (name, lister) in [("read_dir + lstat", list_each as Lister), ("getattrlistbulk", list as Lister)] {
+                let started = std::time::Instant::now();
+                let progress = ScanProgress::default();
+                let tree = scan_with(&path, 4, &progress, lister).unwrap();
+                println!(
+                    "round {round} {name}: {:.2}s, {} files, {} MB, {} unreadable",
+                    started.elapsed().as_secs_f64(),
+                    progress.files.load(Ordering::Relaxed),
+                    tree.size(&path).unwrap_or(0) / 1_000_000,
+                    tree.unreadable,
+                );
+            }
+        }
     }
 }
