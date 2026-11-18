@@ -1,5 +1,6 @@
 //! 「系统」页的「磁盘」：看磁盘空间被什么占了（磁盘快满时找是哪个文件夹、哪个文件）。点开先看默认分区（/，没有就用得最多的那个），
 //! 像 ncdu 一样按大小一层层往下点；每一层子目录和文件放在一起排，大文件一眼看得到。别的分区在顶上切换。
+//! 宽的时候列表右边是矩形树图（同 Mole，见 `treemap`），面积就是占用。
 //!
 //! 扫描要用户点（「开始扫描」）：读遍一个大分区很重，不能一打开页面就压到服务器上。离开这一页（换标签、换页面、换会话、换分区）
 //! 就停下（远程杀掉 du，本机的扫描线程收手），回来时显示「已停止」，等用户再点，不会自己重新开始；失败了也不自己重试。
@@ -16,9 +17,10 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use gpui::{Animation, AnimationExt, Transformation, percentage, svg};
+use gpui::{Animation, AnimationExt, Transformation, container_query, percentage, svg};
 use sshl_core::disk_usage::{self, DiskEntry, DiskTree, Filesystem, ScanProgress};
 
+use super::treemap::{self, Item};
 use super::*;
 
 const USAGE_WIDTH: f32 = 220.;
@@ -26,6 +28,19 @@ const SIZE_WIDTH: f32 = 96.;
 const SHARE_WIDTH: f32 = 72.;
 /// 每一层最多列这么多个文件（最大的那些），其余的合成一行。
 pub const FILES_SHOWN: usize = 200;
+/// 宽过这么多才在列表右边画矩形树图（同 Mole）；窄了只有列表，带用量条。
+const SPLIT_MIN_WIDTH: f32 = 760.;
+/// 和矩形树图并排时列表占总宽的这么多，夹在下面两个数之间。
+const LIST_SHARE: f32 = 0.4;
+const LIST_MIN_WIDTH: f32 = 340.;
+const LIST_MAX_WIDTH: f32 = 460.;
+/// 矩形树图和列表、卡片边的距离；块之间的缝。
+const MAP_INSET: f32 = 12.;
+const TILE_GAP: f32 = 3.;
+/// 色块的不透明度：(最小的块, 最大的块)，[浅色, 深色]。大的颜色深一点，越大越显眼。
+const TILE_TINT: [(f32, f32); 2] = [(0.10, 0.32), (0.14, 0.40)];
+/// 合起来的那些（「其余 N 项」、还没列出来的文件）是灰的。
+const REST_TINT: [f32; 2] = [0.05, 0.08];
 
 /// 一个分区的扫描。
 pub(super) enum Scan {
@@ -72,6 +87,22 @@ impl Row {
             Row::File { size, .. } | Row::MoreFiles { size, .. } | Row::Files(size) => *size,
         }
     }
+
+    /// 代表几项（矩形树图把小的合成「其余 N 项」时数）。
+    fn count(&self) -> usize {
+        match self {
+            Row::MoreFiles { count, .. } => *count,
+            _ => 1,
+        }
+    }
+}
+
+/// 鼠标停在哪：列表的一行和矩形树图里它那一块一起亮。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hover {
+    Row(usize),
+    /// 「其余 N 项」那一块。
+    Rest,
 }
 
 /// 当前这一层要画的东西：(机器, 目录, 搜索词, 版本) 变了才重算。
@@ -95,6 +126,7 @@ pub(super) struct DiskState {
     version: u64,
     listing: Option<Listing>,
     scroll: UniformListScrollHandle,
+    hovered: Option<Hover>,
 }
 
 impl DiskState {
@@ -292,6 +324,7 @@ impl SystemPanel {
         self.stop_scans(cx);
         self.disk.at.insert(machine, (mount.clone(), mount));
         self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.disk.hovered = None;
         cx.notify();
     }
 
@@ -412,6 +445,7 @@ impl SystemPanel {
         at.1 = path.clone();
         let key = (machine, at.0.clone());
         self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.disk.hovered = None;
         let needs_scan = match self.disk.scans.get_mut(&key) {
             Some(Scan::Done { tree, deeper, .. }) => {
                 if let Some((_, _, progress)) = deeper.take_if(|(scanning, ..)| *scanning != path) {
@@ -449,6 +483,8 @@ impl SystemPanel {
         let rows = Arc::new(rows(tree.entries(&path), files.as_deref().map(Vec::as_slice), tree.files_size(&path), &path, &query));
         let total = tree.size(&path).unwrap_or(0);
         self.disk.listing = Some(Listing { key, rows: rows.clone(), total });
+        // 行变了，记着的第几行不再是鼠标下那一行
+        self.disk.hovered = None;
         Some((rows, total))
     }
 
@@ -663,8 +699,9 @@ impl SystemPanel {
     }
 
     fn render_tree(&mut self, at: Instant, unreadable: usize, local: bool, cx: &mut Context<Self>) -> AnyElement {
-        let Some((rows, _)) = self.listing(cx) else { return empty_message(tr!("正在读取…")) };
-        let query = self.search.read(cx).value().trim().to_string();
+        if self.listing(cx).is_none() {
+            return empty_message(tr!("正在读取…"));
+        }
         let mut note = scanned_ago(at.elapsed().as_secs());
         if unreadable > 0 {
             let reason = if local {
@@ -674,44 +711,201 @@ impl SystemPanel {
             };
             note = format!("{note} · {reason}");
         }
-        let header = table_header()
-            .child(self.header_cell(tr!("名称"), None, None, Align::Start, cx))
-            .child(self.header_cell(tr!("占用"), None, Some(USAGE_WIDTH), Align::Start, cx))
-            .child(self.header_cell(tr!("大小"), None, Some(SIZE_WIDTH), Align::End, cx))
-            .child(self.header_cell(tr!("占比"), None, Some(SHARE_WIDTH), Align::End, cx));
-        let body = if rows.is_empty() {
-            empty_message(if query.is_empty() { tr!("这个目录是空的") } else { tr!("没有匹配的结果") })
-        } else {
-            uniform_list("disk-rows", rows.len(), cx.processor(move |this, range: Range<usize>, _, cx| this.render_tree_rows(range, cx)))
-                .track_scroll(&self.disk.scroll)
-                .flex_1()
-                .w_full()
-                .into_any_element()
-        };
+        // 下面的内容要看有多宽（够宽才在右边画矩形树图），布局排好之后才知道：交给 container_query
+        let panel = cx.entity();
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .pb_2()
             .child(div().flex_shrink_0().px_4().pb_2().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(note))
-            .child(header)
-            .child(body)
+            .child(div().flex_1().min_h_0().relative().child(
+                container_query(move |size, _, cx| panel.update(cx, |this, cx| this.render_listing(size, cx))).absolute().top_0().left_0(),
+            ))
             .into_any_element()
     }
 
-    fn render_tree_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// 列表（宽时右边再加矩形树图）。`size` 是这块地方实际有多大。
+    fn render_listing(&mut self, size: gpui::Size<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let Some((rows, _)) = self.listing(cx) else { return empty_message(tr!("正在读取…")) };
+        let (width, height) = (f32::from(size.width), f32::from(size.height));
+        let split = width >= SPLIT_MIN_WIDTH && !rows.is_empty();
+        let header = table_header()
+            .child(self.header_cell(tr!("名称"), None, None, Align::Start, cx))
+            // 矩形树图已经画出了谁大谁小，列表里不再要用量条
+            .when(!split, |d| d.child(self.header_cell(tr!("占用"), None, Some(USAGE_WIDTH), Align::Start, cx)))
+            .child(self.header_cell(tr!("大小"), None, Some(SIZE_WIDTH), Align::End, cx))
+            .child(self.header_cell(tr!("占比"), None, Some(SHARE_WIDTH), Align::End, cx));
+        let body = if rows.is_empty() {
+            let query = self.search.read(cx).value().trim().to_string();
+            empty_message(if query.is_empty() { tr!("这个目录是空的") } else { tr!("没有匹配的结果") })
+        } else {
+            uniform_list("disk-rows", rows.len(), cx.processor(move |this, range: Range<usize>, _, cx| this.render_tree_rows(range, !split, cx)))
+                .track_scroll(&self.disk.scroll)
+                .flex_1()
+                .w_full()
+                .into_any_element()
+        };
+        let list_width = if split { (width * LIST_SHARE).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH) } else { width };
+        let list = div().w(px(list_width)).h_full().flex_shrink_0().flex().flex_col().pb_2().child(header).child(body);
+        if !split {
+            return list.into_any_element();
+        }
+        let map = treemap::Rect { x: 0., y: 0., w: width - list_width - 2. * MAP_INSET, h: height - MAP_INSET };
+        div()
+            .size_full()
+            .flex()
+            .child(list)
+            .child(div().pl(px(MAP_INSET)).child(self.render_treemap(&rows, map, cx)))
+            .into_any_element()
+    }
+
+    /// 矩形树图：这一层每一项一块，面积就是占用（排法见 `treemap`）。目录蓝、文件紫、合起来的灰；块越大颜色越深。
+    /// 点目录那块进去，右键同列表；鼠标停着时列表里那一行跟着亮。放不下字的小块悬停看名字和大小。
+    fn render_treemap(&mut self, rows: &[Row], bounds: treemap::Rect, cx: &mut Context<Self>) -> Div {
+        let Some(machine) = self.machine.clone() else { return div() };
+        let folder = self.disk.at.get(&machine).map(|(_, path)| path.clone()).unwrap_or_default();
+        let remote = matches!(machine, Machine::Remote(_));
+        let total: u64 = rows.iter().map(Row::size).sum();
+        let items = treemap::items(&rows.iter().map(|row| (row.size(), row.count())).collect::<Vec<_>>());
+        let sizes: Vec<u64> = items.iter().map(|(_, size)| *size).collect();
+        let rects = treemap::squarify(&sizes, bounds);
+        let largest = sizes.first().copied().unwrap_or(0).max(1);
+        // 鼠标停在列表里被合进「其余」的一行时，「其余」那块亮
+        let hovered_rest = match self.disk.hovered {
+            Some(Hover::Rest) => true,
+            Some(Hover::Row(ix)) => rows.get(ix).is_some_and(|row| row.size() > 0) && !items.iter().any(|(item, _)| *item == Item::Row(ix)),
+            None => false,
+        };
+        let dark = usize::from(theme::is_dark());
+        let (tint_low, tint_high) = TILE_TINT[dark];
+        // 比缝还窄的块看不见也点不中：不画（画出来的话内边距、边框会把它撑出边界）
+        let visible = |rect: &treemap::Rect| rect.w - TILE_GAP >= 2. && rect.h - TILE_GAP >= 2.;
+        let tiles = items.into_iter().zip(rects).enumerate().filter(|(_, (_, rect))| visible(rect)).map(|(n, ((item, size), rect))| {
+            let row = match item {
+                Item::Row(ix) => rows.get(ix),
+                Item::Rest { .. } => None,
+            };
+            let (icon, name, color) = match (item, row) {
+                (_, Some(Row::Dir(entry))) => (Some(Icon::Folder), entry.name.clone(), Some(ui::PRIMARY)),
+                (_, Some(Row::File { name, .. })) => (Some(Icon::FileText), name.clone(), Some(ui::VIOLET)),
+                (_, Some(Row::MoreFiles { count, .. })) => (None, tr!("其余 {} 个文件", group_digits(*count as u64)), None),
+                (_, Some(Row::Files(_))) => (None, tr!("这一层的文件").to_string(), None),
+                (Item::Rest { count }, None) => (None, tr!("其余 {} 项", group_digits(count as u64)), None),
+                (Item::Row(_), None) => (None, String::new(), None),
+            };
+            let lit = match item {
+                Item::Row(ix) => self.disk.hovered == Some(Hover::Row(ix)),
+                Item::Rest { .. } => hovered_rest,
+            };
+            let background = match color {
+                Some(color) => theme::alpha(color, tint_low + (tint_high - tint_low) * (size as f32 / largest as f32).sqrt() + if lit { 0.08 } else { 0. }),
+                None => theme::alpha(ui::FOREGROUND, REST_TINT[dark] + if lit { 0.05 } else { 0. }),
+            };
+            let (w, h) = (rect.w - TILE_GAP, rect.h - TILE_GAP);
+            let tip: SharedString = format!("{name} · {} · {}", format_bytes(size), share(size, total)).into();
+            let hover = match item {
+                Item::Row(ix) => Hover::Row(ix),
+                Item::Rest { .. } => Hover::Rest,
+            };
+            let tile = div()
+                .id(("disk-tile", n))
+                .absolute()
+                .left(px(rect.x + TILE_GAP / 2.))
+                .top(px(rect.y + TILE_GAP / 2.))
+                .w(px(w.max(0.)))
+                .h(px(h.max(0.)))
+                .rounded(px(7_f32.min(w / 3.).min(h / 3.).max(0.)))
+                .bg(background)
+                .border_1()
+                .border_color(if lit { theme::color(color.unwrap_or(ui::MUTED_FOREGROUND)) } else { gpui::transparent_black() })
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(2.))
+                .when(w >= 48., |d| d.px(px(6.)))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.disk.hovered = Some(hover);
+                    } else if this.disk.hovered == Some(hover) {
+                        this.disk.hovered = None;
+                    }
+                    cx.notify();
+                }))
+                .tooltip(move |window, cx| kit::tooltip(tip.clone(), window, cx))
+                // 放得下才写字：名字一行，再高一点加上大小
+                .when(w >= 48. && h >= 22., |d| {
+                    d.child(
+                        div()
+                            .max_w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .text_size(px(12.))
+                            .when(color.is_none(), |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
+                            .when_some(icon.filter(|_| w >= 80.), |d, icon| {
+                                d.child(div().flex_shrink_0().text_color(theme::color(readable(color.unwrap_or(ui::MUTED_FOREGROUND)))).child(kit::icon_sized(icon, 12.)))
+                            })
+                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone())),
+                    )
+                })
+                .when(w >= 48. && h >= 40., |d| {
+                    d.child(div().text_size(px(11.)).font_features(TABULAR.clone()).text_color(theme::color(ui::MUTED_FOREGROUND)).child(format_bytes(size)))
+                });
+            let tile = match row {
+                Some(Row::Dir(entry)) => {
+                    let target = entry.path.clone();
+                    tile.role(Role::Button)
+                        .aria_label(SharedString::from(name.clone()))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(target.clone(), cx)))
+                }
+                _ => tile,
+            };
+            let menu = match row {
+                Some(Row::Dir(entry)) => Some((entry.path.clone(), entry.path.clone())),
+                Some(Row::File { path, .. }) => Some((path.clone(), folder.clone())),
+                _ => None,
+            };
+            match menu {
+                Some((path, open)) => tile.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.open_menu(event.position, MenuTarget::Directory { path: path.clone(), folder: open.clone(), remote }, cx);
+                    }),
+                ),
+                None => tile,
+            }
+        });
+        div().relative().w(px(bounds.w)).h(px(bounds.h)).children(tiles)
+    }
+
+    /// `bars`：画用量条那一列（旁边没有矩形树图时）。
+    fn render_tree_rows(&mut self, range: Range<usize>, bars: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(machine) = self.machine.clone() else { return Vec::new() };
         let Some((rows, total)) = self.listing(cx) else { return Vec::new() };
         let folder = self.disk.at.get(&machine).map(|(_, path)| path.clone()).unwrap_or_default();
         // 条的长度按这一层最大的那项算，看得出谁大；占比按这一层的总量
         let largest = rows.iter().map(Row::size).max().unwrap_or(0).max(1);
         let remote = matches!(machine, Machine::Remote(_));
+        let lit = theme::alpha(ui::PRIMARY, ROW_HOVER[usize::from(theme::is_dark())]);
         range
             .filter_map(|ix| rows.get(ix).map(|row| (ix, row)))
             .map(|(ix, row)| {
                 let size = row.size();
-                let line = table_row(("disk-row", ix));
+                // 鼠标停在矩形树图里它那一块上时这一行也亮
+                let line = table_row(("disk-row", ix))
+                    .when(self.disk.hovered == Some(Hover::Row(ix)), |d| d.bg(lit))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.disk.hovered = Some(Hover::Row(ix));
+                        } else if this.disk.hovered == Some(Hover::Row(ix)) {
+                            this.disk.hovered = None;
+                        }
+                        cx.notify();
+                    }));
                 let (icon, name, muted) = match row {
                     Row::Dir(entry) => (Icon::Folder, entry.name.clone(), false),
                     Row::File { name, .. } => (Icon::FileText, name.clone(), false),
@@ -759,7 +953,7 @@ impl SystemPanel {
                         .child(div().min_w_0().truncate().when(!muted, |d| d.font_weight(FontWeight::MEDIUM)).child(name))
                         .when(has_children, |d| d.child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))),
                 )
-                .child(usage_cell(size as f32 / largest as f32, color))
+                .when(bars, |d| d.child(usage_cell(size as f32 / largest as f32, color)))
                 .child(size_cell(size))
                 .child(share_cell(size, total))
                 .into_any_element()

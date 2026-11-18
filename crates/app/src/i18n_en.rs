@@ -423,6 +423,7 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("占比", "Share"),
     ("这一层的文件", "Files in this folder"),
     ("其余 {} 个文件", "{0} more {0?file|files}"),
+    ("其余 {} 项", "{0} more {0?item|items}"),
     ("这个目录是空的", "This folder is empty"),
     ("在文件管理中打开", "Open in Files"),
     ("在访达中显示", "Show in Finder"),

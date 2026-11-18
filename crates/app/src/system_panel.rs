@@ -25,6 +25,7 @@ use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem};
 
 mod disk;
+mod treemap;
 
 use disk::DiskState;
 
