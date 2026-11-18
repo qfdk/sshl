@@ -540,6 +540,8 @@ impl SystemPanel {
         if self.machine == machine {
             return;
         }
+        // 换到别的会话：这台机器上的磁盘扫描停下（不在后台接着占资源）
+        self.stop_scans(cx);
         self.view = view_on(machine.as_ref(), self.view);
         self.machine = machine;
         self.overview = None;
@@ -567,6 +569,8 @@ impl SystemPanel {
             window.focus(&self.focus, cx);
         } else {
             self.menu = None;
+            // 切到终端 / 文件管理：磁盘扫描停下
+            self.stop_scans(cx);
         }
         self.restart(cx);
     }
@@ -634,6 +638,9 @@ impl SystemPanel {
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
         if self.view == view {
             return;
+        }
+        if self.view == View::Disk {
+            self.stop_scans(cx);
         }
         self.view = view;
         self.menu = None;

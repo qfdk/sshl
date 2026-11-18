@@ -5,17 +5,29 @@
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::disk_usage::{DiskTree, normalize};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
-/// 扫描进度：界面每秒读一次。
+/// 扫描进度（界面每秒读一次）和停止开关。
 #[derive(Debug, Default)]
 pub struct ScanProgress {
     pub files: AtomicU64,
     pub bytes: AtomicU64,
+    stopped: AtomicBool,
+}
+
+impl ScanProgress {
+    /// 叫停：本机的扫描线程拿下一个目录前就收手，远程的 du 被杀掉（`disk_usage::scan`），扫描返回 `Cancelled`。
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
 }
 
 /// 要走的一个目录。`node` 是它的大小记在谁名下：第 depth 层以内是它自己，更深的记在第 depth 层的祖先上。
@@ -32,10 +44,13 @@ struct Queue {
 }
 
 impl Queue {
-    /// 后进先出：接近深度优先，排着的目录不会堆太多。
-    fn pop(&self) -> Option<Task> {
+    /// 后进先出：接近深度优先，排着的目录不会堆太多。叫停了就不再给（等着的线程在别人走完一个目录时被叫醒，也看得到）。
+    fn pop(&self, progress: &ScanProgress) -> Option<Task> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
+            if progress.stopped() {
+                return None;
+            }
             if let Some(task) = state.0.pop() {
                 state.1 += 1;
                 return Some(task);
@@ -62,7 +77,7 @@ impl Queue {
     }
 }
 
-/// 并行扫 `root`（阻塞，放在后台线程里调）。
+/// 并行扫 `root`（阻塞，放在后台线程里调）。中途叫停（[`ScanProgress::stop`]）返回 `Cancelled`。
 pub fn scan_parallel(root: &str, depth: usize, progress: &ScanProgress) -> AppResult<DiskTree> {
     let root = normalize(root);
     let meta = std::fs::symlink_metadata(&root)?;
@@ -78,6 +93,9 @@ pub fn scan_parallel(root: &str, depth: usize, progress: &ScanProgress) -> AppRe
         let workers: Vec<_> = (0..threads).map(|_| scope.spawn(|| work(&shared))).collect();
         workers.into_iter().map(|worker| worker.join().unwrap_or_default()).collect()
     });
+    if progress.stopped() {
+        return Err(AppError::Cancelled);
+    }
     let mut own: HashMap<String, u64> = HashMap::new();
     for part in parts {
         for (node, size) in part {
@@ -111,7 +129,7 @@ fn yield_to_interactive_work() {
 fn work(shared: &Shared) -> HashMap<Arc<str>, u64> {
     yield_to_interactive_work();
     let mut sizes: HashMap<Arc<str>, u64> = HashMap::new();
-    while let Some(task) = shared.queue.pop() {
+    while let Some(task) = shared.queue.pop(shared.progress) {
         let (mut here, mut files) = (0u64, 0u64);
         let mut found = Vec::new();
         match std::fs::read_dir(&task.path) {
@@ -120,6 +138,10 @@ fn work(shared: &Shared) -> HashMap<Arc<str>, u64> {
             }
             Ok(entries) => {
                 for entry in entries.flatten() {
+                    // 一个目录里几百万个文件也不用等它列完才停
+                    if shared.progress.stopped() {
+                        break;
+                    }
                     // 不跟随符号链接（同 du）
                     let Ok(meta) = entry.metadata() else { continue };
                     // 别的分区挂在这里（du -x）：整个不算
@@ -221,6 +243,36 @@ mod tests {
         assert_eq!(tree.unreadable, 1);
         let names: Vec<String> = tree.entries(&root.to_string_lossy()).into_iter().map(|e| e.name).collect();
         assert_eq!(names, ["open", "locked"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 叫停：扫描线程收手（不会有线程卡在等任务上），返回 Cancelled；开始前就叫停的一个目录都不走。
+    #[test]
+    fn a_stopped_scan_ends_and_reports_cancelled() {
+        let root = temp_dir("scan-stop");
+        for i in 0..300 {
+            write(&root.join(format!("d{i:03}/e/f.bin")), 10);
+        }
+        let path = root.to_string_lossy().into_owned();
+        let progress = Arc::new(ScanProgress::default());
+        progress.stop();
+        assert!(matches!(scan_parallel(&path, 4, &progress), Err(AppError::Cancelled)));
+        assert_eq!(progress.files.load(Ordering::Relaxed), 0, "一个文件都没数");
+
+        // 扫到一半叫停：另一个线程在扫描进行中按停止，扫描照样结束（没有线程一直等着）
+        let progress = Arc::new(ScanProgress::default());
+        let stopper = {
+            let progress = progress.clone();
+            std::thread::spawn(move || {
+                while progress.files.load(Ordering::Relaxed) == 0 {
+                    std::thread::yield_now();
+                }
+                progress.stop();
+            })
+        };
+        let result = scan_parallel(&path, 4, &progress);
+        stopper.join().unwrap();
+        assert!(matches!(result, Err(AppError::Cancelled)), "{:?}", result.map(|tree| tree.size(&path)));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

@@ -2,6 +2,8 @@
 //! 命令在那台机器上以文件管理当前身份跑（终端 sudo -i 之后就是 root，整台机器都看得到）。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 pub use crate::disk_scan::ScanProgress;
 use crate::error::{AppError, AppResult};
@@ -98,13 +100,77 @@ pub const SCAN_DEPTH: usize = 4;
 /// 扫一个分区：每个目录的占用（KB，`-x` 不跨到别的分区），只列 [`SCAN_DEPTH`] 层。放在最低的 IO / CPU 优先级上跑，
 /// 尽量不压着服务器上的正事：Linux 用 `ionice -c3`，macOS 用 `taskpolicy -b`（后台 QoS，磁盘 IO 被系统节流），都再加 `nice`。
 /// 限制层数的写法各家不同：GNU 老版本只认 `--max-depth`，BusyBox、macOS 只认 `-d`——拿 /dev/null 试一下（只看一个文件，不走树）。
+/// 第一行先报进程号再 `exec`（shell 换成 ionice → nice → du，进程号不变）：停下时按它杀（[`run_stoppable`]）。
 pub fn scan_command(root: &str) -> String {
     let root = shell_quote(root);
     format!(
         "cd / && export LC_ALL=C; if du --max-depth=0 /dev/null >/dev/null 2>&1; then d=--max-depth={SCAN_DEPTH}; else d='-d {SCAN_DEPTH}'; fi; \
          if command -v ionice >/dev/null 2>&1; then q='ionice -c3 -t'; elif command -v taskpolicy >/dev/null 2>&1; then q='taskpolicy -b'; else q=; fi; \
-         $q nice -n 19 du -xk $d -- {root}"
+         echo \"{PID_MARKER} $$\"; exec $q nice -n 19 du -xk $d -- {root}"
     )
+}
+
+/// 远程扫描输出的第一行：`sshl-scan-pid <进程号>`。
+const PID_MARKER: &str = "sshl-scan-pid";
+/// 叫停后多久看一次（杀 du）。
+const STOP_POLL: Duration = Duration::from_millis(250);
+/// 杀几次：刚好赶在 exec 到 du 之前那一瞬，进程名还不对，下一轮再杀。
+const KILL_ATTEMPTS: u32 = 4;
+/// 叫停后最多等 du 退出这么久：杀不掉、连接卡住也不一直等。
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// 从输出开头找进程号。只看完整的行（一块输出可能正好切在数字中间）。
+fn scan_pid(head: &str) -> Option<u32> {
+    let complete = &head[..head.rfind('\n')?];
+    complete.lines().find_map(|line| line.trim().strip_prefix(PID_MARKER)?.trim().parse().ok())
+}
+
+/// 杀掉远程的扫描：只杀还在我们这条链上的进程（du，或 exec 到 du 之前的 nice / ionice / taskpolicy），
+/// 进程号已经被别的程序复用了不杀。进程名 Linux 读 /proc，别的系统用 ps（macOS 给的是完整路径）。
+fn kill_command(pid: u32) -> String {
+    format!(
+        "c=$(cat /proc/{pid}/comm 2>/dev/null || ps -o comm= -p {pid} 2>/dev/null); \
+         case \"$c\" in *du|*nice|*ionice|*taskpolicy) kill {pid} && echo killed;; esac"
+    )
+}
+
+/// 跑一条第一行报进程号、之后 exec 成 du 的命令（[`scan_command`]）。`progress` 被叫停时以同一身份杀掉 du
+/// （sudo -i 之后 du 是 root 的），返回 `Cancelled`。杀的次数和等的时间都有上限，不会一直转下去。
+async fn run_stoppable(state: &AppState, machine: &Machine, command: &str, progress: &ScanProgress) -> AppResult<(u32, String, String)> {
+    let pid = AtomicU32::new(0);
+    let mut head = String::new();
+    let mut watch = |chunk: &[u8]| {
+        if pid.load(Ordering::Relaxed) == 0 && head.len() < 4096 {
+            head.push_str(&String::from_utf8_lossy(chunk));
+            if let Some(found) = scan_pid(&head) {
+                pid.store(found, Ordering::Relaxed);
+            }
+        }
+    };
+    let run = server_info::exec_watching(state, machine, command, &mut watch);
+    tokio::pin!(run);
+    let (mut attempts, mut stopped_at) = (0, None::<Instant>);
+    loop {
+        tokio::select! {
+            result = &mut run => return if progress.stopped() { Err(AppError::Cancelled) } else { result },
+            _ = tokio::time::sleep(STOP_POLL) => {
+                if !progress.stopped() {
+                    continue;
+                }
+                if stopped_at.get_or_insert_with(Instant::now).elapsed() >= STOP_GRACE {
+                    return Err(AppError::Cancelled);
+                }
+                let id = pid.load(Ordering::Relaxed);
+                if id != 0 && attempts < KILL_ATTEMPTS {
+                    attempts += 1;
+                    let killed = server_info::exec(state, machine, &kill_command(id)).await.is_ok_and(|(_, out, _)| out.contains("killed"));
+                    if killed {
+                        attempts = KILL_ATTEMPTS;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -295,7 +361,7 @@ fn local_files(path: &str) -> AppResult<Vec<(String, u64)>> {
 }
 
 /// 扫 `root`。本机多线程并行扫（`disk_scan`，`progress` 跟着走）；远程用 du：没权限读的目录 du 会报错（退出码 1）
-/// 但照样给出读得到的部分，有输出就算成功，记下读不了几个。
+/// 但照样给出读得到的部分，有输出就算成功，记下读不了几个。`progress` 叫停了就停下（远程杀掉 du），返回 `Cancelled`。
 pub async fn scan(state: &AppState, machine: &Machine, root: &str, progress: std::sync::Arc<ScanProgress>) -> AppResult<DiskTree> {
     if *machine == Machine::Local {
         let root = root.to_string();
@@ -303,8 +369,8 @@ pub async fn scan(state: &AppState, machine: &Machine, root: &str, progress: std
             .await
             .map_err(|e| AppError::Other(format!("scan: {e}")))?;
     }
-    let (status, out, err) = server_info::exec(state, machine, &scan_command(root)).await?;
-    if out.trim().is_empty() {
+    let (status, out, err) = run_stoppable(state, machine, &scan_command(root), &progress).await?;
+    if !out.lines().any(|line| line.contains('\t')) {
         let err = err.trim();
         return Err(AppError::Other(if err.is_empty() { format!("du exited {status}") } else { err.to_string() }));
     }
@@ -395,6 +461,84 @@ devices -- file:///Users/me/Library/Containers/com.apple.CoreDevice.CoreDeviceSe
         let out = format!("{LINUX}@@mount\n/dev/vda1 on / type ext4 (rw,relatime)\n/dev/vdb1 on /data type xfs (rw,noatime)\n");
         let mounts: Vec<String> = parse_filesystems(&out).into_iter().map(|fs| fs.mount).collect();
         assert_eq!(mounts, ["/", "/boot/efi", "/data", "/mnt/backup"]);
+    }
+
+    #[test]
+    fn the_process_id_is_read_from_complete_lines_only() {
+        assert_eq!(scan_pid("sshl-scan-pid 4321\n"), Some(4321));
+        assert_eq!(scan_pid("sshl-scan-pid 43"), None, "输出切在数字中间：等这一行完整");
+        assert_eq!(scan_pid("Password: \nsshl-scan-pid 77\n12\t/x\n"), Some(77), "su / sudo 的提示在前面也找得到");
+        assert_eq!(scan_pid("12\t/x\n"), None);
+    }
+
+    fn fake_du(tag: &str) -> (std::path::PathBuf, String) {
+        // 名字叫 du 的 sleep：杀的时候按进程名认
+        let dir = std::env::temp_dir().join(format!("sshl-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let du = dir.join("du");
+        std::fs::copy("/bin/sleep", &du).unwrap();
+        let command = format!("echo \"{PID_MARKER} $$\"; exec '{}' 30", du.display());
+        (dir, command)
+    }
+
+    fn running(pid: u32) -> bool {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().unwrap().success()
+    }
+
+    /// 停下扫描：du 被杀掉（不是等它跑完），很快返回 Cancelled。本机跑一个名字叫 du 的 sleep 30 代替。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_a_scan_kills_du() {
+        let (dir, command) = fake_du("stop");
+        let state = AppState::new();
+        let progress = std::sync::Arc::new(ScanProgress::default());
+        let stopper = {
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                progress.stop();
+            })
+        };
+        let started = Instant::now();
+        let result = run_stoppable(&state, &Machine::Local, &command, &progress).await;
+        stopper.await.unwrap();
+        assert!(matches!(result, Err(AppError::Cancelled)), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "杀掉了，没等 sleep 30 跑完：{:?}", started.elapsed());
+        let leftover = std::process::Command::new("pgrep").args(["-f", &dir.to_string_lossy()]).output().unwrap();
+        assert!(leftover.stdout.is_empty(), "du 不在了：{}", String::from_utf8_lossy(&leftover.stdout));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 进程号被别的程序用了（名字不是 du 这条链上的）：不杀。
+    #[test]
+    fn only_our_du_is_killed() {
+        let mut other = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(kill_command(other.id())).output().unwrap();
+        assert!(running(other.id()), "sleep 不是 du，不杀");
+        assert!(out.stdout.is_empty());
+        other.kill().unwrap();
+        let _ = other.wait();
+
+        let (dir, _) = fake_du("kill");
+        let mut du = std::process::Command::new(dir.join("du")).arg("30").spawn().unwrap();
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(kill_command(du.id())).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "killed");
+        let _ = du.wait();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 真跑一遍扫描命令（这台 Mac 上走 taskpolicy + nice + du）：第一行是进程号，后面照常解析。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_scan_command_reports_its_process_and_then_scans() {
+        let dir = std::env::temp_dir().join(format!("sshl-cmd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/f.bin"), vec![1u8; 50_000]).unwrap();
+        let root = dir.canonicalize().unwrap().to_string_lossy().into_owned();
+        let (status, out, err) = run_stoppable(&AppState::new(), &Machine::Local, &scan_command(&root), &ScanProgress::default()).await.unwrap();
+        assert_eq!(status, 0, "{err}");
+        assert!(scan_pid(&out).is_some(), "{out}");
+        let tree = parse_du(&out, &root, 0, SCAN_DEPTH);
+        assert!(tree.size(&format!("{root}/a")).unwrap() >= 50_000, "{out}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -516,6 +660,44 @@ devices -- file:///Users/me/Library/Containers/com.apple.CoreDevice.CoreDeviceSe
         assert_eq!(tree.entries(&fourth).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["e"]);
         assert!(tree.size(&format!("{fourth}/e/f")).is_some());
         server_info::run(&state, &machine, &format!("rm -rf -- '{deep}'")).await.unwrap();
+    }
+
+    /// 远程停下扫描：服务器上的 du 被杀掉。名字叫 du 的 sleep 30 代替真 du。
+    /// `SSHL_SFTP_IT=127.0.0.1:2223 cargo test --lib stopping_a_remote_scan -- --ignored`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "需要 SSHL_SFTP_IT=host:port 指向 sshd 测试容器"]
+    async fn stopping_a_remote_scan_kills_du() {
+        let Ok(target) = std::env::var("SSHL_SFTP_IT") else { return };
+        let (host, port) = target.split_once(':').unwrap();
+        let handle = crate::ssh::do_handshake(
+            host,
+            port.parse().unwrap(),
+            "alice",
+            crate::ssh::Credentials::Password("alicepw"),
+            crate::known_hosts::HostKeyCheck::trust_any_for_tests(),
+        )
+        .await
+        .unwrap();
+        let state = AppState::new();
+        state.insert("it".into(), std::sync::Arc::new(crate::ssh::SshSession::for_test(handle, "alice"))).await;
+        let machine = Machine::Remote("it".into());
+        let dir = server_info::run(&state, &machine, "d=$(mktemp -d /home/alice/sshl-stop.XXXXXX) && cp /bin/sleep \"$d/du\" && echo \"$d\"").await.unwrap().trim().to_string();
+        let progress = std::sync::Arc::new(ScanProgress::default());
+        let stopper = {
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                progress.stop();
+            })
+        };
+        let started = Instant::now();
+        let command = format!("echo \"{PID_MARKER} $$\"; exec '{dir}/du' 30");
+        let result = run_stoppable(&state, &machine, &command, &progress).await;
+        stopper.await.unwrap();
+        let leftover = server_info::run(&state, &machine, &format!("pgrep -x du || true; rm -rf -- '{dir}'")).await.unwrap();
+        assert!(matches!(result, Err(AppError::Cancelled)), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "杀掉了，没等 sleep 30 跑完：{:?}", started.elapsed());
+        assert_eq!(leftover.trim(), "", "服务器上的 du 不在了");
     }
 
     #[test]

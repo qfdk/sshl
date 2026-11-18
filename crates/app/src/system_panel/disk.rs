@@ -1,5 +1,9 @@
-//! 「系统」页的「磁盘」：看磁盘空间被什么占了（磁盘快满时找是哪个文件夹、哪个文件）。点开就扫默认分区（/，没有就用得最多的那个），
+//! 「系统」页的「磁盘」：看磁盘空间被什么占了（磁盘快满时找是哪个文件夹、哪个文件）。点开先看默认分区（/，没有就用得最多的那个），
 //! 像 ncdu 一样按大小一层层往下点；每一层子目录和文件放在一起排，大文件一眼看得到。别的分区在顶上切换。
+//!
+//! 扫描要用户点（「开始扫描」）：读遍一个大分区很重，不能一打开页面就压到服务器上。离开这一页（换标签、换页面、换会话、换分区）
+//! 就停下（远程杀掉 du，本机的扫描线程收手），回来时显示「已停止」，等用户再点，不会自己重新开始；失败了也不自己重试。
+//! 点进第 4 层往下还没列出来的目录时补扫那一个目录（点进去就是要看），一次只补扫一个，离开那个目录就停下。
 //!
 //! 要快、不卡：远程一次只列 4 层（du 照样走完整棵树，总数是准的，输出几万行以内），点到更深的目录时只补扫那一个目录；
 //! 本机多线程并行扫（`sshl_core::disk_scan`）。每一层的文件在打开那一层时才列（一个目录，很快）。
@@ -39,6 +43,8 @@ pub(super) enum Scan {
         failed: Option<(String, String)>,
     },
     Failed(String),
+    /// 扫到一半离开了这一页：等用户再点「开始扫描」。
+    Stopped,
 }
 
 /// 一个目录里直接放着的文件。
@@ -89,6 +95,55 @@ pub(super) struct DiskState {
     version: u64,
     listing: Option<Listing>,
     scroll: UniformListScrollHandle,
+}
+
+impl DiskState {
+    /// 停下所有正在跑的扫描：整个分区的变成「已停止」，补扫的目录回到「还没扫」。有停下的返回 true。
+    fn stop_all(&mut self) -> bool {
+        let mut stopped = false;
+        for scan in self.scans.values_mut() {
+            match scan {
+                Scan::Running { progress, .. } => {
+                    progress.stop();
+                    *scan = Scan::Stopped;
+                    stopped = true;
+                }
+                Scan::Done { deeper, .. } => {
+                    if let Some((_, _, progress)) = deeper.take() {
+                        progress.stop();
+                        stopped = true;
+                    }
+                }
+                Scan::Failed(_) | Scan::Stopped => {}
+            }
+        }
+        if stopped {
+            self.version += 1;
+        }
+        stopped
+    }
+
+    /// 整个分区扫完：只认还在跑的这一次（期间停下过、又开始了一次新的，旧的结果不要）。收下了返回 true。
+    fn finish_scan(&mut self, key: &(Machine, String), progress: &Arc<ScanProgress>, scan: Scan) -> bool {
+        let current = matches!(self.scans.get(key), Some(Scan::Running { progress: running, .. }) if Arc::ptr_eq(running, progress));
+        if current {
+            self.scans.insert(key.clone(), scan);
+            self.version += 1;
+        }
+        current
+    }
+
+    /// 补扫完：同样只认还在跑的这一次，接回树上（失败的记下原因，等用户再点）。
+    fn finish_deeper(&mut self, key: &(Machine, String), progress: &Arc<ScanProgress>, result: Result<DiskTree, String>) -> bool {
+        let Some(Scan::Done { tree, deeper, failed, .. }) = self.scans.get_mut(key) else { return false };
+        let Some((path, ..)) = deeper.take_if(|(_, _, running)| Arc::ptr_eq(running, progress)) else { return false };
+        match result {
+            Ok(sub) => Arc::make_mut(tree).merge(sub),
+            Err(error) => *failed = Some((path, error)),
+        }
+        self.version += 1;
+        true
+    }
 }
 
 // ---------------------------------------------------------------- 纯函数（有测试）
@@ -219,20 +274,31 @@ impl SystemPanel {
         self.disk.filesystems.as_ref().map(Vec::len)
     }
 
-    /// 看这个分区：没扫过（或上次失败）就开始扫。
+    /// 停下所有正在跑的扫描（离开磁盘页：换标签、换页面、换会话、换分区）：远程的 du 被杀掉，本机的扫描线程收手。
+    /// 不会自己重新开始，等用户再点。
+    pub(super) fn stop_scans(&mut self, cx: &mut Context<Self>) {
+        if self.disk.stop_all() {
+            cx.notify();
+        }
+    }
+
+    /// 看这个分区：只是切过去（扫过的直接显示），不自己开始扫——读遍一个大分区很重，要用户点。换了分区，别的扫描停下。
     fn open_filesystem(&mut self, mount: String, cx: &mut Context<Self>) {
         let Some(machine) = self.machine.clone() else { return };
-        self.disk.at.insert(machine.clone(), (mount.clone(), mount.clone()));
-        self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
-        if !matches!(self.disk.scans.get(&(machine, mount.clone())), Some(Scan::Running { .. } | Scan::Done { .. })) {
-            self.start_scan(mount, cx);
+        if self.disk.at.get(&machine).is_some_and(|(current, _)| *current == mount) {
+            self.go_to(mount, cx);
+            return;
         }
+        self.stop_scans(cx);
+        self.disk.at.insert(machine, (mount.clone(), mount));
+        self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
 
-    /// 扫整个分区（第一次看、点「重新扫描」）。之前列过的文件作废（重新扫描就是要新的）。
+    /// 扫整个分区（用户点「开始扫描」「重新扫描」）。一次只跑一个：别的先停下。之前列过的文件作废（重新扫描就是要新的）。
     fn start_scan(&mut self, mount: String, cx: &mut Context<Self>) {
         let Some(machine) = self.machine.clone() else { return };
+        self.disk.stop_all();
         let below = if mount == "/" { "/".to_string() } else { format!("{mount}/") };
         self.disk.files.retain(|(owner, path), _| *owner != machine || (*path != mount && !path.starts_with(&below)));
         let key = (machine.clone(), mount.clone());
@@ -240,6 +306,7 @@ impl SystemPanel {
         self.disk.scans.insert(key.clone(), Scan::Running { started: Instant::now(), progress: progress.clone() });
         self.disk.version += 1;
         self.tick_while_scanning(key.clone(), cx);
+        let running = progress.clone();
         let scanned = backend::spawn(async move { disk_usage::scan(&backend::get().state, &machine, &mount, progress).await });
         cx.spawn(async move |this, cx| {
             let scan = match scanned.await {
@@ -248,44 +315,42 @@ impl SystemPanel {
                 None => Scan::Failed(tr!("后台任务异常退出").into()),
             };
             let _ = this.update(cx, |this, cx| {
-                this.disk.scans.insert(key.clone(), scan);
-                this.disk.version += 1;
-                this.settle_at(&key, cx);
-                cx.notify();
+                if this.disk.finish_scan(&key, &running, scan) {
+                    this.settle_at(&key);
+                    cx.notify();
+                }
             });
         })
         .detach();
     }
 
-    /// 补扫一个还没列出来的目录，接回这个分区的树上。
+    /// 补扫一个还没列出来的目录（用户点进去，或点「扫描这个目录」），接回这个分区的树上。一次只补扫一个：换了目录，旧的停下。
     fn scan_deeper(&mut self, key: (Machine, String), path: String, cx: &mut Context<Self>) {
         let Some(Scan::Done { deeper, failed, .. }) = self.disk.scans.get_mut(&key) else { return };
-        if deeper.is_some() {
+        if deeper.as_ref().is_some_and(|(scanning, ..)| *scanning == path) {
             return;
+        }
+        if let Some((_, _, old)) = deeper.take() {
+            old.stop();
         }
         let progress = Arc::new(ScanProgress::default());
         *deeper = Some((path.clone(), Instant::now(), progress.clone()));
         *failed = None;
         self.disk.version += 1;
         self.tick_while_scanning(key.clone(), cx);
-        let (machine, root) = (key.0.clone(), path.clone());
+        let running = progress.clone();
+        let (machine, root) = (key.0.clone(), path);
         let scanned = backend::spawn(async move { disk_usage::scan(&backend::get().state, &machine, &root, progress).await });
         cx.spawn(async move |this, cx| {
-            let result = scanned.await;
+            let result = match scanned.await {
+                Some(Ok(tree)) => Ok(tree),
+                Some(Err(error)) => Err(error.to_string()),
+                None => Err(tr!("后台任务异常退出").to_string()),
+            };
             let _ = this.update(cx, |this, cx| {
-                // 期间点了「重新扫描」：这棵树已经换掉了，结果不要
-                let Some(Scan::Done { tree, deeper, failed, .. }) = this.disk.scans.get_mut(&key) else { return };
-                if deeper.as_ref().map(|(scanning, ..)| scanning) != Some(&path) {
-                    return;
+                if this.disk.finish_deeper(&key, &running, result) {
+                    cx.notify();
                 }
-                *deeper = None;
-                match result {
-                    Some(Ok(sub)) => Arc::make_mut(tree).merge(sub),
-                    Some(Err(error)) => *failed = Some((path, error.to_string())),
-                    None => *failed = Some((path, tr!("后台任务异常退出").into())),
-                }
-                this.disk.version += 1;
-                cx.notify();
             });
         })
         .detach();
@@ -330,29 +395,34 @@ impl SystemPanel {
         .detach();
     }
 
-    /// 整个分区扫完：停着的那一层不在新树上（重新扫描时停在深处）就退到树上最深的祖先，它要补扫就补扫。
-    fn settle_at(&mut self, key: &(Machine, String), cx: &mut Context<Self>) {
+    /// 整个分区扫完：停着的那一层不在新树上（重新扫描时停在深处）就退到树上最深的祖先。那一层要补扫的话等用户点，不接着自己扫。
+    fn settle_at(&mut self, key: &(Machine, String)) {
         let Some(Scan::Done { tree, .. }) = self.disk.scans.get(key) else { return };
         let Some((mount, path)) = self.disk.at.get(&key.0).filter(|(mount, _)| *mount == key.1) else { return };
         let settled = deepest_known(tree, mount, path);
-        let needs_scan = tree.needs_scan(&settled);
         if let Some(at) = self.disk.at.get_mut(&key.0) {
-            at.1 = settled.clone();
-        }
-        if needs_scan {
-            self.scan_deeper(key.clone(), settled, cx);
+            at.1 = settled;
         }
     }
 
+    /// 点进一个目录（或面包屑往回走）。补扫只为正在看的那个目录：离开它就停下；点进的目录还没列出来就补扫它（点进去就是要看）。
     fn go_to(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(machine) = self.machine.clone() else { return };
         let Some(at) = self.disk.at.get_mut(&machine) else { return };
         at.1 = path.clone();
         let key = (machine, at.0.clone());
         self.disk.scroll.scroll_to_item(0, ScrollStrategy::Top);
-        if let Some(Scan::Done { tree, .. }) = self.disk.scans.get(&key)
-            && tree.needs_scan(&path)
-        {
+        let needs_scan = match self.disk.scans.get_mut(&key) {
+            Some(Scan::Done { tree, deeper, .. }) => {
+                if let Some((_, _, progress)) = deeper.take_if(|(scanning, ..)| *scanning != path) {
+                    progress.stop();
+                    self.disk.version += 1;
+                }
+                tree.needs_scan(&path)
+            }
+            _ => false,
+        };
+        if needs_scan {
             self.scan_deeper(key, path, cx);
         }
         cx.notify();
@@ -382,7 +452,7 @@ impl SystemPanel {
         Some((rows, total))
     }
 
-    /// 整个「磁盘」页（标签栏下面的部分）。第一次看这台机器时直接打开默认分区开始扫。
+    /// 整个「磁盘」页（标签栏下面的部分）。第一次看这台机器时先打开默认分区（不扫，等用户点）。
     pub(super) fn render_disk(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(machine) = self.machine.clone() else { return empty_message(tr!("连接服务器后显示它的进程、端口和服务")) };
         if !self.disk.at.contains_key(&machine) {
@@ -448,18 +518,25 @@ impl SystemPanel {
     fn render_scan(&mut self, machine: &Machine, mount: String, path: String, cx: &mut Context<Self>) -> AnyElement {
         // 先把要用的取出来：下面还要可变地借 self 画树
         enum Shown {
+            /// 还没扫，或扫到一半离开过（true）：等用户点「开始扫描」。
+            Idle(bool),
             /// 整个分区在扫（秒数, 已扫的文件数, 字节）。
             Scanning(u64, u64, u64),
             /// 这一层在补扫。
             Deeper(u64, u64, u64),
+            /// 整个分区扫失败了。
             Failed(String),
+            /// 这一层还没列出来（第 4 层往下）：等用户点「扫描这个目录」。带着上次补扫失败的原因。
+            DeeperIdle(Option<String>),
             Done(Instant, usize),
         }
         let counted = |started: &Instant, progress: &ScanProgress| {
             (started.elapsed().as_secs(), progress.files.load(Ordering::Relaxed), progress.bytes.load(Ordering::Relaxed))
         };
-        let shown = match self.disk.scans.get(&(machine.clone(), mount.clone())) {
-            None => Shown::Scanning(0, 0, 0),
+        let key = (machine.clone(), mount.clone());
+        let shown = match self.disk.scans.get(&key) {
+            None => Shown::Idle(false),
+            Some(Scan::Stopped) => Shown::Idle(true),
             Some(Scan::Running { started, progress }) => {
                 let (secs, files, bytes) = counted(started, progress);
                 Shown::Scanning(secs, files, bytes)
@@ -469,12 +546,14 @@ impl SystemPanel {
                 let (secs, files, bytes) = counted(started, progress);
                 Shown::Deeper(secs, files, bytes)
             }
-            Some(Scan::Done { failed: Some((at, error)), .. }) if *at == path => Shown::Failed(error.clone()),
+            Some(Scan::Done { failed: Some((at, error)), .. }) if *at == path => Shown::DeeperIdle(Some(error.clone())),
+            Some(Scan::Done { tree, .. }) if tree.needs_scan(&path) => Shown::DeeperIdle(None),
             Some(Scan::Done { tree, at, .. }) => Shown::Done(*at, tree.unreadable),
         };
         let local = *machine == Machine::Local;
         let rescan_mount = mount.clone();
-        let full_scan = matches!(shown, Shown::Scanning(..));
+        // 有扫好的树才在面包屑右边放「重新扫描」：没扫过、扫失败的在中间有自己的按钮
+        let has_tree = matches!(shown, Shown::Deeper(..) | Shown::DeeperIdle(_) | Shown::Done(..));
         let switcher = self.volume_switcher(&mount, cx);
         // 面包屑：分区 › 目录 › 目录 … 右边是重新扫描
         let crumbs_bar = div()
@@ -515,7 +594,7 @@ impl SystemPanel {
                     )
             }))
             .child(div().flex_1())
-            .when(!full_scan, |d| {
+            .when(has_tree, |d| {
                 d.child(
                     kit::button("disk-rescan", kit::Variant::Outline)
                         .h(px(28.))
@@ -527,34 +606,57 @@ impl SystemPanel {
                 )
             });
 
+        let action = |id: &'static str, variant: kit::Variant, label: &'static str| {
+            kit::button(id, variant).h(px(30.)).px_4().text_size(px(13.)).aria_label(label).child(label)
+        };
+        let stop = action("disk-stop", kit::Variant::Outline, tr!("停止")).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop_scans(cx)));
+        let start = {
+            let mount = mount.clone();
+            move |id: &'static str, label: &'static str, cx: &mut Context<Self>| {
+                action(id, kit::Variant::Primary, label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.start_scan(mount.clone(), cx)))
+            }
+        };
+        let scan_folder = {
+            let (key, path) = (key.clone(), path.clone());
+            action("disk-scan-folder", kit::Variant::Primary, tr!("扫描这个目录"))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.scan_deeper(key.clone(), path.clone(), cx)))
+        };
+        let muted = |text: &str| div().max_w(px(560.)).text_center().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(text.to_string());
+        let centered = || div().flex_1().flex().flex_col().items_center().justify_center().gap_3().px_4();
+        let permission_hint = local.then(|| muted(tr!("第一次扫描时 macOS 可能会问 SSHL 能不能访问「文稿」「桌面」等文件夹；不允许的话这些文件夹算不进来。")));
         // 本机并行扫描有进度：已扫多少文件、多大（远程用 du，拿不到，只显示用了几秒）
-        let scanning = |target: &str, (secs, files, bytes): (u64, u64, u64), hints: Vec<&'static str>| {
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .px_4()
+        let scanning = |target: &str, (secs, files, bytes): (u64, u64, u64)| {
+            centered()
                 .child(spinner(24.))
                 .child(div().text_sm().child(tr!("正在扫描 {}…已用 {} 秒", target, secs)))
                 .when(files > 0, |d| {
                     d.child(div().text_sm().font_features(TABULAR.clone()).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已扫 {} 个文件 · {}", group_digits(files), format_bytes(bytes))))
                 })
-                .children(hints.into_iter().map(|hint| div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint)))
-                .into_any_element()
         };
         let body = match shown {
-            Shown::Scanning(secs, files, bytes) => {
-                let mut hints = vec![tr!("分区越大越久。扫完后往下点都是现成的，不用再等。")];
-                if local {
-                    hints.push(tr!("第一次扫描时 macOS 可能会问 SSHL 能不能访问「文稿」「桌面」等文件夹；不允许的话这些文件夹算不进来。"));
-                }
-                scanning(&mount, (secs, files, bytes), hints)
+            Shown::Idle(stopped) => {
+                let (title, hint) = if stopped {
+                    (tr!("扫描已停止").to_string(), tr!("离开这一页时扫描会停下，不在后台一直占着资源。"))
+                } else if local {
+                    (tr!("扫描 {}，看看是哪些文件夹和文件占了空间", mount), tr!("会读遍整个分区，分区越大越久。离开这一页就停下。"))
+                } else {
+                    (tr!("扫描 {}，看看是哪些文件夹和文件占了空间", mount), tr!("会读遍整个分区，分区越大越久。在服务器上以最低的 CPU 和磁盘优先级跑，离开这一页就停下。"))
+                };
+                centered().child(div().text_sm().child(title)).child(muted(hint)).children(permission_hint).child(start("disk-start", tr!("开始扫描"), cx)).into_any_element()
             }
-            Shown::Deeper(secs, files, bytes) => scanning(&path, (secs, files, bytes), Vec::new()),
-            Shown::Failed(error) => empty_message(tr!("扫描失败：{}", error.trim())),
+            Shown::Scanning(secs, files, bytes) => scanning(&mount, (secs, files, bytes))
+                .child(muted(tr!("分区越大越久。扫完后往下点都是现成的，不用再等。")))
+                .children(permission_hint)
+                .child(stop)
+                .into_any_element(),
+            Shown::Deeper(secs, files, bytes) => scanning(&path, (secs, files, bytes)).child(stop).into_any_element(),
+            Shown::Failed(error) => {
+                centered().child(div().text_sm().child(tr!("扫描失败：{}", error.trim()))).child(start("disk-retry", tr!("重新扫描"), cx)).into_any_element()
+            }
+            Shown::DeeperIdle(error) => {
+                let title = error.map_or_else(|| tr!("这个目录还没扫").to_string(), |error| tr!("扫描失败：{}", error.trim()));
+                centered().child(div().text_sm().child(title)).child(scan_folder).into_any_element()
+            }
             Shown::Done(at, unreadable) => self.render_tree(at, unreadable, local, cx),
         };
         div().flex_1().min_h_0().flex().flex_col().children(switcher).child(crumbs_bar).child(body).into_any_element()
@@ -793,6 +895,66 @@ mod tests {
         assert_eq!(group_digits(1000), "1,000");
         assert_eq!(group_digits(644498), "644,498");
         assert_eq!(group_digits(4544185), "4,544,185");
+    }
+
+    fn progress() -> Arc<ScanProgress> {
+        Arc::new(ScanProgress::default())
+    }
+
+    fn done(deeper: Option<Arc<ScanProgress>>) -> Scan {
+        let tree = disk_usage::parse_du("5\t/a\n10\t/\n", "/", 0, 4);
+        Scan::Done { tree: Arc::new(tree), at: Instant::now(), deeper: deeper.map(|p| ("/a/b/c/d/e".to_string(), Instant::now(), p)), failed: None }
+    }
+
+    /// 离开磁盘页：所有正在跑的扫描都叫停（远程据此杀掉 du）。整个分区的变「已停止」，补扫的回到「还没扫」；扫完的结果留着。
+    #[test]
+    fn leaving_stops_every_running_scan() {
+        let (full, deeper) = (progress(), progress());
+        let mut disk = DiskState::default();
+        let remote = Machine::Remote("s1".into());
+        disk.scans.insert((Machine::Local, "/".into()), Scan::Running { started: Instant::now(), progress: full.clone() });
+        disk.scans.insert((remote.clone(), "/".into()), done(Some(deeper.clone())));
+        disk.scans.insert((remote.clone(), "/data".into()), done(None));
+        assert!(disk.stop_all());
+        assert!(full.stopped() && deeper.stopped());
+        assert!(matches!(disk.scans[&(Machine::Local, "/".into())], Scan::Stopped));
+        assert!(matches!(&disk.scans[&(remote.clone(), "/".into())], Scan::Done { deeper: None, .. }), "补扫停了，树还在");
+        assert!(matches!(&disk.scans[&(remote, "/data".into())], Scan::Done { .. }));
+        let version = disk.version;
+        assert!(!disk.stop_all(), "没有在跑的了");
+        assert_eq!(disk.version, version, "什么都没停就不用重画");
+    }
+
+    /// 停下的扫描晚一步回来的结果不能盖掉后来的状态（「已停止」、或者用户又点了一次的新扫描）。
+    #[test]
+    fn a_stopped_scan_never_overwrites_what_came_after() {
+        let key = (Machine::Local, "/".to_string());
+        let first = progress();
+        let mut disk = DiskState::default();
+        disk.scans.insert(key.clone(), Scan::Running { started: Instant::now(), progress: first.clone() });
+        disk.stop_all();
+        assert!(!disk.finish_scan(&key, &first, Scan::Failed("cancelled".into())));
+        assert!(matches!(disk.scans[&key], Scan::Stopped), "停下的还是停下的，不变成失败、也不自己重来");
+
+        let second = progress();
+        disk.scans.insert(key.clone(), Scan::Running { started: Instant::now(), progress: second.clone() });
+        assert!(!disk.finish_scan(&key, &first, done(None)), "旧的那次的结果不要");
+        assert!(matches!(disk.scans[&key], Scan::Running { .. }));
+        assert!(disk.finish_scan(&key, &second, done(None)));
+        assert!(matches!(disk.scans[&key], Scan::Done { .. }));
+
+        // 补扫一样：停下以后回来的结果不接到树上
+        let deeper = progress();
+        disk.scans.insert(key.clone(), done(Some(deeper.clone())));
+        disk.stop_all();
+        let sub = disk_usage::parse_du("1\t/a/b/c/d/e/f\n2\t/a/b/c/d/e\n", "/a/b/c/d/e", 0, 4);
+        assert!(!disk.finish_deeper(&key, &deeper, Ok(sub.clone())));
+        let again = progress();
+        let Some(Scan::Done { deeper: slot, .. }) = disk.scans.get_mut(&key) else { unreachable!() };
+        *slot = Some(("/a/b/c/d/e".into(), Instant::now(), again.clone()));
+        assert!(disk.finish_deeper(&key, &again, Ok(sub)));
+        let Some(Scan::Done { tree, deeper, .. }) = disk.scans.get(&key) else { unreachable!() };
+        assert!(deeper.is_none() && tree.size("/a/b/c/d/e/f").is_some());
     }
 
     /// 在深处点了「重新扫描」：新树只有前 4 层，退到树上最深的祖先，不退出分区。

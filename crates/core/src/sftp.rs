@@ -234,12 +234,21 @@ async fn wait_for_sftp_ready(
 
 /// 以文件管理当前身份跑一条命令（删除 / chmod / chown）：终端切换过用户就经 su / sudo 以他身份执行。
 pub(crate) async fn exec_as_file_user(session: &SshSession, cmd: &str) -> AppResult<(u32, String, String)> {
+    exec_as_file_user_watching(session, cmd, &mut |_| {}).await
+}
+
+/// 同 [`exec_as_file_user`]，stdout 边到边交给 `on_stdout`（见 [`exec_capture_watching`]）。
+pub(crate) async fn exec_as_file_user_watching(
+    session: &SshSession,
+    cmd: &str,
+    on_stdout: &mut (dyn FnMut(&[u8]) + Send),
+) -> AppResult<(u32, String, String)> {
     let elevation = session.elevation.lock().await.clone();
     let channel = open_exec_channel(session).await?;
-    let Some(e) = elevation else { return exec_capture(channel, cmd, None).await };
+    let Some(e) = elevation else { return exec_capture_watching(channel, cmd, None, on_stdout).await };
     let input = e.password.as_ref().map(|p| format!("{p}\n"));
     let wrapped = terminal_user::run_as_command(&e.user, e.via, e.password.is_some(), cmd);
-    let (status, out, err) = exec_capture(channel, &wrapped, input.as_deref().map(str::as_bytes)).await?;
+    let (status, out, err) = exec_capture_watching(channel, &wrapped, input.as_deref().map(str::as_bytes), on_stdout).await?;
     Ok((status, terminal_user::clean_auth_noise(&out), terminal_user::clean_auth_noise(&err)))
 }
 
@@ -1682,9 +1691,19 @@ fn sudo_failure(stderr: &str) -> &'static str {
 
 /// 跑一条命令：可选写入 stdin（写完即 EOF），收集退出码和 stdout/stderr。
 pub(crate) async fn exec_capture(
+    channel: russh::Channel<russh::client::Msg>,
+    cmd: &str,
+    stdin: Option<&[u8]>,
+) -> AppResult<(u32, String, String)> {
+    exec_capture_watching(channel, cmd, stdin, &mut |_| {}).await
+}
+
+/// 同 [`exec_capture`]，stdout 每到一块就先交给 `on_stdout`：长命令要边跑边看（磁盘扫描先拿到 du 的进程号，好中途停下）。
+pub(crate) async fn exec_capture_watching(
     mut channel: russh::Channel<russh::client::Msg>,
     cmd: &str,
     stdin: Option<&[u8]>,
+    on_stdout: &mut (dyn FnMut(&[u8]) + Send),
 ) -> AppResult<(u32, String, String)> {
     channel.exec(true, cmd.as_bytes()).await
         .map_err(|e| AppError::Ssh(format!("exec: {e}")))?;
@@ -1697,7 +1716,10 @@ pub(crate) async fn exec_capture(
     let (mut out, mut err, mut status) = (Vec::new(), Vec::new(), None);
     while let Some(msg) = channel.wait().await {
         match msg {
-            russh::ChannelMsg::Data { data } => out.extend_from_slice(&data),
+            russh::ChannelMsg::Data { data } => {
+                on_stdout(&data);
+                out.extend_from_slice(&data);
+            }
             russh::ChannelMsg::ExtendedData { data, .. } => err.extend_from_slice(&data),
             russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
             russh::ChannelMsg::Close => break,

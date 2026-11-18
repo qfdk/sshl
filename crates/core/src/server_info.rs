@@ -368,6 +368,55 @@ pub(crate) async fn run(state: &AppState, machine: &Machine, command: &str) -> A
     Ok(out)
 }
 
+/// 同 [`exec`]，stdout 边到边交给 `on_stdout`（长命令要边跑边看：磁盘扫描先拿到 du 的进程号，好中途停下）。
+pub(crate) async fn exec_watching(
+    state: &AppState,
+    machine: &Machine,
+    command: &str,
+    on_stdout: &mut (dyn FnMut(&[u8]) + Send),
+) -> AppResult<(u32, String, String)> {
+    match machine {
+        Machine::Remote(session_id) => {
+            let session = state.get(session_id).await.ok_or_else(|| AppError::SessionNotFound(session_id.clone()))?;
+            crate::sftp::exec_as_file_user_watching(&session, command, on_stdout).await
+        }
+        Machine::Local => {
+            use tokio::io::AsyncReadExt;
+            let mut child = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+            let (mut stdout, mut stderr) = (child.stdout.take(), child.stderr.take());
+            let read_out = async {
+                let (mut out, mut chunk) = (Vec::new(), [0u8; 16 * 1024]);
+                while let Some(stdout) = stdout.as_mut() {
+                    let n = stdout.read(&mut chunk).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    on_stdout(&chunk[..n]);
+                    out.extend_from_slice(&chunk[..n]);
+                }
+                Ok::<_, std::io::Error>(out)
+            };
+            let read_err = async {
+                let mut err = Vec::new();
+                if let Some(stderr) = stderr.as_mut() {
+                    stderr.read_to_end(&mut err).await?;
+                }
+                Ok::<_, std::io::Error>(err)
+            };
+            let (out, err) = tokio::try_join!(read_out, read_err)?;
+            let status = child.wait().await?.code().map_or(255, |code| code as u32);
+            Ok((status, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
+        }
+    }
+}
+
 /// 跑一条命令，退出码、stdout、stderr 都要（退出码非 0 也照样给输出：du 读不了某些目录时就是这样）。
 /// 远程以文件管理当前身份，本机以 SSHL 自己的身份用 /bin/sh。
 pub(crate) async fn exec(state: &AppState, machine: &Machine, command: &str) -> AppResult<(u32, String, String)> {

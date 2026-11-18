@@ -254,11 +254,18 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   Linux 的集成测试可以用 lima 虚拟机：`limactl start --name=sshl-test template://docker-rootful`，
   `SSHL_SYSTEMD_IT=127.0.0.1:<SSH 端口> SSHL_SYSTEMD_IT_USER=$USER SSHL_SYSTEMD_IT_KEY=~/.lima/_config/user`。
 - **磁盘页**（系统页的「磁盘」标签，`system_panel/disk.rs` + core 的 `disk_usage.rs` / `disk_scan.rs`，用户 2026-11-18 要的「看服务器空间占用」，比自动更新重要）：
-  用途是磁盘快满时找出哪个文件夹、哪个文件占得多。点开就看默认分区（/，没有就用得最多的那个）并开始扫，像 ncdu 按大小往下点；
+  用途是磁盘快满时找出哪个文件夹、哪个文件占得多。点开先看默认分区（/，没有就用得最多的那个），像 ncdu 按大小往下点；
   别的分区在顶上一排按钮切换（带使用率）。不要先列一张分区表（用户：「弄了多种目录就很奇怪」），也不按 lsblk 的物理盘分组（做过又撤了：
   用户要的是占用，不是盘的结构）。每一层子目录（来自扫描）和文件（打开那一层时现列：远程走 SFTP、本机按块算，`disk_usage::files_in`）
   放在一起从大到小（`disk::rows`），最多列 200 个最大的文件、其余合成「其余 N 个文件」，文件还没列出来时用「这一层的文件」总和代替；
-  所有目录都能点进去（没有子目录也有文件）。分区列表来自 `df -kP`（只留块设备、网络盘和 /，去掉 tmpfs、snap 的 loop、/proc /sys /dev /run /etc、
+  所有目录都能点进去（没有子目录也有文件）。
+  **扫描要用户点、离开就停**（用户：「扫描最好是要手动，避免让服务器宕机没资源」「切换界面要停下扫描」「避免出现死循环」）：打开页面、换分区只显示
+  「开始扫描」，不自己扫；扫描中有「停止」；离开这一页（换标签 `set_view`、换到终端 / 文件管理 `set_active(false)`、换会话 `set_machine`、换分区）
+  一律 `stop_scans`。停下 = `ScanProgress::stop`：本机的扫描线程拿下一个目录前收手；远程的扫描命令第一行先报进程号再 `exec` 成 du，
+  `disk_usage::run_stoppable` 叫停后以同一身份 kill（只杀进程名还是 du / nice / ionice / taskpolicy 的，防进程号复用），杀的次数和等它退出的时间都有上限。
+  回来时显示「扫描已停止」，失败了也只给按钮，不自己重来；停下的扫描晚回来的结果不收（`DiskState::finish_scan` / `finish_deeper` 比对是不是还在跑的那一次）。
+  点进第 4 层往下的目录时补扫那一个（点进去就是要看），一次只补扫一个，离开那个目录就停；重新扫描后退到的那层要补扫也等用户点「扫描这个目录」。
+  实测（lima 虚拟机，冷缓存 du 3.4s）：开始扫描 0.6s 后切走 / 点停止 / 换会话，du 都在 0.67s 时没了。分区列表来自 `df -kP`（只留块设备、网络盘和 /，去掉 tmpfs、snap 的 loop、/proc /sys /dev /run /etc、
   macOS 上 nobrowse 的卷和只读系统卷 /；同一设备挂了几处只留路径最短的）。
   用户要「速度快、别因为太大卡顿」：远程 `du -xk` 只列 4 层（`SCAN_DEPTH`；GNU 老版本只认 `--max-depth`，
   BusyBox / macOS 只认 `-d`，拿 /dev/null 试），du 照样走完整棵树（总数准），输出几万行以内；第 4 层的目录记成「边上的」（`frontier`），
