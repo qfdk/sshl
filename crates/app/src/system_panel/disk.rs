@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use gpui::{Animation, AnimationExt, Transformation, container_query, percentage, svg};
+use gpui::{Animation, AnimationExt, Font, TextRun, Transformation, container_query, percentage, svg};
 use sshl_core::disk_usage::{self, DiskEntry, DiskTree, Filesystem, ScanProgress};
 
 use super::treemap::{self, Item};
@@ -857,13 +857,13 @@ impl SystemPanel {
             .flex_col()
             .child(div().flex_shrink_0().px_4().pb_2().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(note))
             .child(div().flex_1().min_h_0().relative().child(
-                container_query(move |size, _, cx| panel.update(cx, |this, cx| this.render_listing(size, cx))).absolute().top_0().left_0(),
+                container_query(move |size, window, cx| panel.update(cx, |this, cx| this.render_listing(size, window, cx))).absolute().top_0().left_0(),
             ))
             .into_any_element()
     }
 
     /// 列表（宽时右边再加矩形树图）。`size` 是这块地方实际有多大。
-    fn render_listing(&mut self, size: gpui::Size<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_listing(&mut self, size: gpui::Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some((rows, _)) = self.listing(cx) else { return empty_message(tr!("正在读取…")) };
         let (width, height) = (f32::from(size.width), f32::from(size.height));
         let split = width >= SPLIT_MIN_WIDTH && !rows.is_empty();
@@ -893,13 +893,13 @@ impl SystemPanel {
             .size_full()
             .flex()
             .child(list)
-            .child(div().pl(px(MAP_INSET)).child(self.render_treemap(&rows, map, cx)))
+            .child(div().pl(px(MAP_INSET)).child(self.render_treemap(&rows, map, window, cx)))
             .into_any_element()
     }
 
     /// 矩形树图：这一层每一项一块，面积就是占用（排法见 `treemap`）。目录蓝、文件紫、合起来的灰；块越大颜色越深。
-    /// 点目录那块进去，右键同列表；鼠标停着时列表里那一行跟着亮。放不下字的小块悬停看名字和大小。
-    fn render_treemap(&mut self, rows: &[Row], bounds: treemap::Rect, cx: &mut Context<Self>) -> Div {
+    /// 点目录那块进去，右键同列表；鼠标停着时列表里那一行跟着亮。字整段写得下才写（`treemap::label`），写不下的悬停看名字和大小。
+    fn render_treemap(&mut self, rows: &[Row], bounds: treemap::Rect, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let Some(machine) = self.machine.clone() else { return div() };
         let folder = self.disk.at.get(&machine).map(|(_, path)| path.clone()).unwrap_or_default();
         let remote = matches!(machine, Machine::Remote(_));
@@ -918,6 +918,13 @@ impl SystemPanel {
         let (tint_low, tint_high) = TILE_TINT[dark];
         // 比缝还窄的块看不见也点不中：不画（画出来的话内边距、边框会把它撑出边界）
         let visible = |rect: &treemap::Rect| rect.w - TILE_GAP >= 2. && rect.h - TILE_GAP >= 2.;
+        // 量字用的字体：同画出来的（继承的界面字体，名字加粗一档，大小用等宽数字）
+        let style = window.text_style();
+        let name_font = Font { weight: FontWeight::MEDIUM, ..style.font() };
+        let size_font = Font { features: TABULAR.clone(), ..style.font() };
+        let run = |text: &str, font: &Font| TextRun { len: text.len(), font: font.clone(), color: style.color, background_color: None, underline: None, strikethrough: None };
+        let text_system = window.text_system();
+        let width = |text: &str, font: &Font, font_size: f32| f32::from(text_system.shape_line(text.to_string().into(), px(font_size), &[run(text, font)], None).width);
         let tiles = items.into_iter().zip(rects).enumerate().filter(|(_, (_, rect))| visible(rect)).map(|(n, ((item, size), rect))| {
             let row = match item {
                 Item::Row(ix) => rows.get(ix),
@@ -940,7 +947,10 @@ impl SystemPanel {
                 None => theme::alpha(ui::FOREGROUND, REST_TINT[dark] + if lit { 0.05 } else { 0. }),
             };
             let (w, h) = (rect.w - TILE_GAP, rect.h - TILE_GAP);
-            let tip: SharedString = format!("{name} · {} · {}", format_bytes(size), share(size, total)).into();
+            let size_text = format_bytes(size);
+            let lines = treemap::wrap_name(&name, treemap::text_width(w), |text| width(text, &name_font, treemap::NAME_FONT));
+            let label = treemap::label(w, h, icon.is_some(), width(&name, &name_font, treemap::NAME_FONT), lines.len(), width(&size_text, &size_font, treemap::SIZE_FONT));
+            let tip: SharedString = format!("{name} · {size_text} · {}", share(size, total)).into();
             let hover = match item {
                 Item::Row(ix) => Hover::Row(ix),
                 Item::Rest { .. } => Hover::Rest,
@@ -961,8 +971,8 @@ impl SystemPanel {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(2.))
-                .when(w >= 48., |d| d.px(px(6.)))
+                .gap(px(treemap::LINE_GAP))
+                .when(label.lines > 0, |d| d.px(px(treemap::PAD)))
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     if *hovered {
                         this.disk.hovered = Some(hover);
@@ -972,24 +982,43 @@ impl SystemPanel {
                     cx.notify();
                 }))
                 .tooltip(move |window, cx| kit::tooltip(tip.clone(), window, cx))
-                // 放得下才写字：名字一行，再高一点加上大小
-                .when(w >= 48. && h >= 22., |d| {
+                // 名字：一行（前面可能带图标），或者在断点折好的几行，每行都不再换行
+                .when(label.lines > 0, |d| {
+                    let name_color = color.is_none().then(|| theme::color(ui::MUTED_FOREGROUND));
+                    let text = |line: String| {
+                        div()
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_size(px(treemap::NAME_FONT))
+                            .line_height(px(treemap::NAME_LINE))
+                            .font_weight(FontWeight::MEDIUM)
+                            .when_some(name_color, |d, color| d.text_color(color))
+                            .child(line)
+                    };
+                    if label.lines > 1 {
+                        return d.child(div().flex().flex_col().items_center().children(lines.into_iter().map(text)));
+                    }
                     d.child(
                         div()
-                            .max_w_full()
                             .flex()
                             .items_center()
-                            .gap(px(5.))
-                            .text_size(px(12.))
-                            .when(color.is_none(), |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
-                            .when_some(icon.filter(|_| w >= 80.), |d, icon| {
-                                d.child(div().flex_shrink_0().text_color(theme::color(readable(color.unwrap_or(ui::MUTED_FOREGROUND)))).child(kit::icon_sized(icon, 12.)))
+                            .gap(px(treemap::ICON_GAP))
+                            .when_some(icon.filter(|_| label.icon), |d, icon| {
+                                d.child(div().flex_shrink_0().text_color(theme::color(readable(color.unwrap_or(ui::MUTED_FOREGROUND)))).child(kit::icon_sized(icon, treemap::ICON)))
                             })
-                            .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone())),
+                            .child(text(name.clone())),
                     )
                 })
-                .when(w >= 48. && h >= 40., |d| {
-                    d.child(div().text_size(px(11.)).font_features(TABULAR.clone()).text_color(theme::color(ui::MUTED_FOREGROUND)).child(format_bytes(size)))
+                .when(label.size, |d| {
+                    d.child(
+                        div()
+                            .text_size(px(treemap::SIZE_FONT))
+                            .line_height(px(treemap::SIZE_LINE))
+                            .whitespace_nowrap()
+                            .font_features(TABULAR.clone())
+                            .text_color(theme::color(ui::MUTED_FOREGROUND))
+                            .child(size_text),
+                    )
                 });
             let tile = match row {
                 Some(Row::Dir(entry)) => {
