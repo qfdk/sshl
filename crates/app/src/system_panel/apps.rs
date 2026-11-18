@@ -13,13 +13,16 @@ use sshl_core::server_info::ProcessInfo;
 use super::{SortKey, process_name};
 use crate::app_icons;
 
-/// 一个应用的所有进程。
+/// 一个应用（本机）或者一棵同名的进程树（远程）的所有进程。
 #[derive(Debug)]
 pub struct AppGroup<'a> {
-    /// 应用路径（`/Applications/Google Chrome.app`）。
-    pub bundle: String,
+    /// 展开记在哪个键上：本机是应用路径（`/Applications/Google Chrome.app`，也是取图标的键），远程是 `pid:<主进程>`。
+    pub key: String,
+    /// 本机的应用（用应用图标）；远程的进程树是 false（按进程名认标志，见 `brands`）。
+    pub app: bool,
     pub name: String,
-    /// 主进程：程序直接在 `Contents/MacOS` 下的（不是 Frameworks 里的 Helper）；没有就 PID 最小的。PID 列显示它，结束也是结束它（退出应用）。
+    /// 主进程。本机：程序直接在 `Contents/MacOS` 下的（不是 Frameworks 里的 Helper），没有就 PID 最小的；远程：树最上面那个。
+    /// PID 列显示它，结束也是结束它（退出应用 / 停掉 nginx 的 master，worker 跟着退）。
     pub main: &'a ProcessInfo,
     /// 全部进程，按当前的排序排好。
     pub members: Vec<&'a ProcessInfo>,
@@ -113,7 +116,6 @@ pub fn list<'a>(
     names: &HashMap<String, String>,
     responsible: &HashMap<u32, u32>,
 ) -> Vec<Listed<'a>> {
-    let query = query.trim().to_lowercase();
     let own: HashMap<u32, String> = processes.iter().filter_map(|p| Some((p.pid, app_icons::icon_key(p.program.as_deref(), &p.command)?))).collect();
     let mut singles = Vec::new();
     let mut apps: HashMap<String, Vec<&ProcessInfo>> = HashMap::new();
@@ -124,29 +126,71 @@ pub fn list<'a>(
             None => singles.push(process),
         }
     }
+    let groups = apps
+        .into_iter()
+        .filter_map(|(bundle, members)| {
+            let name = names.get(&bundle).cloned().unwrap_or_else(|| fallback_name(&bundle).to_string());
+            let main = members.iter().copied().min_by_key(|p| (!is_main(&bundle, p), p.pid))?;
+            Some(Draft { key: bundle, name, main, members, app: true })
+        })
+        .collect();
+    assemble(singles, groups, query, sort, expanded)
+}
+
+/// 远程服务器（Linux 没有 .app）的列表：按进程树合，一个进程和它下面同名的子孙合成一行——nginx 的 master 和 worker、
+/// postgres 和它的后台进程、php-fpm 和进程池、sshd 和登录会话。主进程是最上面那个同名的（PID 列、「结束」都是它）。
+/// 只有一个进程的照旧单独一行。展开用的键是 `pid:<主进程>`。
+pub fn tree<'a>(processes: &'a [ProcessInfo], query: &str, sort: (SortKey, bool), expanded: &HashSet<String>) -> Vec<Listed<'a>> {
+    let by_pid: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();
+    let name = |p: &ProcessInfo| process_name(&p.command, p.program.as_deref());
+    let mut trees: HashMap<u32, Vec<&ProcessInfo>> = HashMap::new();
+    for process in processes {
+        // 往上找：父进程同名就并进去（层数有上限，ps 读到一半进程换了父亲也不会转圈）
+        let own = name(process);
+        let mut top = process;
+        for _ in 0..processes.len() {
+            match by_pid.get(&top.ppid) {
+                Some(parent) if parent.pid != top.pid && name(parent) == own => top = parent,
+                _ => break,
+            }
+        }
+        trees.entry(top.pid).or_default().push(process);
+    }
+    let mut singles = Vec::new();
+    let mut groups = Vec::new();
+    for (top, members) in trees {
+        match (members.len(), by_pid.get(&top)) {
+            (2.., Some(main)) => groups.push(Draft { key: format!("pid:{top}"), name: name(main), main, members, app: false }),
+            _ => singles.extend(members),
+        }
+    }
+    assemble(singles, groups, query, sort, expanded)
+}
+
+/// 合起来之前的一组。
+struct Draft<'a> {
+    key: String,
+    name: String,
+    main: &'a ProcessInfo,
+    members: Vec<&'a ProcessInfo>,
+    app: bool,
+}
+
+/// 单个的进程和合起来的组 → 列表：搜索（组的名字或者里面任何一个进程对得上就留下整组）、排序（组按合计比），展开的组后面跟着它的进程。
+fn assemble<'a>(singles: Vec<&'a ProcessInfo>, groups: Vec<Draft<'a>>, query: &str, sort: (SortKey, bool), expanded: &HashSet<String>) -> Vec<Listed<'a>> {
+    let query = query.trim().to_lowercase();
     // (排序用的名字, 这一行)
     let mut rows: Vec<(String, Listed)> =
         singles.into_iter().filter(|p| matches(p, &query)).map(|p| (process_name(&p.command, p.program.as_deref()).to_lowercase(), Listed::Process(p))).collect();
-    for (bundle, mut members) in apps {
-        let name = names.get(&bundle).cloned().unwrap_or_else(|| fallback_name(&bundle).to_string());
+    for Draft { key, name, main, mut members, app } in groups {
         if !(name.to_lowercase().contains(&query) || members.iter().any(|p| matches(p, &query))) {
             continue;
         }
         members.sort_by(|a, b| compare(a, b, sort));
-        let main = members.iter().filter(|p| is_main(&bundle, p)).chain(members.iter()).min_by_key(|p| (!is_main(&bundle, p), p.pid)).copied();
-        let Some(main) = main else { continue };
-        let group = AppGroup {
-            cpu: members.iter().map(|p| p.cpu).sum(),
-            rss_kb: members.iter().map(|p| p.rss_kb).sum(),
-            bundle: bundle.clone(),
-            name: name.clone(),
-            main,
-            members,
-        };
-        let open = expanded.contains(&bundle) && group.members.len() > 1;
+        let open = expanded.contains(&key) && members.len() > 1;
+        let group = AppGroup { cpu: members.iter().map(|p| p.cpu).sum(), rss_kb: members.iter().map(|p| p.rss_kb).sum(), key, name: name.clone(), main, members, app };
         rows.push((name.to_lowercase(), Listed::App(group, open)));
     }
-    // 应用按合计比，单个进程按它自己
     let key = |row: &Listed| -> (u32, String, f32, u64) {
         match row {
             Listed::App(group, _) => (group.main.pid, group.main.user.clone(), group.cpu, group.rss_kb),
@@ -184,7 +228,7 @@ mod tests {
     fn p(pid: u32, user: &str, cpu: f32, rss_kb: u64, program: &str, args: &str) -> ProcessInfo {
         let command = if args.is_empty() { program.to_string() } else { format!("{program} {args}") };
         let program = program.starts_with('/').then(|| program.to_string());
-        ProcessInfo { pid, user: user.into(), cpu, mem: 0., rss_kb, command, program }
+        ProcessInfo { pid, ppid: 1, user: user.into(), cpu, mem: 0., rss_kb, command, program }
     }
 
     const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -267,6 +311,43 @@ mod tests {
         assert_eq!(parent_of(me), Some(std::os::unix::process::parent_id()));
         let table = responsible_pids([me, 1].into_iter());
         assert!(!table.contains_key(&me) && !table.contains_key(&1), "{table:?}");
+    }
+
+    /// 远程按进程树合：nginx 的 master 和 worker、postgres 和它的后台进程、sshd 和登录会话各一行；不同名的子进程（sshd 下面的 bash）单独一行。
+    #[test]
+    fn remote_processes_group_by_parent() {
+        let q = |pid: u32, ppid: u32, user: &str, cpu: f32, rss_kb: u64, command: &str| ProcessInfo {
+            pid,
+            ppid,
+            user: user.into(),
+            cpu,
+            mem: 0.,
+            rss_kb,
+            command: command.into(),
+            program: None,
+        };
+        let processes = vec![
+            q(1, 0, "root", 0., 10_000, "/sbin/init"),
+            q(20, 1, "root", 0., 2_000, "nginx: master process /usr/sbin/nginx"),
+            q(21, 20, "www-data", 3., 3_000, "nginx: worker process"),
+            q(22, 20, "www-data", 1., 3_000, "nginx: worker process"),
+            q(59, 1, "postgres", 0., 30_000, "/usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main"),
+            q(60, 59, "postgres", 0.5, 7_000, "postgres: 16/main: checkpointer"),
+            q(100, 1, "root", 0., 7_000, "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"),
+            q(200, 100, "root", 0., 7_000, "sshd: deploy [priv]"),
+            q(201, 200, "deploy", 0., 6_000, "sshd: deploy@pts/0"),
+            q(202, 201, "deploy", 0., 4_000, "-bash"),
+            q(38, 1, "redis", 0.3, 12_000, "/usr/bin/redis-server 127.0.0.1:6379"),
+        ];
+        let rows = tree(&processes, "", (SortKey::Memory, true), &HashSet::new());
+        assert_eq!(names(&rows), ["postgres×2", "sshd×3", "redis-server", "init", "nginx×3", "-bash"]);
+        let Listed::App(nginx, _) = &rows[4] else { panic!() };
+        assert_eq!((nginx.main.pid, nginx.rss_kb, nginx.key.as_str(), nginx.app), (20, 8_000, "pid:20", false), "主进程是 master");
+        assert!((nginx.cpu - 4.).abs() < 0.01);
+
+        let expanded: HashSet<String> = ["pid:20".to_string()].into();
+        let rows = tree(&processes, "worker", (SortKey::Pid, false), &expanded);
+        assert_eq!(names(&rows), ["nginx▾×3", "  20", "  21", "  22"], "搜到 worker 留下整组，展开的跟着每个进程");
     }
 
     /// 主进程不在了（只剩 Helper）就用 PID 最小的。

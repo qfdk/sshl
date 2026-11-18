@@ -247,6 +247,10 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   点一下展开看每个进程。自己不在 .app 里、由 launchd 替应用起的 XPC 服务（Docker 的虚拟机、WebContent）按系统私有的
   `responsibility_get_pid_responsible_for_pid`（dlsym 找，找不到退回只按路径）归到那个应用；终端里敲出来的程序父进程不是 launchd，照旧单独一行
   （不然 claude 算进 SSHL，SSHL 看着占 1 GB）。本机每行只有图标 + 名字，不要路径和参数（用户：「本地理论上不要这么长的路径吧」「这样的参数应该用不着了」），
+  **远程按进程树合**（用户：「远程服务器理论上也可以考虑主进程还有子进程」，`apps::tree`，ps 多取一列 ppid）：一个进程和它下面同名的子孙合成一行——
+  nginx 的 master 和 worker、postgres 和后台进程、php-fpm 和进程池、sshd 和登录会话；主进程是树最上面那个（PID、结束都是它），展开键 `pid:<主进程>`；
+  不同名的子进程（sshd 下的 bash）单独一行。远程照旧显示完整命令行。SSHL 自己取数据的命令（带 ` @@` 分隔标记的 sh -c 和里面的 `ps -eo pid=…`）
+  在 core 解析时就去掉（`server_info::is_own_probe`），本机、远程都不列。
   完整命令行在右键「复制命令」里。图标（`app_icons.rs`）：应用用系统给的图标（NSWorkspace，后台线程画成 2 倍像素的 PNG，22pt——16、20 用户都嫌小），
   Info.plist 没声明图标 / 声明的文件不在的（identityservicesd、WindowManager）系统给的是灰格子占位图，不用；不在 .app 里的画淡色线条图标：
   系统目录下的程序或 root / `_` 账号跑的是齿轮，别的是终端。不用系统的通用可执行文件图标（小尺寸下是一排黑方块）。

@@ -182,13 +182,14 @@ struct ProcessRow {
 
 impl ProcessRow {
     /// 远程：程序名后面跟完整命令行（命令行就只是程序名时不重复）。服务器上没有应用图标，认得出的软件画标志（`brands`）。
-    fn remote(p: &ProcessInfo, me: Option<&str>) -> Self {
+    /// 展开的进程树里的进程不画图标（缩进对齐）。
+    fn remote(p: &ProcessInfo, me: Option<&str>, member: bool) -> Self {
         let name = process_name(&p.command, p.program.as_deref());
         let detail = (p.command != name).then(|| p.command.clone());
         let kernel = p.command.starts_with('[');
         let program = p.program.as_deref().unwrap_or_else(|| p.command.split(' ').next().unwrap_or(""));
-        let icon = Some(process_icon(&name, program, &p.user, me, kernel));
-        Self { pid: p.pid, user: p.user.clone(), cpu: p.cpu, rss_kb: p.rss_kb, name, detail, command: p.command.clone(), icon, app: None, member: false, kernel }
+        let icon = (!member).then(|| process_icon(&name, program, &p.user, me, kernel));
+        Self { pid: p.pid, user: p.user.clone(), cpu: p.cpu, rss_kb: p.rss_kb, name, detail, command: p.command.clone(), icon, app: None, member, kernel }
     }
 
     /// 本机的单个进程：只有名字。用户：「本地理论上不要这么长的路径吧」「这样的参数应该用不着了」。
@@ -213,10 +214,17 @@ impl ProcessRow {
         }
     }
 
-    /// 一个应用：主进程的 PID 和用户，CPU、内存加起来；有几个进程时后面写几个。
-    fn app(group: AppGroup, open: bool) -> Self {
+    /// 一个应用（本机）或一棵进程树（远程）：主进程的 PID 和用户，CPU、内存加起来；有几个进程时后面写几个。
+    /// 本机的应用用应用图标，远程的按进程名认标志。
+    fn app(group: AppGroup, open: bool, me: Option<&str>) -> Self {
         let count = group.members.len();
         let detail = (count > 1).then(|| tr!("{} 个进程", count));
+        let icon = if group.app {
+            RowIcon::App(group.key.clone())
+        } else {
+            let program = group.main.program.as_deref().unwrap_or_else(|| group.main.command.split(' ').next().unwrap_or(""));
+            process_icon(&group.name, program, &group.main.user, me, false)
+        };
         Self {
             pid: group.main.pid,
             user: group.main.user.clone(),
@@ -225,8 +233,8 @@ impl ProcessRow {
             name: group.name,
             detail,
             command: group.main.command.clone(),
-            icon: Some(RowIcon::App(group.bundle.clone())),
-            app: Some((group.bundle, count, open)),
+            icon: Some(icon),
+            app: Some((group.key, count, open)),
             member: false,
             kernel: false,
         }
@@ -333,35 +341,6 @@ pub fn views_for(machine: Option<&Machine>) -> &'static [View] {
 /// 换到另一台机器时还停在原来的列表；那台没有这个列表（本机没有服务）就回到进程。
 pub fn view_on(machine: Option<&Machine>, view: View) -> View {
     if views_for(machine).contains(&view) { view } else { View::Processes }
-}
-
-/// 搜索：PID、用户、命令里含关键字（不分大小写）。
-pub fn filter_processes<'a>(processes: &'a [ProcessInfo], query: &str, sort: (SortKey, bool)) -> Vec<&'a ProcessInfo> {
-    let query = query.trim().to_lowercase();
-    let mut out: Vec<&ProcessInfo> = processes
-        .iter()
-        .filter(|p| query.is_empty() || p.pid.to_string().contains(&query) || p.user.to_lowercase().contains(&query) || p.command.to_lowercase().contains(&query))
-        .collect();
-    if sort.0 == SortKey::Name {
-        // 名字要从命令行切出来：每个进程只切一次
-        let mut named: Vec<(String, &ProcessInfo)> = out.into_iter().map(|p| (process_name(&p.command, p.program.as_deref()).to_lowercase(), p)).collect();
-        named.sort_by(|(a_name, a), (b_name, b)| {
-            let order = a_name.cmp(b_name).then_with(|| a.command.cmp(&b.command));
-            if sort.1 { order.reverse() } else { order }
-        });
-        return named.into_iter().map(|(_, p)| p).collect();
-    }
-    out.sort_by(|a, b| {
-        let order = match sort.0 {
-            SortKey::Pid => a.pid.cmp(&b.pid),
-            SortKey::User => a.user.cmp(&b.user),
-            SortKey::Cpu => a.cpu.total_cmp(&b.cpu).then(a.rss_kb.cmp(&b.rss_kb)),
-            SortKey::Memory => a.rss_kb.cmp(&b.rss_kb),
-            SortKey::Name => std::cmp::Ordering::Equal,
-        };
-        if sort.1 { order.reverse() } else { order }
-    });
-    out
 }
 
 /// 搜索：端口号、进程名、PID、地址里含关键字。
@@ -1076,19 +1055,26 @@ impl SystemPanel {
             .into_any_element()
     }
 
-    /// 进程列表的行：本机按应用合起来（`apps::list`），远程一个进程一行。
+    /// 进程列表的行：本机按应用合起来（`apps::list`），远程按进程树合（`apps::tree`：nginx 的 master 和 worker 一行）。
     fn process_rows(&self, query: &str) -> Vec<ProcessRow> {
         let processes = self.processes.as_deref().unwrap_or(&[]);
         let me = self.me.as_deref();
         if self.machine != Some(Machine::Local) {
-            return filter_processes(processes, query, self.sort).into_iter().map(|p| ProcessRow::remote(p, me)).collect();
+            return apps::tree(processes, query, self.sort, &self.expanded_apps)
+                .into_iter()
+                .map(|row| match row {
+                    Listed::Process(p) => ProcessRow::remote(p, me, false),
+                    Listed::Member(p) => ProcessRow::remote(p, me, true),
+                    Listed::App(group, open) => ProcessRow::app(group, open, me),
+                })
+                .collect();
         }
         apps::list(processes, query, self.sort, &self.expanded_apps, &self.app_names, &self.responsible)
             .into_iter()
             .map(|row| match row {
                 Listed::Process(p) => ProcessRow::local(p, me, false),
                 Listed::Member(p) => ProcessRow::local(p, me, true),
-                Listed::App(group, open) => ProcessRow::app(group, open),
+                Listed::App(group, open) => ProcessRow::app(group, open, me),
             })
             .collect()
     }
@@ -1808,7 +1794,7 @@ mod tests {
     use super::*;
 
     fn p(pid: u32, user: &str, cpu: f32, rss_kb: u64, command: &str) -> ProcessInfo {
-        ProcessInfo { pid, user: user.into(), cpu, mem: 0., rss_kb, command: command.into(), program: None }
+        ProcessInfo { pid, ppid: 1, user: user.into(), cpu, mem: 0., rss_kb, command: command.into(), program: None }
     }
 
     #[test]
@@ -1822,16 +1808,26 @@ mod tests {
         assert_eq!(format_uptime(12 * 86400 + 5 * 3600), "12 天 5 小时");
     }
 
+    /// 远程的列表（`apps::tree`）里各自单独的进程：PID 顺序。
+    fn listed(procs: &[ProcessInfo], query: &str, sort: (SortKey, bool)) -> Vec<u32> {
+        apps::tree(procs, query, sort, &Default::default())
+            .iter()
+            .map(|row| match row {
+                Listed::Process(p) | Listed::Member(p) => p.pid,
+                Listed::App(group, _) => group.main.pid,
+            })
+            .collect()
+    }
+
     #[test]
     fn searches_and_sorts_processes() {
         let procs = vec![p(10, "root", 1.0, 500, "/usr/sbin/sshd -D"), p(20, "www-data", 30.0, 9000, "nginx: worker process"), p(30, "mysql", 5.0, 90000, "/usr/sbin/mysqld")];
-        let pids = |v: Vec<&ProcessInfo>| v.iter().map(|p| p.pid).collect::<Vec<_>>();
-        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Cpu, true))), [20, 30, 10]);
-        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Memory, true))), [30, 20, 10]);
-        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Pid, false))), [10, 20, 30]);
-        assert_eq!(pids(filter_processes(&procs, "NGINX", (SortKey::Cpu, true))), [20]);
-        assert_eq!(pids(filter_processes(&procs, "mysql", (SortKey::Cpu, true))), [30], "按用户或命令都能搜");
-        assert_eq!(pids(filter_processes(&procs, "10", (SortKey::Cpu, true))), [10]);
+        assert_eq!(listed(&procs, "", (SortKey::Cpu, true)), [20, 30, 10]);
+        assert_eq!(listed(&procs, "", (SortKey::Memory, true)), [30, 20, 10]);
+        assert_eq!(listed(&procs, "", (SortKey::Pid, false)), [10, 20, 30]);
+        assert_eq!(listed(&procs, "NGINX", (SortKey::Cpu, true)), [20]);
+        assert_eq!(listed(&procs, "mysql", (SortKey::Cpu, true)), [30], "按用户或命令都能搜");
+        assert_eq!(listed(&procs, "10", (SortKey::Cpu, true)), [10]);
     }
 
     /// 「进程」那一列显示的是进程名，按它排也按名字排（不分大小写），不按路径：/usr/sbin/sshd 不该排在 nginx 前面。
@@ -1843,9 +1839,8 @@ mod tests {
             p(3, "qfdk", 0., 0, "/Applications/Adguard.app/Contents/MacOS/Adguard"),
             p(4, "qfdk", 0., 0, "./sshl-dev"),
         ];
-        let pids = |v: Vec<&ProcessInfo>| v.iter().map(|p| p.pid).collect::<Vec<_>>();
-        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Name, false))), [3, 2, 1, 4]);
-        assert_eq!(pids(filter_processes(&procs, "", (SortKey::Name, true))), [4, 1, 2, 3]);
+        assert_eq!(listed(&procs, "", (SortKey::Name, false)), [3, 2, 1, 4]);
+        assert_eq!(listed(&procs, "", (SortKey::Name, true)), [4, 1, 2, 3]);
     }
 
     #[test]

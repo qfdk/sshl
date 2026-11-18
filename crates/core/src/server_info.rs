@@ -20,6 +20,8 @@ pub enum Machine {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessInfo {
     pub pid: u32,
+    /// 父进程（界面把 nginx 的 master 和 worker、postgres 和它的后台进程这样的父子合成一行）。
+    pub ppid: u32,
     pub user: String,
     pub cpu: f32,
     pub mem: f32,
@@ -58,7 +60,7 @@ pub struct Overview {
 /// 全部进程。args 放最后：命令行里有空格。后面附每个进程的 comm（macOS 上是程序的完整路径，用来切出带空格的程序名），
 /// 读不到 comm 不算失败。
 pub const PROCESSES_COMMAND: &str =
-    "sh -c 'LC_ALL=C ps -eo pid=,user=,pcpu=,pmem=,rss=,args= && { echo @@comm; LC_ALL=C ps -eo pid=,comm= 2>/dev/null; true; }'";
+    "sh -c 'LC_ALL=C ps -eo pid=,ppid=,user=,pcpu=,pmem=,rss=,args= && { echo @@comm; LC_ALL=C ps -eo pid=,comm= 2>/dev/null; true; }'";
 
 pub fn parse_processes(out: &str) -> Vec<ProcessInfo> {
     let (list, comm) = out.split_once("\n@@comm\n").unwrap_or((out, ""));
@@ -67,6 +69,7 @@ pub fn parse_processes(out: &str) -> Vec<ProcessInfo> {
         .filter_map(|line| {
             let mut it = line.split_whitespace();
             let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
             let user = it.next()?.to_string();
             let cpu = it.next()?.parse().ok()?;
             let mem = it.next()?.parse().ok()?;
@@ -76,9 +79,15 @@ pub fn parse_processes(out: &str) -> Vec<ProcessInfo> {
                 .get(&pid)
                 .filter(|program| command.strip_prefix(program.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')))
                 .cloned();
-            Some(ProcessInfo { pid, user, cpu, mem, rss_kb, command, program })
+            Some(ProcessInfo { pid, ppid, user, cpu, mem, rss_kb, command, program })
         })
+        .filter(|process| !is_own_probe(&process.command))
         .collect()
+}
+
+/// SSHL 自己取数据跑的命令：几条命令都用 `@@xxx` 分隔各段输出（sh -c 那一层的命令行里带着），加上里面实际干活的 ps。
+fn is_own_probe(command: &str) -> bool {
+    command.contains(" @@") || command.starts_with("ps -eo pid=")
 }
 
 /// 监听端口：有 ss 用 ss，没有用 netstat（Linux 的 -p）；macOS 的 netstat -anvl 带 `进程名:pid`（不是 root 也有别人的，
@@ -470,15 +479,29 @@ fn local_pid(pid: u32) -> Option<libc::pid_t> {
 mod tests {
     use super::*;
 
+    /// SSHL 自己取数据跑的命令（带 `@@` 分隔标记的 sh -c、里面的 ps）不列：每 3 秒一批，列出来只是噪音。
+    #[test]
+    fn our_own_probes_are_left_out() {
+        let out = "\
+ 4517  4516 deploy    0.0  0.0   1500 sh -c LC_ALL=C ps -eo pid=,ppid=,user=,pcpu=,pmem=,rss=,args= && { echo @@comm; LC_ALL=C ps -eo pid=,comm= 2>/dev/null; true; }\n\
+ 4518  4516 deploy    0.0  0.0   1600 sh -c echo @@load; cat /proc/loadavg 2>/dev/null\n\
+ 4519  4517 deploy    0.0  0.0   3500 ps -eo pid=,ppid=,user=,pcpu=,pmem=,rss=,args=\n\
+ 4497  4496 deploy    0.0  0.0   3800 -bash\n\
+   20    19 www-data  0.0  0.0   2900 nginx: worker process\n";
+        let procs = parse_processes(out);
+        assert_eq!(procs.iter().map(|p| p.pid).collect::<Vec<_>>(), [4497, 20]);
+    }
+
     #[test]
     fn parses_gnu_and_bsd_ps() {
-        let out = "    1 root      0.0  0.1  11236 /sbin/init splash\n 1234 www-data 12.5  2.3 190000 nginx: worker process\n  363 root               0.0  0.0   2624 /usr/libexec/dprivacyd\nbad line\n";
+        let out = "    1     0 root      0.0  0.1  11236 /sbin/init splash\n 1234  1200 www-data 12.5  2.3 190000 nginx: worker process\n  363     1 root               0.0  0.0   2624 /usr/libexec/dprivacyd\nbad line\n";
         let procs = parse_processes(out);
         assert_eq!(procs.len(), 3);
         assert_eq!(
             procs[1],
-            ProcessInfo { pid: 1234, user: "www-data".into(), cpu: 12.5, mem: 2.3, rss_kb: 190000, command: "nginx: worker process".into(), program: None }
+            ProcessInfo { pid: 1234, ppid: 1200, user: "www-data".into(), cpu: 12.5, mem: 2.3, rss_kb: 190000, command: "nginx: worker process".into(), program: None }
         );
+        assert_eq!((procs[0].ppid, procs[2].ppid), (0, 1), "父进程号（远程按它把 nginx 的 master 和 worker 合起来）");
         assert_eq!(procs[2].command, "/usr/libexec/dprivacyd");
     }
 
@@ -487,11 +510,11 @@ mod tests {
     #[test]
     fn the_program_comes_from_comm_when_the_command_line_starts_with_it() {
         let out = "\
- 3130 qfdk      3.1  0.5 171000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif) --type=gpu-process\n\
- 9140 qfdk      9.3  1.2 391000 claude\n\
- 1234 www-data 12.5  2.3 190000 nginx: worker process\n\
-  700 root      0.0  0.0   1000 /usr/sbin/sshd -D\n\
-   42 root      0.0  0.0      0 [kworker/u4:0-events_unbound]\n\
+ 3130   600 qfdk      3.1  0.5 171000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif) --type=gpu-process\n\
+ 9140  9100 qfdk      9.3  1.2 391000 claude\n\
+ 1234  1200 www-data 12.5  2.3 190000 nginx: worker process\n\
+  700     1 root      0.0  0.0   1000 /usr/sbin/sshd -D\n\
+   42     2 root      0.0  0.0      0 [kworker/u4:0-events_unbound]\n\
 @@comm\n\
  3130 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (Aperitif)\n\
  9140 claude\n\
@@ -505,7 +528,7 @@ mod tests {
         assert_eq!(procs[2].program, None, "nginx 改写了命令行，「nginx」后面不是空格");
         assert_eq!(procs[3].program, None, "Linux 的 comm 只是短名");
         assert_eq!(procs[4].program, None);
-        assert_eq!(parse_processes("    1 root 0.0 0.1 11236 /sbin/init splash\n")[0].program, None, "没有 comm 那段（老输出）照样能读");
+        assert_eq!(parse_processes("    1 0 root 0.0 0.1 11236 /sbin/init splash\n")[0].program, None, "没有 comm 那段（老输出）照样能读");
     }
 
     #[test]
