@@ -17,14 +17,18 @@ const NAMES: &[(&str, Brand)] = &[
     ("postgres", Brand::Postgres),
     ("postmaster", Brand::Postgres),
     ("psql", Brand::Postgres),
+    ("pgbench", Brand::Postgres),
     ("mysqld", Brand::MySql),
     ("mysql", Brand::MySql),
     ("mysqld_safe", Brand::MySql),
+    ("mysqldump", Brand::MySql),
     ("mariadbd", Brand::MariaDb),
     ("mariadb", Brand::MariaDb),
     ("mongod", Brand::MongoDb),
     ("mongos", Brand::MongoDb),
     ("mongosh", Brand::MongoDb),
+    ("mongodump", Brand::MongoDb),
+    ("mongorestore", Brand::MongoDb),
     ("dockerd", Brand::Docker),
     ("docker", Brand::Docker),
     ("docker-proxy", Brand::Docker),
@@ -100,6 +104,8 @@ const PREFIXES: &[(&str, Brand)] = &[
     ("redis-", Brand::Redis),
     ("gitlab-", Brand::GitLab),
     ("php-fpm", Brand::Php),
+    // PostgreSQL 自带的工具：pg_dump、pg_restore、pg_basebackup、pg_ctl
+    ("pg_", Brand::Postgres),
 ];
 
 /// 标志的颜色和卡片底色至少差这么多，不然看不见：深色外观下近黑的（Bun、Tailscale、OpenJDK），浅色外观下浅黄的（Vault、ClickHouse）。
@@ -143,6 +149,9 @@ mod tests {
             ("python3", Some(Brand::Python)),
             ("php-fpm8.2", Some(Brand::Php)),
             ("node_exporter", Some(Brand::Prometheus)),
+            ("pgbench", Some(Brand::Postgres)),
+            ("pg_dump", Some(Brand::Postgres)),
+            ("mysqldump", Some(Brand::MySql)),
             ("PM2", Some(Brand::Pm2)),
             ("AdGuardHome", Some(Brand::AdGuard)),
             ("claude", Some(Brand::Claude)),
