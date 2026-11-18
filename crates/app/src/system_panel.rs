@@ -13,14 +13,15 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels,
     Point, Render, Role, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement, Styled, Task, UniformListScrollHandle,
-    Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder, px, size, uniform_list,
+    Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder, px, size, svg, uniform_list,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use sshl_core::server_info::{self, Machine, Overview, PortInfo, ProcessInfo};
 use sshl_core::services::{self, ServiceAction, ServiceInfo};
 
 use crate::app_icons::{self, ICON_SIZE};
-use crate::assets::Icon;
+use crate::assets::{Brand, Icon};
+use crate::brands;
 use crate::backend;
 use crate::prompts::{self, Options};
 use crate::theme::{self, ui};
@@ -49,6 +50,8 @@ const BOOT_WIDTH: f32 = 96.;
 /// 指标那一段的同色浅底、圆环轨道的不透明度：[浅色, 深色]。
 pub const SEGMENT_TINT: [f32; 2] = [0.06, 0.10];
 const RING_TRACK: [f32; 2] = [0.16, 0.22];
+/// 软件标志画多大：标志铺满自己的方框，应用图标四周有留白，画小一点看着一样大。
+const BRAND_SIZE: f32 = 17.;
 /// CPU 用得多（≥ 5%）的进程那一格的同色浅底：[浅色, 深色]。原来是实心色块 + 白字，用户嫌「颜色过于重」。
 pub const CPU_TINT: [f32; 2] = [0.10, 0.18];
 /// 鼠标停在哪一行，那一行铺一层浅蓝：[浅色, 深色]。
@@ -120,11 +123,13 @@ enum MenuTarget {
     Directory { path: String, folder: String, remote: bool },
 }
 
-/// 本机进程行前面的图标。
+/// 进程行前面的图标。
 enum ProcessIcon {
     /// 所在应用的图标（还没取到时 None，先留位置）。
     App(Option<Arc<gpui::Image>>),
-    /// 不在应用里：淡色线条图标。
+    /// 认得出的服务端软件（nginx、redis…）的标志，品牌色。
+    Brand(Brand),
+    /// 别的：淡色线条图标。
     Glyph(Icon),
 }
 
@@ -137,10 +142,21 @@ enum AppIcon {
     Missing,
 }
 
-/// 一行用哪个图标：应用（路径）的，或者线条图标。
+/// 一行用哪个图标：应用（路径）的、软件的标志，或者线条图标。
 enum RowIcon {
     App(String),
+    Brand(Brand),
     Glyph(Icon),
+}
+
+/// 不在应用里的进程用什么图标：认得出的软件画标志；系统的后台程序（放在系统目录、或者不是登录用户自己跑的）画齿轮，
+/// 别的（自己跑的 shell、脚本）画终端。
+fn process_icon(name: &str, program: &str, user: &str, me: Option<&str>, kernel: bool) -> RowIcon {
+    if let Some(brand) = brands::brand_of(name) {
+        return RowIcon::Brand(brand);
+    }
+    let system = kernel || app_icons::is_system_program(program) || user_kind(user, me) != UserKind::Me;
+    RowIcon::Glyph(if system { Icon::Settings } else { Icon::SquareTerminal })
 }
 
 /// 进程列表要画的一行（从进程 / 应用里取出来，不借着面板）。
@@ -165,21 +181,23 @@ struct ProcessRow {
 }
 
 impl ProcessRow {
-    /// 远程：程序名后面跟完整命令行（命令行就只是程序名时不重复）。
-    fn remote(p: &ProcessInfo) -> Self {
+    /// 远程：程序名后面跟完整命令行（命令行就只是程序名时不重复）。服务器上没有应用图标，认得出的软件画标志（`brands`）。
+    fn remote(p: &ProcessInfo, me: Option<&str>) -> Self {
         let name = process_name(&p.command, p.program.as_deref());
         let detail = (p.command != name).then(|| p.command.clone());
-        Self { pid: p.pid, user: p.user.clone(), cpu: p.cpu, rss_kb: p.rss_kb, name, detail, command: p.command.clone(), icon: None, app: None, member: false, kernel: p.command.starts_with('[') }
+        let kernel = p.command.starts_with('[');
+        let program = p.program.as_deref().unwrap_or_else(|| p.command.split(' ').next().unwrap_or(""));
+        let icon = Some(process_icon(&name, program, &p.user, me, kernel));
+        Self { pid: p.pid, user: p.user.clone(), cpu: p.cpu, rss_kb: p.rss_kb, name, detail, command: p.command.clone(), icon, app: None, member: false, kernel }
     }
 
     /// 本机的单个进程：只有名字。用户：「本地理论上不要这么长的路径吧」「这样的参数应该用不着了」。
     fn local(p: &ProcessInfo, me: Option<&str>, member: bool) -> Self {
         let name = process_name(&p.command, p.program.as_deref());
-        // 展开的应用里的进程不画图标（缩进对齐应用名）。系统的后台程序（放在 /System、/usr/libexec 这些地方，或者以 root、系统账号跑的）
-        // 画齿轮，别的（Homebrew 装的、自己跑的 claude、node）是命令行程序，画终端
+        // 展开的应用里的进程不画图标（缩进对齐应用名）；别的：认得出的软件（claude、node）画标志，系统的后台程序（放在 /System、
+        // /usr/libexec 这些地方，或者以 root、系统账号跑的）画齿轮，剩下的是自己跑的命令行程序，画终端
         let program = p.program.as_deref().unwrap_or_else(|| p.command.split(' ').next().unwrap_or(""));
-        let system = app_icons::is_system_program(program) || matches!(user_kind(&p.user, me), UserKind::Root | UserKind::Service);
-        let icon = (!member).then_some(RowIcon::Glyph(if system { Icon::Settings } else { Icon::SquareTerminal }));
+        let icon = (!member).then(|| process_icon(&name, program, &p.user, me, false));
         Self {
             pid: p.pid,
             user: p.user.clone(),
@@ -1063,7 +1081,7 @@ impl SystemPanel {
         let processes = self.processes.as_deref().unwrap_or(&[]);
         let me = self.me.as_deref();
         if self.machine != Some(Machine::Local) {
-            return filter_processes(processes, query, self.sort).into_iter().map(ProcessRow::remote).collect();
+            return filter_processes(processes, query, self.sort).into_iter().map(|p| ProcessRow::remote(p, me)).collect();
         }
         apps::list(processes, query, self.sort, &self.expanded_apps, &self.app_names, &self.responsible)
             .into_iter()
@@ -1119,6 +1137,7 @@ impl SystemPanel {
                         Some(AppIcon::Missing) => ProcessIcon::Glyph(Icon::Settings),
                         _ => ProcessIcon::App(None),
                     },
+                    RowIcon::Brand(brand) => ProcessIcon::Brand(brand),
                     RowIcon::Glyph(glyph) => ProcessIcon::Glyph(glyph),
                 });
                 line.child(
@@ -1137,6 +1156,12 @@ impl SystemPanel {
                             d.child(match icon {
                                 ProcessIcon::App(Some(image)) => img(image).size(px(ICON_SIZE)).flex_shrink_0().mr(px(-3.)).into_any_element(),
                                 ProcessIcon::App(None) => slot().into_any_element(),
+                                ProcessIcon::Brand(brand) => slot()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(svg().path(brand.path()).size(px(BRAND_SIZE)).text_color(theme::color(brands::color(brand, theme::is_dark()))))
+                                    .into_any_element(),
                                 ProcessIcon::Glyph(glyph) => slot()
                                     .flex()
                                     .items_center()

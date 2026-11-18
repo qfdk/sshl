@@ -16,7 +16,7 @@ crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
   src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）：view.rs 只放状态和整体布局，做法按功能分在 view/ 下
-assets/               内置字体、Lucide 图标（线宽 2.5）、应用图标、Info.plist 模板
+assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件标志（icons/brands，Simple Icons 16.36.0，CC0）、应用图标、Info.plist 模板
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
 scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
 tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
@@ -249,7 +249,11 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   （不然 claude 算进 SSHL，SSHL 看着占 1 GB）。本机每行只有图标 + 名字，不要路径和参数（用户：「本地理论上不要这么长的路径吧」「这样的参数应该用不着了」），
   完整命令行在右键「复制命令」里。图标（`app_icons.rs`）：应用用系统给的图标（NSWorkspace，后台线程画成 2 倍像素的 PNG，22pt——16、20 用户都嫌小），
   Info.plist 没声明图标 / 声明的文件不在的（identityservicesd、WindowManager）系统给的是灰格子占位图，不用；不在 .app 里的画淡色线条图标：
-  系统目录下的程序或 root / `_` 账号跑的是齿轮，别的（Homebrew、claude、node）是终端。不用系统的通用可执行文件图标（小尺寸下是一排黑方块）。
+  系统目录下的程序或 root / `_` 账号跑的是齿轮，别的是终端。不用系统的通用可执行文件图标（小尺寸下是一排黑方块）。
+  远程服务器（用户问「远程的话能不能带出图标来」）没有应用图标：按进程名认出常见的服务端软件（`brands.rs`：nginx、redis、postgres、docker、
+  node、python、php-fpm8.2、`*_exporter`…）画品牌标志（单色 SVG 按品牌色画，和卡片底色对比不到 2:1 的——深色下近黑的 Bun、浅色下浅黄的 Vault——用正文色）；
+  认不出的同本机：系统目录下的、或不是登录用户自己跑的算系统服务（齿轮），其余终端。本机不在 .app 里的命令行程序（claude、node）也用标志。
+  新加一个软件：从 Simple Icons 同一版本下 SVG 放进 `assets/icons/brands/`，`assets.rs` 的 `brands!` 表登记（带品牌色），`brands.rs` 的名字表加一行。
   数字用界面字体的等宽数字（`tnum`），等宽字体只留给命令行和监听地址。「进程」列按进程名排（不按命令行路径；本机的应用按显示名）。
   窄窗口：指标两段一组（每段至少 `SEGMENT_MIN_WIDTH`），放不下一排四段就 2 × 2；进程名先放全，命令行拿剩下的宽度（窄了先缩没）。
   进程名按 ps 的 comm 切（`ProcessInfo::program`）：macOS 的程序路径里常有空格（Chrome / Docker 的 Helper），只按第一个空格切会只剩「Google」。

@@ -3,6 +3,7 @@ extern crate sshl_core;
 
 mod app_icons;
 mod assets;
+mod brands;
 mod backend;
 mod connection_dialog;
 #[cfg(any(debug_assertions, feature = "devhook"))]

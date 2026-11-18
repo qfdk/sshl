@@ -1,4 +1,4 @@
-//! 打进二进制的资源：Lucide 图标（ISC，线宽 2.5）和应用图标。
+//! 打进二进制的资源：Lucide 图标（ISC，线宽 2.5）、服务端软件的标志（Simple Icons，CC0）和应用图标。
 
 use std::borrow::Cow;
 
@@ -70,6 +70,107 @@ icons! {
     Zap => "zap",
 }
 
+/// 服务端软件的标志（Simple Icons 16.36.0，CC0，单色路径 + 品牌标准色）：进程列表认出常见软件时画它（`brands.rs`）。
+macro_rules! brands {
+    ($($variant:ident => $file:literal, $hex:literal, $title:literal),* $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum Brand {
+            $($variant),*
+        }
+
+        impl Brand {
+            #[cfg(test)]
+            pub const ALL: &[Brand] = &[$(Brand::$variant),*];
+
+            pub fn path(self) -> SharedString {
+                match self {
+                    $(Brand::$variant => concat!("brands/", $file, ".svg").into()),*
+                }
+            }
+
+            /// 品牌标准色（0xRRGGBB）。
+            pub fn hex(self) -> u32 {
+                match self {
+                    $(Brand::$variant => $hex),*
+                }
+            }
+
+            #[cfg(test)]
+            pub fn title(self) -> &'static str {
+                match self {
+                    $(Brand::$variant => $title),*
+                }
+            }
+        }
+
+        fn brand_bytes(path: &str) -> Option<&'static [u8]> {
+            match path {
+                $(concat!("brands/", $file, ".svg") => Some(include_bytes!(concat!("../../../assets/icons/brands/", $file, ".svg"))),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+brands! {
+    AdGuard => "adguard", 0x68bc71, "AdGuard",
+    Apache => "apache", 0xd22128, "Apache",
+    Bun => "bun", 0x000000, "Bun",
+    Caddy => "caddy", 0x1f88c0, "Caddy",
+    Claude => "claude", 0xd97757, "Claude",
+    ClickHouse => "clickhouse", 0xffcc01, "ClickHouse",
+    Cloudflare => "cloudflare", 0xf38020, "Cloudflare",
+    Consul => "consul", 0xf24c53, "Consul",
+    Containerd => "containerd", 0x575757, "containerd",
+    Deno => "deno", 0x000000, "Deno",
+    Docker => "docker", 0x2496ed, "Docker",
+    Dovecot => "dovecot", 0x54bcab, "Dovecot",
+    Mosquitto => "eclipsemosquitto", 0x3c5280, "Eclipse Mosquitto",
+    Envoy => "envoyproxy", 0xac6199, "Envoy Proxy",
+    Etcd => "etcd", 0x419eda, "etcd",
+    Gitea => "gitea", 0x609926, "Gitea",
+    GitLab => "gitlab", 0xfc6d26, "GitLab",
+    Grafana => "grafana", 0xf46800, "Grafana",
+    Gunicorn => "gunicorn", 0x499848, "Gunicorn",
+    HaProxy => "haproxy", 0x169bd6, "HAProxy",
+    InfluxDb => "influxdb", 0x22adf6, "InfluxDB",
+    Jellyfin => "jellyfin", 0x00a4dc, "Jellyfin",
+    K3s => "k3s", 0xffc61c, "K3s",
+    Kubernetes => "kubernetes", 0x326ce5, "Kubernetes",
+    MariaDb => "mariadb", 0x003545, "MariaDB",
+    Meilisearch => "meilisearch", 0xff5caa, "Meilisearch",
+    MinIo => "minio", 0xc72e49, "MinIO",
+    MongoDb => "mongodb", 0x47a248, "MongoDB",
+    MySql => "mysql", 0x4479a1, "MySQL",
+    Nats => "natsdotio", 0x27aae1, "NATS.io",
+    Neovim => "neovim", 0x57a143, "Neovim",
+    Nginx => "nginx", 0x009639, "NGINX",
+    Node => "nodedotjs", 0x5fa04e, "Node.js",
+    Nomad => "nomad", 0x00ca8e, "Nomad",
+    Java => "openjdk", 0x000000, "OpenJDK",
+    OpenVpn => "openvpn", 0xea7e20, "OpenVPN",
+    Php => "php", 0x777bb4, "PHP",
+    PiHole => "pihole", 0x96060c, "Pi-hole",
+    Plex => "plex", 0xebaf00, "Plex",
+    Pm2 => "pm2", 0x2b037a, "PM2",
+    Podman => "podman", 0x892ca0, "Podman",
+    Portainer => "portainer", 0x13bef9, "Portainer",
+    Postgres => "postgresql", 0x4169e1, "PostgreSQL",
+    Prometheus => "prometheus", 0xe6522c, "Prometheus",
+    Python => "python", 0x3776ab, "Python",
+    QBittorrent => "qbittorrent", 0x2f67ba, "qbittorrent",
+    Redis => "redis", 0xff4438, "Redis",
+    Ruby => "ruby", 0xcc342d, "Ruby",
+    Syncthing => "syncthing", 0x0891d1, "Syncthing",
+    Tailscale => "tailscale", 0x242424, "Tailscale",
+    Tmux => "tmux", 0x1bb91f, "tmux",
+    Traefik => "traefikproxy", 0x24a1c1, "Traefik Proxy",
+    Transmission => "transmission", 0xd70008, "Transmission",
+    Vault => "vault", 0xffec6e, "Vault",
+    Vim => "vim", 0x019733, "Vim",
+    WireGuard => "wireguard", 0x88171a, "WireGuard",
+}
+
 pub const APP_ICON: &str = "icon.png";
 /// 侧栏标志的显示尺寸（pt）。图片按 2 倍屏事先缩好（见下面的测试），换图标后从根目录 icon.png 重新生成：
 /// `magick icon.png -colorspace RGB -filter Box -resize 60x60 -colorspace sRGB -strip assets/sidebar-logo.png`
@@ -84,7 +185,7 @@ impl AssetSource for Assets {
         if path == APP_ICON {
             return Ok(Some(Cow::Borrowed(APP_ICON_BYTES)));
         }
-        Ok(icon_bytes(path).map(Cow::Borrowed))
+        Ok(icon_bytes(path).or_else(|| brand_bytes(path)).map(Cow::Borrowed))
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
