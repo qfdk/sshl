@@ -190,13 +190,12 @@ pub struct SessionRecord {
 
 impl SessionRecord {
     /// 终端目录变了才跟过去，返回要去的目录：用户在文件管理里自己点进别处后，终端没再 cd 就不把他拽回去。
+    /// 第一次看到只记下、不跳：第一次打开文件管理时已经从终端目录开始了（`load_remote_initial` 记过），没记过说明文件管理
+    /// 是从别处直接打开到某个目录的（系统页磁盘的「在文件管理中打开」），那个目录不能被冲掉。
     pub fn follow_terminal_cwd(&mut self, cwd: Option<String>) -> Option<String> {
         let cwd = cwd?;
-        if self.terminal_cwd.as_deref() == Some(cwd.as_str()) {
-            return None;
-        }
-        self.terminal_cwd = Some(cwd.clone());
-        Some(cwd)
+        let previous = self.terminal_cwd.replace(cwd.clone());
+        (previous.is_some() && previous.as_deref() != Some(cwd.as_str())).then_some(cwd)
     }
 }
 
@@ -254,6 +253,10 @@ mod tests {
     #[test]
     fn follows_the_terminal_only_when_it_changed_directory() {
         let mut record = SessionRecord::default();
+        // 第一次只记下：文件管理第一次打开时已经从终端目录开始了（那里会记），没记过说明是从别处点过来打开的某个目录
+        // （系统页磁盘的「在文件管理中打开」），不能被拽回终端目录
+        assert_eq!(record.follow_terminal_cwd(Some("/srv/app".into())), None);
+        assert_eq!(record.follow_terminal_cwd(Some("/srv/app/logs".into())).as_deref(), Some("/srv/app/logs"), "之后 cd 了就跟");
         assert_eq!(record.follow_terminal_cwd(Some("/srv/app".into())).as_deref(), Some("/srv/app"));
         // 终端没再 cd：文件管理里点到别处也不拽回去
         assert_eq!(record.follow_terminal_cwd(Some("/srv/app".into())), None);
