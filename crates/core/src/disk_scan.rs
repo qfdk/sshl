@@ -67,6 +67,7 @@ pub fn scan_parallel(root: &str, depth: usize, progress: &ScanProgress) -> AppRe
     let root = normalize(root);
     let meta = std::fs::symlink_metadata(&root)?;
     let device = meta.dev();
+    // 核都用上：线程是 utility 优先级（见 `yield_to_interactive_work`），前台有事时系统自己会让
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 12);
     let start = Task { path: PathBuf::from(&root), level: 0, node: Arc::from(root.as_str()) };
     let queue = Queue { state: Mutex::new((vec![start], 0)), ready: Condvar::new() };
@@ -96,8 +97,19 @@ struct Shared<'a> {
     progress: &'a ScanProgress,
 }
 
+/// 扫描线程降到 utility 优先级：SSHL 的界面（主线程是 user-interactive）和别的程序的前台工作都排在它前面，
+/// 机器空闲时照样全速跑。扫描时占满几个核也不会让界面、编辑器、浏览器变卡。
+fn yield_to_interactive_work() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: 只改当前线程自己的 QoS，参数是合法的枚举值
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+    }
+}
+
 /// 一个线程：拿目录、列出来、文件的块数记账、子目录放回队列。账先记在自己这份表里，最后再合（不抢锁）。
 fn work(shared: &Shared) -> HashMap<Arc<str>, u64> {
+    yield_to_interactive_work();
     let mut sizes: HashMap<Arc<str>, u64> = HashMap::new();
     while let Some(task) = shared.queue.pop() {
         let (mut here, mut files) = (0u64, 0u64);
