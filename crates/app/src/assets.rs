@@ -45,6 +45,7 @@ icons! {
     FolderOpen => "folder-open",
     FolderPlus => "folder-plus",
     GripVertical => "grip-vertical",
+    HardDrive => "hard-drive",
     House => "house",
     Keyboard => "keyboard",
     KeyRound => "key-round",

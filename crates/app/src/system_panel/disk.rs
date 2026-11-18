@@ -41,6 +41,11 @@ const TILE_GAP: f32 = 3.;
 const TILE_TINT: [(f32, f32); 2] = [(0.10, 0.32), (0.14, 0.40)];
 /// 合起来的那些（「其余 N 项」、还没列出来的文件）是灰的。
 const REST_TINT: [f32; 2] = [0.05, 0.08];
+/// 还没有扫描结果时铺在底下的那张示意矩形树图：这些比例的灰块，很淡。
+const GHOST: [u64; 10] = [34, 21, 13, 9, 7, 5, 4, 3, 2, 2];
+const GHOST_TINT: [f32; 2] = [0.035, 0.06];
+/// 正中那张卡片的宽。
+const STAGE_WIDTH: f32 = 440.;
 
 /// 一个分区的扫描。
 pub(super) enum Scan {
@@ -180,9 +185,15 @@ impl DiskState {
 
 // ---------------------------------------------------------------- 纯函数（有测试）
 
-/// 面包屑：从分区根到 `path` 的每一段（显示的名字, 那一段的路径）。根显示成它的挂载点。
+/// 面包屑第一段（分区根）叫什么：/ 和 Mac 的数据卷是「整个磁盘」（同 Mole 的 Whole Disk；单独一个「/」看着奇怪，用户报过），
+/// 别的分区就是挂载点（/data、/Volumes/备份）。
+pub fn root_label(mount: &str) -> String {
+    if mount == "/" || mount == "/System/Volumes/Data" { tr!("整个磁盘").into() } else { mount.to_string() }
+}
+
+/// 面包屑：从分区根到 `path` 的每一段（显示的名字, 那一段的路径）。根见 [`root_label`]。
 pub fn crumbs(root: &str, path: &str) -> Vec<(String, String)> {
-    let mut out = vec![(root.to_string(), root.to_string())];
+    let mut out = vec![(root_label(root), root.to_string())];
     let rest = path.strip_prefix(root).unwrap_or("");
     let mut current = root.to_string();
     for part in rest.split('/').filter(|part| !part.is_empty()) {
@@ -591,7 +602,9 @@ impl SystemPanel {
         // 有扫好的树才在面包屑右边放「重新扫描」：没扫过、扫失败的在中间有自己的按钮
         let has_tree = matches!(shown, Shown::Deeper(..) | Shown::DeeperIdle(_) | Shown::Done(..));
         let switcher = self.volume_switcher(&mount, cx);
-        // 面包屑：分区 › 目录 › 目录 … 右边是重新扫描
+        // 这个分区用了多少（同 Mole 右上角的用量条）。还没有扫描结果时中间的卡片里有大的，这里不重复
+        let usage = self.disk.filesystems.as_deref().and_then(|all| all.iter().find(|fs| fs.mount == mount)).map(|fs| (fs.used, fs.total));
+        // 面包屑：整个磁盘 › 目录 › 目录 … 右边是用量和重新扫描
         let crumbs_bar = div()
             .flex_shrink_0()
             .px_3()
@@ -612,8 +625,12 @@ impl SystemPanel {
                         div()
                             .id(("disk-crumb", index))
                             .min_w_0()
-                            .truncate()
-                            .font_family(MONO)
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            // 分区根前面是硬盘图标；「整个磁盘」是字不是路径，不用等宽字体
+                            .when(index == 0, |d| d.child(kit::icon_sized(Icon::HardDrive, 14.).text_color(theme::color(ui::MUTED_FOREGROUND))))
+                            .when(name.starts_with('/') || index > 0, |d| d.font_family(MONO))
                             .px(px(4.))
                             .rounded(px(5.))
                             .map(|d| {
@@ -626,10 +643,25 @@ impl SystemPanel {
                                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(target.clone(), cx)))
                                 }
                             })
-                            .child(name),
+                            .child(div().min_w_0().truncate().child(name)),
                     )
             }))
             .child(div().flex_1())
+            .when_some(usage.filter(|_| has_tree), |d, (used, total)| {
+                let ratio = used as f32 / total.max(1) as f32;
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_xs()
+                        .font_features(TABULAR.clone())
+                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                        .child(tr!("已用 {} / {}", format_bytes(used), format_bytes(total)))
+                        .child(div().w(px(90.)).flex().child(bar(ratio, usage_color(ratio, ui::TEAL)))),
+                )
+            })
             .when(has_tree, |d| {
                 d.child(
                     kit::button("disk-rescan", kit::Variant::Outline)
@@ -657,45 +689,150 @@ impl SystemPanel {
             action("disk-scan-folder", kit::Variant::Primary, tr!("扫描这个目录"))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.scan_deeper(key.clone(), path.clone(), cx)))
         };
-        let muted = |text: &str| div().max_w(px(560.)).text_center().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(text.to_string());
-        let centered = || div().flex_1().flex().flex_col().items_center().justify_center().gap_3().px_4();
+        let muted = |text: &str| div().w_full().text_center().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(text.to_string());
+        // 卡片下半截：这一步的说明和按钮
+        let step = || div().w_full().flex().flex_col().items_center().gap(px(10.));
         let permission_hint = local.then(|| muted(tr!("第一次扫描时 macOS 可能会问 SSHL 能不能访问「文稿」「桌面」等文件夹；不允许的话这些文件夹算不进来。")));
         // 本机并行扫描有进度：已扫多少文件、多大（远程用 du，拿不到，只显示用了几秒）
+        // 整个磁盘不写「/」（单独一个斜杠看着奇怪），别的分区、目录写路径
+        let whole_disk = root_label(&mount) != mount;
         let scanning = |target: &str, (secs, files, bytes): (u64, u64, u64)| {
-            centered()
-                .child(spinner(24.))
-                .child(div().text_sm().child(tr!("正在扫描 {}…已用 {} 秒", target, secs)))
+            step()
+                .child(
+                    div().flex().items_center().gap(px(8.)).child(spinner(16.)).child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if whole_disk && target == mount {
+                        tr!("正在扫描整个磁盘…已用 {} 秒", secs)
+                    } else {
+                        tr!("正在扫描 {}…已用 {} 秒", target, secs)
+                    })),
+                )
                 .when(files > 0, |d| {
-                    d.child(div().text_sm().font_features(TABULAR.clone()).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已扫 {} 个文件 · {}", group_digits(files), format_bytes(bytes))))
+                    d.child(div().text_xs().font_features(TABULAR.clone()).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已扫 {} 个文件 · {}", group_digits(files), format_bytes(bytes))))
                 })
         };
+        let title = |text: String| div().text_sm().font_weight(FontWeight::MEDIUM).text_center().child(text);
         let body = match shown {
             Shown::Idle(stopped) => {
-                let (title, hint) = if stopped {
+                let heading = if whole_disk { tr!("扫描整个磁盘，看看是哪些文件夹和文件占了空间").to_string() } else { tr!("扫描 {}，看看是哪些文件夹和文件占了空间", mount) };
+                let (heading, hint) = if stopped {
                     (tr!("扫描已停止").to_string(), tr!("离开这一页时扫描会停下，不在后台一直占着资源。"))
                 } else if local {
-                    (tr!("扫描 {}，看看是哪些文件夹和文件占了空间", mount), tr!("会读遍整个分区，分区越大越久。离开这一页就停下。"))
+                    (heading, tr!("会读遍整个分区，分区越大越久。离开这一页就停下。"))
                 } else {
-                    (tr!("扫描 {}，看看是哪些文件夹和文件占了空间", mount), tr!("会读遍整个分区，分区越大越久。在服务器上以最低的 CPU 和磁盘优先级跑，离开这一页就停下。"))
+                    (heading, tr!("会读遍整个分区，分区越大越久。在服务器上以最低的 CPU 和磁盘优先级跑，离开这一页就停下。"))
                 };
-                centered().child(div().text_sm().child(title)).child(muted(hint)).children(permission_hint).child(start("disk-start", tr!("开始扫描"), cx)).into_any_element()
+                let content = step().child(title(heading)).child(muted(hint)).children(permission_hint).child(start("disk-start", tr!("开始扫描"), cx));
+                self.stage(&mount, content)
             }
-            Shown::Scanning(secs, files, bytes) => scanning(&mount, (secs, files, bytes))
-                .child(muted(tr!("分区越大越久。扫完后往下点都是现成的，不用再等。")))
-                .children(permission_hint)
-                .child(stop)
-                .into_any_element(),
-            Shown::Deeper(secs, files, bytes) => scanning(&path, (secs, files, bytes)).child(stop).into_any_element(),
-            Shown::Failed(error) => {
-                centered().child(div().text_sm().child(tr!("扫描失败：{}", error.trim()))).child(start("disk-retry", tr!("重新扫描"), cx)).into_any_element()
+            Shown::Scanning(secs, files, bytes) => {
+                let content = scanning(&mount, (secs, files, bytes)).child(muted(tr!("分区越大越久。扫完后往下点都是现成的，不用再等。"))).children(permission_hint).child(stop);
+                self.stage(&mount, content)
             }
+            Shown::Deeper(secs, files, bytes) => self.stage(&mount, scanning(&path, (secs, files, bytes)).child(stop)),
+            Shown::Failed(error) => self.stage(&mount, step().child(title(tr!("扫描失败：{}", error.trim()))).child(start("disk-retry", tr!("重新扫描"), cx))),
             Shown::DeeperIdle(error) => {
-                let title = error.map_or_else(|| tr!("这个目录还没扫").to_string(), |error| tr!("扫描失败：{}", error.trim()));
-                centered().child(div().text_sm().child(title)).child(scan_folder).into_any_element()
+                let heading = error.map_or_else(|| tr!("这个目录还没扫").to_string(), |error| tr!("扫描失败：{}", error.trim()));
+                self.stage(&mount, step().child(title(heading)).child(scan_folder))
             }
             Shown::Done(at, unreadable) => self.render_tree(at, unreadable, local, cx),
         };
         div().flex_1().min_h_0().flex().flex_col().children(switcher).child(crumbs_bar).child(body).into_any_element()
+    }
+
+    /// 还没有扫描结果时（没扫、扫描中、停下了、失败了）中间那一块：底下铺一张很淡的示意矩形树图（扫完就是这样；不然一大片空白，
+    /// 用户：「很空白，很难受」），正中一张卡片：这个分区（硬盘图标、名字、设备）、粗用量条和已用 / 可用 / 总共，下面是这一步的说明和按钮（`content`）。
+    fn stage(&self, mount: &str, content: Div) -> AnyElement {
+        let dark = usize::from(theme::is_dark());
+        let fs = self.disk.filesystems.as_deref().and_then(|all| all.iter().find(|fs| fs.mount == mount)).cloned();
+        let ghost = container_query(move |size, _, _| {
+            let bounds = treemap::Rect { x: 0., y: 0., w: f32::from(size.width), h: f32::from(size.height) };
+            div().size_full().relative().children(treemap::squarify(&GHOST, bounds).into_iter().map(move |rect| {
+                div()
+                    .absolute()
+                    .left(px(rect.x + TILE_GAP / 2.))
+                    .top(px(rect.y + TILE_GAP / 2.))
+                    .w(px((rect.w - TILE_GAP).max(0.)))
+                    .h(px((rect.h - TILE_GAP).max(0.)))
+                    .rounded(px(8.))
+                    .bg(theme::alpha(ui::FOREGROUND, GHOST_TINT[dark]))
+            }))
+        });
+        let label = root_label(mount);
+        // 「整个磁盘」下面写设备和挂载点；挂载点本身就是名字的，只写设备
+        let device = fs.as_ref().map(|fs| if label == mount { fs.device.clone() } else { format!("{} · {}", fs.device, fs.mount) });
+        let header = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .size(px(44.))
+                    .flex_shrink_0()
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme::alpha(ui::TEAL, super::SEGMENT_TINT[dark] + 0.04))
+                    .text_color(theme::color(ui::TEAL))
+                    .child(kit::icon_sized(Icon::HardDrive, 22.)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(label))
+                    .when_some(device, |d, device| d.child(div().truncate().font_family(MONO).text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(device))),
+            );
+        let usage = fs.map(|fs| {
+            let ratio = fs.used as f32 / fs.total.max(1) as f32;
+            let color = usage_color(ratio, ui::TEAL);
+            let track = theme::alpha(color, RING_TRACK[dark]);
+            let dot = |fill: Hsla| div().size(px(8.)).rounded_full().bg(fill);
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(div().h(px(10.)).w_full().rounded_full().bg(track).child(div().h_full().rounded_full().w(gpui::relative(ratio.clamp(0., 1.))).bg(theme::color(color))))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(14.))
+                        .text_xs()
+                        .font_features(TABULAR.clone())
+                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                        .child(div().flex().items_center().gap(px(6.)).child(dot(theme::color(color))).child(tr!("已用 {}", format_bytes(fs.used))))
+                        .child(div().flex().items_center().gap(px(6.)).child(dot(track)).child(tr!("可用 {}", format_bytes(fs.available))))
+                        .child(div().flex_1())
+                        .child(tr!("总共 {}", format_bytes(fs.total))),
+                )
+        });
+        let card = div()
+            .w(px(STAGE_WIDTH))
+            .max_w_full()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(20.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme::color(ui::BORDER))
+            .bg(theme::color(ui::CARD))
+            .shadow_lg()
+            .child(header)
+            .children(usage)
+            .child(div().w_full().h(px(1.)).bg(theme::color(ui::BORDER)))
+            .child(content);
+        div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(div().absolute().top_0().left_0().size_full().px(px(MAP_INSET)).pb(px(MAP_INSET)).child(ghost))
+            .child(div().absolute().top_0().left_0().size_full().flex().items_center().justify_center().p_4().child(card))
+            .into_any_element()
     }
 
     fn render_tree(&mut self, at: Instant, unreadable: usize, local: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -1061,8 +1198,9 @@ mod tests {
     #[test]
     fn crumbs_walk_from_the_mount_point_down() {
         let names = |root: &str, path: &str| crumbs(root, path).into_iter().map(|(name, path)| format!("{name}={path}")).collect::<Vec<_>>();
-        assert_eq!(names("/", "/"), ["/=/"]);
-        assert_eq!(names("/", "/var/lib/docker"), ["/=/", "var=/var", "lib=/var/lib", "docker=/var/lib/docker"]);
+        assert_eq!(names("/", "/"), ["整个磁盘=/"], "单独一个「/」看着奇怪");
+        assert_eq!(names("/", "/var/lib/docker"), ["整个磁盘=/", "var=/var", "lib=/var/lib", "docker=/var/lib/docker"]);
+        assert_eq!(names("/System/Volumes/Data", "/System/Volumes/Data/Users"), ["整个磁盘=/System/Volumes/Data", "Users=/System/Volumes/Data/Users"], "Mac 的数据卷");
         assert_eq!(names("/data", "/data/backups/2026"), ["/data=/data", "backups=/data/backups", "2026=/data/backups/2026"]);
     }
 
