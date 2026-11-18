@@ -5,6 +5,7 @@ pub mod auto_auth;
 pub mod config_store;
 pub mod crypto_store;
 pub mod db;
+pub mod disk_scan;
 pub mod disk_usage;
 pub mod error;
 pub mod events;

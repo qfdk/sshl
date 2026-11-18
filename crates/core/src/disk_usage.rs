@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub use crate::disk_scan::ScanProgress;
 use crate::error::{AppError, AppResult};
 use crate::server_info::{self, Machine};
 use crate::state::AppState;
@@ -172,6 +173,33 @@ impl DiskTree {
         self.frontier.contains(path)
     }
 
+    /// 本机并行扫描用（`disk_scan`）：第 `depth` 层以内每个目录直接记在它名下的大小（它自己的块 + 直接放在里面的文件，
+    /// 第 `depth` 层的还包括下面的一切）→ 整棵树：从最深的一层往上加，子目录排好序，第 `depth` 层的记成边上的。
+    pub(crate) fn from_own_sizes(root: String, own: HashMap<String, u64>, depth: usize, unreadable: usize) -> DiskTree {
+        let below = if root == "/" { "/".to_string() } else { format!("{root}/") };
+        let level = |path: &str| path[root.len()..].split('/').filter(|part| !part.is_empty()).count();
+        let mut nodes: Vec<(usize, String)> =
+            own.keys().filter(|path| **path == root || path.starts_with(&below)).map(|path| (level(path), path.clone())).collect();
+        nodes.sort_by_key(|(level, _)| std::cmp::Reverse(*level));
+        let mut tree = DiskTree { root: root.clone(), sizes: own, unreadable, ..DiskTree::default() };
+        for (node_level, node) in nodes {
+            if node == root {
+                continue;
+            }
+            if node_level == depth {
+                tree.frontier.insert(node.clone());
+            }
+            let Some(parent) = parent_of(&node) else { continue };
+            let size = tree.sizes.get(&node).copied().unwrap_or(0);
+            *tree.sizes.entry(parent.clone()).or_default() += size;
+            tree.children.entry(parent).or_default().push(node);
+        }
+        for siblings in tree.children.values_mut() {
+            sort_by_size(siblings, &tree.sizes);
+        }
+        tree
+    }
+
     /// 补扫了 `sub.root`（原来在边上的目录）：接到树上。补扫时它的大小可能变了，用新的，它在上一层的位置跟着重排。
     pub fn merge(&mut self, sub: DiskTree) {
         self.frontier.remove(&sub.root);
@@ -230,13 +258,20 @@ pub fn parse_du(out: &str, root: &str, unreadable: usize, depth: usize) -> DiskT
     tree
 }
 
-fn normalize(path: &str) -> String {
+pub(crate) fn normalize(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() }
 }
 
-/// 扫 `root` 所在的分区。没权限读的目录 du 会报错（退出码 1）但照样给出读得到的部分：有输出就算成功，记下读不了几个。
-pub async fn scan(state: &AppState, machine: &Machine, root: &str) -> AppResult<DiskTree> {
+/// 扫 `root`。本机多线程并行扫（`disk_scan`，`progress` 跟着走）；远程用 du：没权限读的目录 du 会报错（退出码 1）
+/// 但照样给出读得到的部分，有输出就算成功，记下读不了几个。
+pub async fn scan(state: &AppState, machine: &Machine, root: &str, progress: std::sync::Arc<ScanProgress>) -> AppResult<DiskTree> {
+    if *machine == Machine::Local {
+        let root = root.to_string();
+        return tokio::task::spawn_blocking(move || crate::disk_scan::scan_parallel(&root, SCAN_DEPTH, &progress))
+            .await
+            .map_err(|e| AppError::Other(format!("scan: {e}")))?;
+    }
     let (status, out, err) = server_info::exec(state, machine, &scan_command(root)).await?;
     if out.trim().is_empty() {
         let err = err.trim();
@@ -407,7 +442,7 @@ devices -- file:///Users/me/Library/Containers/com.apple.CoreDevice.CoreDeviceSe
         let setup = "mkdir -p big/deeper small locked && head -c 2097152 /dev/zero > big/deeper/blob && head -c 1024 /dev/zero > small/f \
             && head -c 65536 /dev/zero > top.bin && chmod 000 locked";
         server_info::run(&state, &machine, &format!("cd '{base}' && {setup}")).await.unwrap();
-        let tree = scan(&state, &machine, &base).await.unwrap();
+        let tree = scan(&state, &machine, &base, Default::default()).await.unwrap();
         server_info::run(&state, &machine, &format!("chmod 755 '{base}/locked' && rm -rf -- '{base}'")).await.unwrap();
 
         assert_eq!(tree.root(), base);
@@ -424,12 +459,12 @@ devices -- file:///Users/me/Library/Containers/com.apple.CoreDevice.CoreDeviceSe
         // 比 4 层深的：第一次只列到第 4 层（那一层能往下点），补扫后接上，大小一路都算进去了
         let deep = server_info::run(&state, &machine, "mktemp -d /home/alice/sshl-deep.XXXXXX").await.unwrap().trim().to_string();
         server_info::run(&state, &machine, &format!("cd '{deep}' && mkdir -p a/b/c/d/e/f && head -c 3145728 /dev/zero > a/b/c/d/e/f/blob")).await.unwrap();
-        let mut tree = scan(&state, &machine, &deep).await.unwrap();
+        let mut tree = scan(&state, &machine, &deep, Default::default()).await.unwrap();
         let fourth = format!("{deep}/a/b/c/d");
         assert!(tree.needs_scan(&fourth), "第 4 层还没往下列");
         assert_eq!(tree.size(&format!("{fourth}/e")), None);
         assert!(tree.size(&format!("{deep}/a")).unwrap() >= 3 * 1024 * 1024, "深处的文件算进了上面每一层");
-        tree.merge(scan(&state, &machine, &fourth).await.unwrap());
+        tree.merge(scan(&state, &machine, &fourth, Default::default()).await.unwrap());
         assert!(!tree.needs_scan(&fourth));
         assert_eq!(tree.entries(&fourth).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["e"]);
         assert!(tree.size(&format!("{fourth}/e/f")).is_some());

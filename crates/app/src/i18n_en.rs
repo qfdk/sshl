@@ -406,6 +406,7 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("查看占用", "View usage"),
     ("重新扫描", "Scan again"),
     ("正在扫描 {}…已用 {} 秒", "Scanning {}… {}s"),
+    ("已扫 {} 个文件 · {}", "{0} {0?file|files} scanned · {1}"),
     ("分区越大越久。扫完后往下点都是现成的，不用再等。", "Bigger volumes take longer. Once it's done, every folder opens instantly."),
     ("扫描失败：{}", "Scan failed: {}"),
     ("刚刚扫描", "Scanned just now"),

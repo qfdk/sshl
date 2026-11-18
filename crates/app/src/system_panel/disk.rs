@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use gpui::{Animation, AnimationExt, Transformation, percentage, svg};
-use sshl_core::disk_usage::{self, DiskEntry, DiskTree, Filesystem};
+use std::sync::atomic::Ordering;
+
+use sshl_core::disk_usage::{self, DiskEntry, DiskTree, Filesystem, ScanProgress};
 
 use super::*;
 
@@ -24,12 +26,14 @@ const STATE_WIDTH: f32 = 120.;
 pub(super) enum Scan {
     Running {
         started: Instant,
+        /// 本机并行扫描的进度（远程用 du，一直是 0）。
+        progress: Arc<ScanProgress>,
     },
     Done {
         tree: Arc<DiskTree>,
         at: Instant,
-        /// 正在补扫的目录（点到了还没列出来的深处）和开始的时间。
-        deeper: Option<(String, Instant)>,
+        /// 正在补扫的目录（点到了还没列出来的深处）、开始的时间和进度。
+        deeper: Option<(String, Instant, Arc<ScanProgress>)>,
         /// 补扫失败的目录和原因。
         failed: Option<(String, String)>,
     },
@@ -89,6 +93,19 @@ pub fn scanned_ago(secs: u64) -> String {
         60..3600 => tr!("{} 分钟前扫描", secs / 60),
         _ => tr!("{} 小时前扫描", secs / 3600),
     }
+}
+
+/// 大数字每三位一个逗号：644498 → 644,498。
+pub fn group_digits(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// 搜索：名字里含关键字（不分大小写）。
@@ -170,10 +187,11 @@ impl SystemPanel {
     fn start_scan(&mut self, mount: String, cx: &mut Context<Self>) {
         let Some(machine) = self.machine.clone() else { return };
         let key = (machine.clone(), mount.clone());
-        self.disk.scans.insert(key.clone(), Scan::Running { started: Instant::now() });
+        let progress = Arc::new(ScanProgress::default());
+        self.disk.scans.insert(key.clone(), Scan::Running { started: Instant::now(), progress: progress.clone() });
         self.disk.version += 1;
         self.tick_while_scanning(key.clone(), cx);
-        let scanned = backend::spawn(async move { disk_usage::scan(&backend::get().state, &machine, &mount).await });
+        let scanned = backend::spawn(async move { disk_usage::scan(&backend::get().state, &machine, &mount, progress).await });
         cx.spawn(async move |this, cx| {
             let scan = match scanned.await {
                 Some(Ok(tree)) => Scan::Done { tree: Arc::new(tree), at: Instant::now(), deeper: None, failed: None },
@@ -196,18 +214,19 @@ impl SystemPanel {
         if deeper.is_some() {
             return;
         }
-        *deeper = Some((path.clone(), Instant::now()));
+        let progress = Arc::new(ScanProgress::default());
+        *deeper = Some((path.clone(), Instant::now(), progress.clone()));
         *failed = None;
         self.disk.version += 1;
         self.tick_while_scanning(key.clone(), cx);
         let (machine, root) = (key.0.clone(), path.clone());
-        let scanned = backend::spawn(async move { disk_usage::scan(&backend::get().state, &machine, &root).await });
+        let scanned = backend::spawn(async move { disk_usage::scan(&backend::get().state, &machine, &root, progress).await });
         cx.spawn(async move |this, cx| {
             let result = scanned.await;
             let _ = this.update(cx, |this, cx| {
                 // 期间点了「重新扫描」：这棵树已经换掉了，结果不要
                 let Some(Scan::Done { tree, deeper, failed, .. }) = this.disk.scans.get_mut(&key) else { return };
-                if deeper.as_ref().map(|(scanning, _)| scanning) != Some(&path) {
+                if deeper.as_ref().map(|(scanning, ..)| scanning) != Some(&path) {
                     return;
                 }
                 *deeper = None;
@@ -387,24 +406,33 @@ impl SystemPanel {
     fn render_scan(&mut self, machine: &Machine, mount: String, path: String, cx: &mut Context<Self>) -> AnyElement {
         // 先把要用的取出来：下面还要可变地借 self 画树
         enum Shown {
-            /// 整个分区在扫（秒数）。
-            Scanning(u64),
-            /// 这一层在补扫（秒数）。
-            Deeper(u64),
+            /// 整个分区在扫（秒数, 已扫的文件数, 字节）。
+            Scanning(u64, u64, u64),
+            /// 这一层在补扫。
+            Deeper(u64, u64, u64),
             Failed(String),
             Done(Instant, usize),
         }
+        let counted = |started: &Instant, progress: &ScanProgress| {
+            (started.elapsed().as_secs(), progress.files.load(Ordering::Relaxed), progress.bytes.load(Ordering::Relaxed))
+        };
         let shown = match self.disk.scans.get(&(machine.clone(), mount.clone())) {
-            None => Shown::Scanning(0),
-            Some(Scan::Running { started }) => Shown::Scanning(started.elapsed().as_secs()),
+            None => Shown::Scanning(0, 0, 0),
+            Some(Scan::Running { started, progress }) => {
+                let (secs, files, bytes) = counted(started, progress);
+                Shown::Scanning(secs, files, bytes)
+            }
             Some(Scan::Failed(error)) => Shown::Failed(error.clone()),
-            Some(Scan::Done { deeper: Some((scanning, started)), .. }) if *scanning == path => Shown::Deeper(started.elapsed().as_secs()),
+            Some(Scan::Done { deeper: Some((scanning, started, progress)), .. }) if *scanning == path => {
+                let (secs, files, bytes) = counted(started, progress);
+                Shown::Deeper(secs, files, bytes)
+            }
             Some(Scan::Done { failed: Some((at, error)), .. }) if *at == path => Shown::Failed(error.clone()),
             Some(Scan::Done { tree, at, .. }) => Shown::Done(*at, tree.unreadable),
         };
         let local = *machine == Machine::Local;
         let rescan_mount = mount.clone();
-        let full_scan = matches!(shown, Shown::Scanning(_));
+        let full_scan = matches!(shown, Shown::Scanning(..));
         // 面包屑：所有分区 › 分区 › 目录 › 目录 … 右边是重新扫描
         let crumbs_bar = div()
             .flex_shrink_0()
@@ -474,7 +502,8 @@ impl SystemPanel {
                 )
             });
 
-        let scanning = |target: &str, secs: u64, hints: Vec<&'static str>| {
+        // 本机并行扫描有进度：已扫多少文件、多大（远程用 du，拿不到，只显示用了几秒）
+        let scanning = |target: &str, (secs, files, bytes): (u64, u64, u64), hints: Vec<&'static str>| {
             div()
                 .flex_1()
                 .flex()
@@ -485,18 +514,21 @@ impl SystemPanel {
                 .px_4()
                 .child(spinner(24.))
                 .child(div().text_sm().child(tr!("正在扫描 {}…已用 {} 秒", target, secs)))
+                .when(files > 0, |d| {
+                    d.child(div().text_sm().font_features(TABULAR.clone()).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已扫 {} 个文件 · {}", group_digits(files), format_bytes(bytes))))
+                })
                 .children(hints.into_iter().map(|hint| div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint)))
                 .into_any_element()
         };
         let body = match shown {
-            Shown::Scanning(secs) => {
+            Shown::Scanning(secs, files, bytes) => {
                 let mut hints = vec![tr!("分区越大越久。扫完后往下点都是现成的，不用再等。")];
                 if local {
                     hints.push(tr!("第一次扫描时 macOS 可能会问 SSHL 能不能访问「文稿」「桌面」等文件夹；不允许的话这些文件夹算不进来。"));
                 }
-                scanning(&mount, secs, hints)
+                scanning(&mount, (secs, files, bytes), hints)
             }
-            Shown::Deeper(secs) => scanning(&path, secs, Vec::new()),
+            Shown::Deeper(secs, files, bytes) => scanning(&path, (secs, files, bytes), Vec::new()),
             Shown::Failed(error) => empty_message(tr!("扫描失败：{}", error.trim())),
             Shown::Done(at, unreadable) => self.render_tree(at, unreadable, local, cx),
         };
@@ -662,6 +694,15 @@ mod tests {
         assert_eq!(scanned_ago(5), "刚刚扫描");
         assert_eq!(scanned_ago(150), "2 分钟前扫描");
         assert_eq!(scanned_ago(7300), "2 小时前扫描");
+    }
+
+    #[test]
+    fn big_counts_get_thousands_separators() {
+        assert_eq!(group_digits(0), "0");
+        assert_eq!(group_digits(999), "999");
+        assert_eq!(group_digits(1000), "1,000");
+        assert_eq!(group_digits(644498), "644,498");
+        assert_eq!(group_digits(4544185), "4,544,185");
     }
 
     #[test]
