@@ -1028,6 +1028,7 @@ impl SystemPanel {
         let largest = rows.iter().map(Row::size).max().unwrap_or(0).max(1);
         let remote = matches!(machine, Machine::Remote(_));
         let lit = theme::alpha(ui::PRIMARY, ROW_HOVER[usize::from(theme::is_dark())]);
+        let query = self.search.read(cx).value().to_string();
         range
             .filter_map(|ix| rows.get(ix).map(|row| (ix, row)))
             .map(|(ix, row)| {
@@ -1087,7 +1088,7 @@ impl SystemPanel {
                         .gap(px(8.))
                         .when(muted, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
                         .child(kit::icon_sized(icon, 14.).text_color(theme::color(if muted { ui::MUTED_FOREGROUND } else { color })))
-                        .child(div().min_w_0().truncate().when(!muted, |d| d.font_weight(FontWeight::MEDIUM)).child(name))
+                        .child(div().min_w_0().truncate().when(!muted, |d| d.font_weight(FontWeight::MEDIUM)).child(super::highlighted(name, &query)))
                         .when(has_children, |d| d.child(kit::icon_sized(Icon::ChevronRight, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))),
                 )
                 .when(bars, |d| d.child(usage_cell(size as f32 / largest as f32, color)))

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels,
-    Point, Render, Role, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement, Styled, Task, UniformListScrollHandle,
+    FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels,
+    Point, Render, Role, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement, StyledText, Styled, Task, UniformListScrollHandle,
     Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder, px, size, svg, uniform_list,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
@@ -50,6 +50,8 @@ const BOOT_WIDTH: f32 = 96.;
 /// 指标那一段的同色浅底、圆环轨道的不透明度：[浅色, 深色]。
 pub const SEGMENT_TINT: [f32; 2] = [0.06, 0.10];
 const RING_TRACK: [f32; 2] = [0.16, 0.22];
+/// 搜索命中的那一段的底色（琥珀色）：[浅色, 深色]。
+const MATCH_TINT: [f32; 2] = [0.28, 0.4];
 /// 软件标志画多大：标志铺满自己的方框，应用图标四周有留白，画小一点看着一样大。
 const BRAND_SIZE: f32 = 17.;
 /// CPU 用得多（≥ 5%）的进程那一格的同色浅底：[浅色, 深色]。原来是实心色块 + 白字，用户嫌「颜色过于重」。
@@ -567,6 +569,40 @@ pub fn process_name(command: &str, program: Option<&str>) -> String {
     let (_, name, _) = command_parts(command, program);
     let name = name.trim_end_matches(':');
     if name.is_empty() { command.to_string() } else { name.to_string() }
+}
+
+/// 搜索词在 `text` 里出现的每一处（字节范围，落在字符边界上）：不分大小写，中文也行，不重叠。空的搜索词没有。
+pub fn match_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
+    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let needle: Vec<char> = query.trim().chars().map(fold).collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().map(|(at, c)| (at, fold(c))).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= chars.len() {
+        if chars[i..i + needle.len()].iter().map(|(_, c)| *c).eq(needle.iter().copied()) {
+            let end = chars.get(i + needle.len()).map_or(text.len(), |(at, _)| *at);
+            out.push(chars[i].0..end);
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 搜索命中的那几段铺一层琥珀色浅底、字换正文色（深色外观下淡色字压在底上不够清楚），同终端里查找的黄底。
+fn highlighted(text: impl Into<SharedString>, query: &str) -> StyledText {
+    let text: SharedString = text.into();
+    let ranges = match_ranges(&text, query);
+    let style = HighlightStyle {
+        background_color: Some(theme::alpha(ui::WARNING, MATCH_TINT[usize::from(theme::is_dark())])),
+        color: Some(theme::color(ui::FOREGROUND)),
+        ..Default::default()
+    };
+    StyledText::new(text).with_highlights(ranges.into_iter().map(move |range| (range, style)))
 }
 
 /// 读列表失败的说明：没权限时说怎么办。
@@ -1165,7 +1201,7 @@ impl SystemPanel {
                                 .truncate()
                                 .font_weight(if member { FontWeight::MEDIUM } else { FontWeight::SEMIBOLD })
                                 .when(kernel, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
-                                .child(name.clone()),
+                                .child(highlighted(name.clone(), &query)),
                         )
                         .when_some(detail, |d, detail| {
                             d.child(
@@ -1174,14 +1210,14 @@ impl SystemPanel {
                                     .truncate()
                                     .when(app.is_none(), |d| d.font_family(MONO).text_size(px(11.)))
                                     .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                    .child(detail),
+                                    .child(highlighted(detail, &query)),
                             )
                         })
                         .when_some(toggle, |d, (_, open)| {
                             d.child(kit::icon_sized(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))
                         }),
                 )
-                .child(div().w(px(USER_WIDTH)).flex_shrink_0().px_3().flex().child(user_label(&user, me.as_deref())))
+                .child(div().w(px(USER_WIDTH)).flex_shrink_0().px_3().flex().child(user_label(&user, me.as_deref(), &query)))
                 .child(
                     div()
                         .w(px(MEMORY_WIDTH))
@@ -1207,7 +1243,7 @@ impl SystemPanel {
                         .justify_end()
                         .font_features(TABULAR.clone())
                         .text_color(theme::color(ui::MUTED_FOREGROUND))
-                        .child(pid.to_string()),
+                        .child(highlighted(pid.to_string(), &query)),
                 )
                 .child(div().w(px(ACTION_WIDTH)).flex_shrink_0().flex().justify_center().child(self.kill_button(("kill-process", ix), pid, name, cx)))
                 .into_any_element()
@@ -1254,7 +1290,7 @@ impl SystemPanel {
                             .font_features(TABULAR.clone())
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::color(ui::PRIMARY))
-                            .child(p.port.to_string()),
+                            .child(highlighted(p.port.to_string(), &query)),
                     )
                     .child(
                         div()
@@ -1264,7 +1300,7 @@ impl SystemPanel {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(div().min_w_0().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(p.address.clone()))
+                            .child(div().min_w_0().truncate().font_family(MONO).text_color(theme::alpha(ui::FOREGROUND, 0.85)).child(highlighted(p.address.clone(), &query)))
                             .map(|d| match address_scope(&p.address) {
                                 // 所有地址 = 对外开放，橙色提醒；只听本机的灰色
                                 AddressScope::All => d.child(pill(ui::WARNING_FOREGROUND, theme::alpha(ui::WARNING, 0.12)).child(tr!("所有地址"))),
@@ -1281,7 +1317,7 @@ impl SystemPanel {
                             .justify_end()
                             .font_features(TABULAR.clone())
                             .text_color(theme::color(ui::MUTED_FOREGROUND))
-                            .child(p.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "—".into())),
+                            .child(highlighted(p.pid.map(|pid| pid.to_string()).unwrap_or_else(|| "—".into()), &query)),
                     )
                     .child(
                         div()
@@ -1290,7 +1326,7 @@ impl SystemPanel {
                             .px_3()
                             .truncate()
                             .map(|d| if p.pid.is_some() { d.font_weight(FontWeight::SEMIBOLD) } else { d.text_color(theme::color(ui::MUTED_FOREGROUND)) })
-                            .child(if p.pid.is_some() { name.clone() } else { tr!("看不到进程（需要 root）").into() }),
+                            .child(if p.pid.is_some() { highlighted(name.clone(), &query) } else { StyledText::new(tr!("看不到进程（需要 root）")) }),
                     )
                     .child(
                         div()
@@ -1387,8 +1423,8 @@ impl SystemPanel {
                                 .child(status),
                         ),
                     )
-                    .child(div().w(px(220.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
-                    .child(div().flex_1().min_w_0().px_3().truncate().text_color(theme::color(ui::MUTED_FOREGROUND)).child(service.description.clone()))
+                    .child(div().w(px(220.)).flex_shrink_0().px_3().truncate().font_weight(FontWeight::SEMIBOLD).child(highlighted(name.clone(), &query)))
+                    .child(div().flex_1().min_w_0().px_3().truncate().text_color(theme::color(ui::MUTED_FOREGROUND)).child(highlighted(service.description.clone(), &query)))
                     .child(
                         div()
                             .w(px(BOOT_WIDTH))
@@ -1495,8 +1531,8 @@ fn table_header() -> Div {
 }
 
 /// 用户列：root 橙色标签、登录用户蓝色标签、系统账号淡色。标签往左挪出内边距，字和表头对齐。
-fn user_label(user: &str, me: Option<&str>) -> Div {
-    let label = div().ml(px(-7.)).px(px(7.)).py(px(1.)).rounded(px(5.)).truncate().child(user.to_string());
+fn user_label(user: &str, me: Option<&str>, query: &str) -> Div {
+    let label = div().ml(px(-7.)).px(px(7.)).py(px(1.)).rounded(px(5.)).truncate().child(highlighted(user.to_string(), query));
     match user_kind(user, me) {
         UserKind::Root => label.bg(theme::alpha(ui::WARNING, 0.13)).text_color(theme::color(ui::WARNING_FOREGROUND)).font_weight(FontWeight::SEMIBOLD),
         UserKind::Me => label.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND)).font_weight(FontWeight::MEDIUM),
@@ -1817,6 +1853,19 @@ mod tests {
                 Listed::App(group, _) => group.main.pid,
             })
             .collect()
+    }
+
+    /// 搜索高亮的位置：不分大小写、每一处都标、中文按字符切（不会切在一个字中间）。
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // 就是只有一处命中
+    fn search_matches_are_found_everywhere() {
+        assert_eq!(match_ranges("nginx: worker process", "NGINX"), [0..5]);
+        assert_eq!(match_ranges("redis-server redis", "redis"), [0..5, 13..18]);
+        assert_eq!(match_ranges("微信 WeChat", "信"), [3..6]);
+        assert_eq!(match_ranges("微信 WeChat", "chat"), [9..13]);
+        assert_eq!(match_ranges("aaaa", "aa"), [0..2, 2..4], "不重叠");
+        assert!(match_ranges("nginx", "").is_empty() && match_ranges("nginx", "  ").is_empty());
+        assert!(match_ranges("ab", "abc").is_empty());
     }
 
     #[test]

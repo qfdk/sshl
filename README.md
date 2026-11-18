@@ -61,9 +61,10 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 
 **System** (⌘P)
 - Load, memory, disk, uptime
-- Three lists — processes, listening ports, systemd services — with search and sorting. You can kill processes, start / stop services, and toggle start-on-boot
-- Disk usage: when a disk fills up, see which folders and files take the space — click Start scan, then go down folder by folder, biggest first (like ncdu). Scans run at low priority and stop when you leave the tab, so they never keep loading a server
-- Local terminal tabs have it too, for this Mac: processes, listening ports (every user's port shows its process) and disk usage, so you can find what holds a port and kill it
+- Three lists — processes, listening ports, systemd services — with search (matches are highlighted) and sorting. You can kill processes, start / stop services, and toggle start-on-boot
+- Processes are folded together: on a server, nginx's master and workers or PostgreSQL and its background processes are one row you can expand; well-known server software (nginx, Redis, PostgreSQL, Docker, Node.js, Python…) shows its logo
+- Disk usage: when a disk fills up, see which folders and files take the space — click Start scan, then go down folder by folder, biggest first (like ncdu), with a treemap beside the list. Scans run at low priority and stop when you leave the tab, so they never keep loading a server
+- Local terminal tabs have it too, for this Mac: processes grouped by app with their icons (Chrome's helpers count as Chrome, Docker's virtual machine as Docker), listening ports (every user's port shows its process) and disk usage, so you can find what holds a port and kill it
 
 **Shortcuts**
 - Every shortcut above can be changed in Settings → Shortcuts: click one and press the new keys. The defaults follow your keyboard layout (on a French AZERTY keyboard ⌘1 is ⌘&, as in other Mac apps)
