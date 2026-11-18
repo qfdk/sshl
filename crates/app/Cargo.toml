@@ -35,5 +35,7 @@ dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures = "0.3"
+# 本机进程的负责进程（dlsym 找系统私有函数，见 system_panel/apps.rs）；sshl-core 已经依赖它，不多编一份。
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

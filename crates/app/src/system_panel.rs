@@ -3,6 +3,7 @@
 //! 远程的命令以文件管理当前身份执行（终端 sudo -i 之后就是 root），本机的以 SSHL 自己的身份；
 //! 没权限时提议改在终端里用 sudo 执行。停在这页时每 3 秒刷新一次。
 
+use std::collections::HashMap;
 use std::f32::consts::TAU;
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
@@ -12,21 +13,24 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
     FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, PathBuilder, Pixels,
     Point, Render, Role, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement, Styled, Task, UniformListScrollHandle,
-    Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder, px, size, uniform_list,
+    Window, anchored, canvas, deferred, div, img, point, prelude::FluentBuilder, px, size, uniform_list,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use sshl_core::server_info::{self, Machine, Overview, PortInfo, ProcessInfo};
 use sshl_core::services::{self, ServiceAction, ServiceInfo};
 
+use crate::app_icons::{self, ICON_SIZE};
 use crate::assets::Icon;
 use crate::backend;
 use crate::prompts::{self, Options};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem};
 
+mod apps;
 mod disk;
 mod treemap;
 
+use apps::{AppGroup, Listed};
 use disk::DiskState;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
@@ -45,6 +49,8 @@ const BOOT_WIDTH: f32 = 96.;
 /// 指标那一段的同色浅底、圆环轨道的不透明度：[浅色, 深色]。
 pub const SEGMENT_TINT: [f32; 2] = [0.06, 0.10];
 const RING_TRACK: [f32; 2] = [0.16, 0.22];
+/// CPU 用得多（≥ 5%）的进程那一格的同色浅底：[浅色, 深色]。原来是实心色块 + 白字，用户嫌「颜色过于重」。
+pub const CPU_TINT: [f32; 2] = [0.10, 0.18];
 /// 鼠标停在哪一行，那一行铺一层浅蓝：[浅色, 深色]。
 const ROW_HOVER: [f32; 2] = [0.08, 0.14];
 const GAUGE_SIZE: f32 = 58.;
@@ -114,6 +120,101 @@ enum MenuTarget {
     Directory { path: String, folder: String, remote: bool },
 }
 
+/// 本机进程行前面的图标。
+enum ProcessIcon {
+    /// 所在应用的图标（还没取到时 None，先留位置）。
+    App(Option<Arc<gpui::Image>>),
+    /// 不在应用里：淡色线条图标。
+    Glyph(Icon),
+}
+
+/// 一个应用的图标取到哪了。
+#[derive(Clone)]
+enum AppIcon {
+    Loading,
+    Ready(Arc<gpui::Image>),
+    /// 没有自己的图标（系统给的是通用占位图）或者取不到：画齿轮，不再取。
+    Missing,
+}
+
+/// 一行用哪个图标：应用（路径）的，或者线条图标。
+enum RowIcon {
+    App(String),
+    Glyph(Icon),
+}
+
+/// 进程列表要画的一行（从进程 / 应用里取出来，不借着面板）。
+struct ProcessRow {
+    /// 应用那一行是主进程的。
+    pid: u32,
+    user: String,
+    /// 应用那一行是加起来的。
+    cpu: f32,
+    rss_kb: u64,
+    name: String,
+    /// 名字后面淡色的那段：远程是完整命令行；本机只有应用写「N 个进程」（同 Mole，路径、参数都不要；完整命令行在右键「复制命令」里）。
+    detail: Option<String>,
+    command: String,
+    /// None = 不画图标（远程）。
+    icon: Option<RowIcon>,
+    /// 应用那一行：(应用路径, 几个进程, 展开了没有)。
+    app: Option<(String, usize, bool)>,
+    /// 展开的应用里的一个进程（缩进）。
+    member: bool,
+    kernel: bool,
+}
+
+impl ProcessRow {
+    /// 远程：程序名后面跟完整命令行（命令行就只是程序名时不重复）。
+    fn remote(p: &ProcessInfo) -> Self {
+        let name = process_name(&p.command, p.program.as_deref());
+        let detail = (p.command != name).then(|| p.command.clone());
+        Self { pid: p.pid, user: p.user.clone(), cpu: p.cpu, rss_kb: p.rss_kb, name, detail, command: p.command.clone(), icon: None, app: None, member: false, kernel: p.command.starts_with('[') }
+    }
+
+    /// 本机的单个进程：只有名字。用户：「本地理论上不要这么长的路径吧」「这样的参数应该用不着了」。
+    fn local(p: &ProcessInfo, me: Option<&str>, member: bool) -> Self {
+        let name = process_name(&p.command, p.program.as_deref());
+        // 展开的应用里的进程不画图标（缩进对齐应用名）。系统的后台程序（放在 /System、/usr/libexec 这些地方，或者以 root、系统账号跑的）
+        // 画齿轮，别的（Homebrew 装的、自己跑的 claude、node）是命令行程序，画终端
+        let program = p.program.as_deref().unwrap_or_else(|| p.command.split(' ').next().unwrap_or(""));
+        let system = app_icons::is_system_program(program) || matches!(user_kind(&p.user, me), UserKind::Root | UserKind::Service);
+        let icon = (!member).then_some(RowIcon::Glyph(if system { Icon::Settings } else { Icon::SquareTerminal }));
+        Self {
+            pid: p.pid,
+            user: p.user.clone(),
+            cpu: p.cpu,
+            rss_kb: p.rss_kb,
+            name,
+            detail: None,
+            command: p.command.clone(),
+            icon,
+            app: None,
+            member,
+            kernel: false,
+        }
+    }
+
+    /// 一个应用：主进程的 PID 和用户，CPU、内存加起来；有几个进程时后面写几个。
+    fn app(group: AppGroup, open: bool) -> Self {
+        let count = group.members.len();
+        let detail = (count > 1).then(|| tr!("{} 个进程", count));
+        Self {
+            pid: group.main.pid,
+            user: group.main.user.clone(),
+            cpu: group.cpu,
+            rss_kb: group.rss_kb,
+            name: group.name,
+            detail,
+            command: group.main.command.clone(),
+            icon: Some(RowIcon::App(group.bundle.clone())),
+            app: Some((group.bundle, count, open)),
+            member: false,
+            kernel: false,
+        }
+    }
+}
+
 struct MenuState {
     position: Point<Pixels>,
     target: MenuTarget,
@@ -128,7 +229,8 @@ pub enum SystemPanelEvent {
 
 /// 一次刷新读到的列表。
 enum Loaded {
-    Processes(Vec<ProcessInfo>),
+    /// 进程和负责进程（本机才有，见 `apps::responsible_pids`）。
+    Processes(Vec<ProcessInfo>, HashMap<u32, u32>),
     Ports(Vec<PortInfo>),
     /// None = 没有 systemd。
     Services(Option<Vec<ServiceInfo>>),
@@ -147,6 +249,14 @@ pub struct SystemPanel {
     ports: Option<Vec<PortInfo>>,
     services: Option<Vec<ServiceInfo>>,
     disk: DiskState,
+    /// 本机进程的应用图标：应用路径 → 图标。
+    icons: HashMap<String, AppIcon>,
+    /// 应用路径 → 访达里的名字（微信、日历），和图标一起取。
+    app_names: HashMap<String, String>,
+    /// 展开了的应用（路径）。
+    expanded_apps: std::collections::HashSet<String>,
+    /// 本机进程的负责进程（见 `apps::responsible_pids`）。
+    responsible: HashMap<u32, u32>,
     no_systemd: bool,
     /// 正在启停的服务（状态列显示「处理中…」）。
     busy: Option<String>,
@@ -361,7 +471,7 @@ pub fn readable(color: ui::Token) -> ui::Token {
     }
 }
 
-/// 进程 CPU% 怎么标：没在用的淡色数字，用一点（≥ 0.5）同色浅底小标签，用得多（≥ 5）实心标签、白字。
+/// 进程 CPU% 怎么标：没在用的淡色数字，用一点（≥ 0.5）数字上色，用得多（≥ 5）再加同色浅底（[`CPU_TINT`]）。颜色见 [`cpu_color`]。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CpuLevel {
     Idle,
@@ -376,11 +486,7 @@ pub fn cpu_level(cpu: f32) -> CpuLevel {
     } else if cpu < 5. {
         CpuLevel::Light(color)
     } else {
-        CpuLevel::Busy(match color {
-            ui::DESTRUCTIVE => ui::DESTRUCTIVE_SOLID,
-            ui::WARNING => ui::WARNING_SOLID,
-            _ => ui::SUCCESS_SOLID,
-        })
+        CpuLevel::Busy(color)
     }
 }
 
@@ -514,6 +620,10 @@ impl SystemPanel {
             ports: None,
             services: None,
             disk: DiskState::default(),
+            icons: HashMap::new(),
+            app_names: HashMap::new(),
+            expanded_apps: Default::default(),
+            responsible: HashMap::new(),
             no_systemd: false,
             busy: None,
             error: None,
@@ -599,7 +709,12 @@ impl SystemPanel {
         let list = backend::spawn(async move {
             let state = &backend::get().state;
             match view {
-                View::Processes => server_info::processes(state, &machine).await.map(Loaded::Processes),
+                View::Processes => {
+                    let processes = server_info::processes(state, &machine).await?;
+                    // 本机：查每个进程的负责进程，自己不在应用里的归到启动它的应用（`apps::list`）
+                    let responsible = if machine == Machine::Local { apps::responsible_pids(processes.iter().map(|p| p.pid)) } else { HashMap::new() };
+                    Ok(Loaded::Processes(processes, responsible))
+                }
                 View::Ports => server_info::ports(state, &machine).await.map(Loaded::Ports),
                 View::Services => services::services(state, &machine).await.map(Loaded::Services),
                 View::Disk => sshl_core::disk_usage::filesystems(state, &machine).await.map(Loaded::Filesystems),
@@ -618,7 +733,10 @@ impl SystemPanel {
                     Some(Ok(loaded)) => {
                         this.error = None;
                         match loaded {
-                            Loaded::Processes(processes) => this.processes = Some(processes),
+                            Loaded::Processes(processes, responsible) => {
+                                this.processes = Some(processes);
+                                this.responsible = responsible;
+                            }
                             Loaded::Ports(ports) => this.ports = Some(ports),
                             Loaded::Services(services) => {
                                 this.no_systemd = services.is_none();
@@ -759,6 +877,33 @@ impl SystemPanel {
     fn service_logs(&mut self, service: &ServiceInfo, cx: &mut Context<Self>) {
         self.menu = None;
         cx.emit(SystemPanelEvent::RunInTerminal(services::logs_command(&service.unit)));
+    }
+
+    /// 去后台取这些应用的图标和名字（一批一起取，同一个只取一次），取到了重画。取不到的记成没有，不再取。
+    fn request_icons(&mut self, apps: Vec<String>, cx: &mut Context<Self>) {
+        for app in &apps {
+            self.icons.insert(app.clone(), AppIcon::Loading);
+        }
+        let drawn = cx
+            .background_executor()
+            .spawn(async move { apps.into_iter().map(|app| (app_icons::icon_png(&app), app_icons::display_name(&app), app)).collect::<Vec<_>>() });
+        cx.spawn(async move |this, cx| {
+            let drawn = drawn.await;
+            let _ = this.update(cx, |this, cx| {
+                for (png, name, app) in drawn {
+                    if let Some(name) = name {
+                        this.app_names.insert(app.clone(), name);
+                    }
+                    let icon = match png {
+                        Some(png) => AppIcon::Ready(Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png))),
+                        None => AppIcon::Missing,
+                    };
+                    this.icons.insert(app, icon);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn open_menu(&mut self, position: Point<Pixels>, target: MenuTarget, cx: &mut Context<Self>) {
@@ -913,92 +1058,158 @@ impl SystemPanel {
             .into_any_element()
     }
 
+    /// 进程列表的行：本机按应用合起来（`apps::list`），远程一个进程一行。
+    fn process_rows(&self, query: &str) -> Vec<ProcessRow> {
+        let processes = self.processes.as_deref().unwrap_or(&[]);
+        let me = self.me.as_deref();
+        if self.machine != Some(Machine::Local) {
+            return filter_processes(processes, query, self.sort).into_iter().map(ProcessRow::remote).collect();
+        }
+        apps::list(processes, query, self.sort, &self.expanded_apps, &self.app_names, &self.responsible)
+            .into_iter()
+            .map(|row| match row {
+                Listed::Process(p) => ProcessRow::local(p, me, false),
+                Listed::Member(p) => ProcessRow::local(p, me, true),
+                Listed::App(group, open) => ProcessRow::app(group, open),
+            })
+            .collect()
+    }
+
     fn render_process_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let query = self.search.read(cx).value().to_string();
-        let rows: Vec<ProcessInfo> = filter_processes(self.processes.as_deref().unwrap_or(&[]), &query, self.sort)
+        let rows: Vec<ProcessRow> = self.process_rows(&query).into_iter().skip(range.start).take(range.len()).collect();
+        // 还没有图标的应用去后台取（取到了重画）
+        let missing: Vec<String> = rows
+            .iter()
+            .filter_map(|row| match &row.icon {
+                Some(RowIcon::App(app)) if !self.icons.contains_key(app) => Some(app.clone()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .skip(range.start)
-            .take(range.len())
-            .cloned()
             .collect();
+        if !missing.is_empty() {
+            self.request_icons(missing, cx);
+        }
         let me = self.me.clone();
         rows.into_iter()
             .enumerate()
-            .map(|(i, p)| {
+            .map(|(i, row)| {
                 let ix = range.start + i;
-                let name = process_name(&p.command, p.program.as_deref());
-                let (menu_name, menu_command) = (name.clone(), p.command.clone());
-                let pid = p.pid;
-                let kernel = p.command.starts_with('[');
-                // 程序名后面跟完整命令行（淡色）；命令行就只是程序名时不重复
-                let command = (p.command != name).then(|| p.command.clone());
-                table_row(("process", ix))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                let ProcessRow { pid, user, cpu, rss_kb, name, detail, command, icon, app, member, kernel } = row;
+                let (menu_name, menu_command) = (name.clone(), command);
+                let line = table_row(("process", ix)).on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         this.open_menu(event.position, MenuTarget::Process { pid, name: menu_name.clone(), command: Some(menu_command.clone()) }, cx);
-                    }))
-                    .child(
-                        div()
-                            .w(px(PID_WIDTH))
-                            .flex_shrink_0()
-                            .px_3()
-                            .flex()
-                            .justify_end()
-                            .font_features(TABULAR.clone())
-                            .text_color(theme::color(ui::MUTED_FOREGROUND))
-                            .child(p.pid.to_string()),
-                    )
-                    .child(div().w(px(USER_WIDTH)).flex_shrink_0().px_3().flex().child(user_label(&p.user, me.as_deref())))
-                    .child(div().w(px(CPU_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_features(TABULAR.clone()).child(cpu_label(p.cpu)))
-                    .child(
-                        div()
-                            .w(px(MEMORY_WIDTH))
-                            .flex_shrink_0()
-                            .px_3()
-                            .flex()
-                            .justify_end()
-                            .font_features(TABULAR.clone())
-                            .map(|d| match memory_level(p.rss_kb) {
-                                MemoryLevel::Normal => d,
-                                MemoryLevel::Large => d.text_color(theme::color(ui::VIOLET)).font_weight(FontWeight::SEMIBOLD),
-                                MemoryLevel::Huge => d.text_color(theme::color(ui::VIOLET)).font_weight(FontWeight::BOLD),
+                    }),
+                );
+                // 有好几个进程的应用：点一下展开 / 收起
+                let toggle = app.as_ref().filter(|(_, count, _)| *count > 1).map(|(bundle, _, open)| (bundle.clone(), *open));
+                let line = match &toggle {
+                    Some((bundle, _)) => {
+                        let bundle = bundle.clone();
+                        line.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_app(&bundle, cx)))
+                    }
+                    None => line,
+                };
+                let icon = icon.map(|icon| match icon {
+                    RowIcon::App(app) => match self.icons.get(&app) {
+                        Some(AppIcon::Ready(image)) => ProcessIcon::App(Some(image.clone())),
+                        Some(AppIcon::Missing) => ProcessIcon::Glyph(Icon::Settings),
+                        _ => ProcessIcon::App(None),
+                    },
+                    RowIcon::Glyph(glyph) => ProcessIcon::Glyph(glyph),
+                });
+                line.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        // 展开的应用里的进程缩进，名字和应用名对齐
+                        .when(member, |d| d.pl(px(12. + ICON_SIZE + 7.)))
+                        // 图标没取到时留着位置，名字不跳
+                        .when_some(icon, |d, icon| {
+                            let slot = || div().size(px(ICON_SIZE)).flex_shrink_0().mr(px(-3.));
+                            d.child(match icon {
+                                ProcessIcon::App(Some(image)) => img(image).size(px(ICON_SIZE)).flex_shrink_0().mr(px(-3.)).into_any_element(),
+                                ProcessIcon::App(None) => slot().into_any_element(),
+                                ProcessIcon::Glyph(glyph) => slot()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme::alpha(ui::MUTED_FOREGROUND, 0.7))
+                                    .child(kit::icon_sized(glyph, 17.))
+                                    .into_any_element(),
                             })
-                            .child(format_bytes(p.rss_kb * 1024)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            // 名字放全，剩下的给命令行；窄了命令行先缩没
-                            .child(
+                        })
+                        // 名字放全，剩下的给后面那段；窄了那段先缩没
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w_full()
+                                .truncate()
+                                .font_weight(if member { FontWeight::MEDIUM } else { FontWeight::SEMIBOLD })
+                                .when(kernel, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
+                                .child(name.clone()),
+                        )
+                        .when_some(detail, |d, detail| {
+                            d.child(
                                 div()
-                                    .flex_shrink_0()
-                                    .max_w_full()
+                                    .min_w_0()
                                     .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .when(kernel, |d| d.text_color(theme::color(ui::MUTED_FOREGROUND)))
-                                    .child(name.clone()),
+                                    .when(app.is_none(), |d| d.font_family(MONO).text_size(px(11.)))
+                                    .text_color(theme::color(ui::MUTED_FOREGROUND))
+                                    .child(detail),
                             )
-                            .when_some(command, |d, command| {
-                                d.child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_family(MONO)
-                                        .text_size(px(11.))
-                                        .text_color(theme::color(ui::MUTED_FOREGROUND))
-                                        .child(command),
-                                )
-                            }),
-                    )
-                    .child(div().w(px(ACTION_WIDTH)).flex_shrink_0().flex().justify_center().child(self.kill_button(("kill-process", ix), pid, name, cx)))
-                    .into_any_element()
+                        })
+                        .when_some(toggle, |d, (_, open)| {
+                            d.child(kit::icon_sized(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.).text_color(theme::color(ui::MUTED_FOREGROUND)))
+                        }),
+                )
+                .child(div().w(px(USER_WIDTH)).flex_shrink_0().px_3().flex().child(user_label(&user, me.as_deref())))
+                .child(
+                    div()
+                        .w(px(MEMORY_WIDTH))
+                        .flex_shrink_0()
+                        .px_3()
+                        .flex()
+                        .justify_end()
+                        .font_features(TABULAR.clone())
+                        .map(|d| match memory_level(rss_kb) {
+                            MemoryLevel::Normal => d,
+                            MemoryLevel::Large => d.text_color(theme::color(ui::VIOLET)).font_weight(FontWeight::SEMIBOLD),
+                            MemoryLevel::Huge => d.text_color(theme::color(ui::VIOLET)).font_weight(FontWeight::BOLD),
+                        })
+                        .child(format_bytes(rss_kb * 1024)),
+                )
+                .child(div().w(px(CPU_WIDTH)).flex_shrink_0().px_3().flex().justify_end().font_features(TABULAR.clone()).child(cpu_label(cpu)))
+                .child(
+                    div()
+                        .w(px(PID_WIDTH))
+                        .flex_shrink_0()
+                        .px_3()
+                        .flex()
+                        .justify_end()
+                        .font_features(TABULAR.clone())
+                        .text_color(theme::color(ui::MUTED_FOREGROUND))
+                        .child(pid.to_string()),
+                )
+                .child(div().w(px(ACTION_WIDTH)).flex_shrink_0().flex().justify_center().child(self.kill_button(("kill-process", ix), pid, name, cx)))
+                .into_any_element()
             })
             .collect()
+    }
+
+    /// 展开 / 收起一个应用的进程。
+    fn toggle_app(&mut self, bundle: &str, cx: &mut Context<Self>) {
+        if !self.expanded_apps.remove(bundle) {
+            self.expanded_apps.insert(bundle.to_string());
+        }
+        cx.notify();
     }
 
     fn render_port_rows(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1289,15 +1500,17 @@ fn cpu_label(cpu: f32) -> Div {
     let badge = || div().min_w(px(40.)).px(px(7.)).py(px(2.)).rounded(px(6.)).flex().justify_end().child(value.clone());
     match cpu_level(cpu) {
         CpuLevel::Idle => div().text_color(theme::color(ui::MUTED_FOREGROUND)).child(value),
-        CpuLevel::Light(color) => badge().bg(theme::alpha(color, 0.14)).text_color(theme::color(readable(color))).font_weight(FontWeight::SEMIBOLD),
-        CpuLevel::Busy(solid) => badge().bg(theme::color(solid)).text_color(theme::color(ui::PRIMARY_FOREGROUND)).font_weight(FontWeight::BOLD),
+        CpuLevel::Light(color) => badge().text_color(theme::color(readable(color))).font_weight(FontWeight::MEDIUM),
+        CpuLevel::Busy(color) => {
+            badge().bg(theme::alpha(color, CPU_TINT[usize::from(theme::is_dark())])).text_color(theme::color(readable(color))).font_weight(FontWeight::SEMIBOLD)
+        }
     }
 }
 
 impl Render for SystemPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search.read(cx).value().to_string();
-        let process_count = self.processes.as_deref().map(|p| filter_processes(p, &query, self.sort).len());
+        let process_count = self.processes.is_some().then(|| self.process_rows(&query).len());
         let port_count = self.ports.as_deref().map(|p| filter_ports(p, &query, self.port_sort).len());
         let service_count = self.services.as_deref().filter(|_| !self.no_systemd).map(|s| filter_services(s, &query, self.service_sort).len());
         let disk_count = self.disk_count();
@@ -1389,11 +1602,12 @@ impl Render for SystemPanel {
             // 磁盘页自己画表头和内容（`render_disk`）
             View::Disk => table_header(),
             View::Processes => table_header()
-                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(PID_WIDTH), Align::End, cx))
-                .child(self.header_cell(tr!("用户"), Some(SortColumn::Process(SortKey::User)), Some(USER_WIDTH), Align::Start, cx))
-                .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), Align::End, cx))
-                .child(self.header_cell(tr!("内存"), Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), Align::End, cx))
+                // 同 Mole：名字在最前，数字在后，PID 最后
                 .child(self.header_cell(tr!("进程"), Some(SortColumn::Process(SortKey::Name)), None, Align::Start, cx))
+                .child(self.header_cell(tr!("用户"), Some(SortColumn::Process(SortKey::User)), Some(USER_WIDTH), Align::Start, cx))
+                .child(self.header_cell(tr!("内存"), Some(SortColumn::Process(SortKey::Memory)), Some(MEMORY_WIDTH), Align::End, cx))
+                .child(self.header_cell("CPU%", Some(SortColumn::Process(SortKey::Cpu)), Some(CPU_WIDTH), Align::End, cx))
+                .child(self.header_cell("PID", Some(SortColumn::Process(SortKey::Pid)), Some(PID_WIDTH), Align::End, cx))
                 .child(div().w(px(ACTION_WIDTH)).flex_shrink_0()),
             View::Ports => table_header()
                 .child(self.header_cell(tr!("协议"), Some(SortColumn::Port(PortSortKey::Proto)), Some(64.), Align::Start, cx))
@@ -1732,9 +1946,9 @@ mod tests {
         assert_eq!(cpu_level(0.4), CpuLevel::Idle);
         assert_eq!(cpu_level(0.5), CpuLevel::Light(ui::SUCCESS));
         assert_eq!(cpu_level(4.9), CpuLevel::Light(ui::SUCCESS));
-        assert_eq!(cpu_level(5.0), CpuLevel::Busy(ui::SUCCESS_SOLID));
-        assert_eq!(cpu_level(25.), CpuLevel::Busy(ui::WARNING_SOLID));
-        assert_eq!(cpu_level(180.), CpuLevel::Busy(ui::DESTRUCTIVE_SOLID));
+        assert_eq!(cpu_level(5.0), CpuLevel::Busy(ui::SUCCESS));
+        assert_eq!(cpu_level(25.), CpuLevel::Busy(ui::WARNING));
+        assert_eq!(cpu_level(180.), CpuLevel::Busy(ui::DESTRUCTIVE));
     }
 
     #[test]

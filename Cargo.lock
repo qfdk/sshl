@@ -5566,6 +5566,7 @@ dependencies = [
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "libghostty-vt",
  "objc2 0.6.5",
  "rusqlite",

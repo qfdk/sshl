@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate sshl_core;
 
+mod app_icons;
 mod assets;
 mod backend;
 mod connection_dialog;

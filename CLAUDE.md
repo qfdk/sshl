@@ -240,8 +240,17 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   外观是用户在 Claude Design 画布上从五个方案里挑的（2026-11-16，「上面 B 的卡片、下面 C 的表格」；嫌原来「太白」，A 的表格首字母方块 + 数据条又「太密」）：
   四项指标在一张卡片里，每项一段同色浅底 + 圆环（`paint_ring`，PathBuilder 画弧、两头补圆点；用量 ≥75% / ≥90% 整段换橙 / 红，`usage_color`）；
   表格铺满卡片宽、细线分行，标签页选中项实心蓝底带条数，排序列蓝字 + 箭头。进程表：用户列 root 橙、登录用户蓝（`set_machine` 的 `me`：本机 $USER、远程连接的用户名）、
-  `_` 开头的系统账号淡色；CPU ≥5% 实心标签白字（`*_SOLID` token，白字 4.5:1）、0.5–5% 浅底标签；内存 ≥100 MB 紫字；进程名加粗 + 完整命令行淡色。
-  数字用界面字体的等宽数字（`tnum`），等宽字体只留给命令行和监听地址。「进程」列按进程名排（不按命令行路径）。
+  `_` 开头的系统账号淡色；CPU 0.5–5% 数字上色、≥5% 再加同色浅底（`CPU_TINT`；原来是实心色块白字，用户 2026-11-18 嫌「颜色过于重」）；内存 ≥100 MB 紫字。
+  列的顺序同 Mole：进程 | 用户 | 内存 | CPU% | PID | 操作（用户：「调下顺序」）。远程：进程名加粗 + 完整命令行淡色。
+  **本机的进程表按应用合（同 Mole / 活动监视器，`system_panel/apps.rs`）**：同一个 .app（最外层的，Chrome 的 Helper 算 Chrome）的进程合成一行，
+  CPU、内存加起来，PID 和「结束」是主进程的（程序直接在 `Contents/MacOS` 下的），名字是访达里的显示名（`app_icons::display_name`：微信、日历），
+  点一下展开看每个进程。自己不在 .app 里、由 launchd 替应用起的 XPC 服务（Docker 的虚拟机、WebContent）按系统私有的
+  `responsibility_get_pid_responsible_for_pid`（dlsym 找，找不到退回只按路径）归到那个应用；终端里敲出来的程序父进程不是 launchd，照旧单独一行
+  （不然 claude 算进 SSHL，SSHL 看着占 1 GB）。本机每行只有图标 + 名字，不要路径和参数（用户：「本地理论上不要这么长的路径吧」「这样的参数应该用不着了」），
+  完整命令行在右键「复制命令」里。图标（`app_icons.rs`）：应用用系统给的图标（NSWorkspace，后台线程画成 2 倍像素的 PNG，22pt——16、20 用户都嫌小），
+  Info.plist 没声明图标 / 声明的文件不在的（identityservicesd、WindowManager）系统给的是灰格子占位图，不用；不在 .app 里的画淡色线条图标：
+  系统目录下的程序或 root / `_` 账号跑的是齿轮，别的（Homebrew、claude、node）是终端。不用系统的通用可执行文件图标（小尺寸下是一排黑方块）。
+  数字用界面字体的等宽数字（`tnum`），等宽字体只留给命令行和监听地址。「进程」列按进程名排（不按命令行路径；本机的应用按显示名）。
   窄窗口：指标两段一组（每段至少 `SEGMENT_MIN_WIDTH`），放不下一排四段就 2 × 2；进程名先放全，命令行拿剩下的宽度（窄了先缩没）。
   进程名按 ps 的 comm 切（`ProcessInfo::program`）：macOS 的程序路径里常有空格（Chrome / Docker 的 Helper），只按第一个空格切会只剩「Google」。
   macOS（本机和远程的 Mac 一样）：端口用 `netstat -anvl`——不是 root 也带每个端口的 `进程名:pid`（lsof 只看得到自己的），名字是 16 字节的 p_comm，
