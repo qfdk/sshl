@@ -360,8 +360,9 @@ impl Workspace {
                 let rename = self.renaming.as_ref().filter(|r| r.connection_id == id);
                 let label = match rename {
                     Some(rename) => self.rename_field(rename, window, cx),
+                    // 名字一行写全，标签跟着变宽（标签栏放不下会换到下一行）
                     None => div()
-                        .truncate()
+                        .whitespace_nowrap()
                         .map(|t| if active { t.font_weight(FontWeight::SEMIBOLD) } else { t.text_color(theme::alpha(ui::FOREGROUND, 0.8)) })
                         .child(name.clone())
                         .into_any_element(),

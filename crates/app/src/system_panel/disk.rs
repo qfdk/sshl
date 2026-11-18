@@ -555,7 +555,7 @@ impl SystemPanel {
                             }
                         })
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_filesystem(mount.clone(), cx)))
-                        .child(div().max_w(px(260.)).truncate().font_family(MONO).font_weight(FontWeight::SEMIBOLD).child(fs.mount.clone()))
+                        .child(div().whitespace_nowrap().font_family(MONO).font_weight(FontWeight::SEMIBOLD).child(fs.mount.clone()))
                         .child(div().font_features(TABULAR.clone()).text_color(theme::color(readable(color))).child(format!("{:.0}%", ratio * 100.)))
                 }))
                 .into_any_element(),
@@ -613,7 +613,8 @@ impl SystemPanel {
             .items_center()
             .gap(px(6.))
             .text_size(px(13.))
-            .children(crumbs(&mount, &path).into_iter().enumerate().map(|(index, (name, target))| {
+            // 层级多、名字长时面包屑换到下一行，不截断；一段比整行还长时它自己折行
+            .child(div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(6.)).children(crumbs(&mount, &path).into_iter().enumerate().map(|(index, (name, target))| {
                 let last = target == path;
                 div()
                     .flex()
@@ -643,10 +644,9 @@ impl SystemPanel {
                                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go_to(target.clone(), cx)))
                                 }
                             })
-                            .child(div().min_w_0().truncate().child(name)),
+                            .child(div().min_w_0().child(name)),
                     )
-            }))
-            .child(div().flex_1())
+            })))
             .when_some(usage.filter(|_| has_tree), |d, (used, total)| {
                 let ratio = used as f32 / total.max(1) as f32;
                 d.child(
@@ -782,8 +782,8 @@ impl SystemPanel {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().truncate().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(label))
-                    .when_some(device, |d, device| d.child(div().truncate().font_family(MONO).text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(device))),
+                    .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(label))
+                    .when_some(device, |d, device| d.child(div().font_family(MONO).text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(device))),
             );
         let usage = fs.map(|fs| {
             let ratio = fs.used as f32 / fs.total.max(1) as f32;

@@ -224,7 +224,7 @@ impl FileManager {
                     .text_color(theme::color(ui::PRIMARY))
                     .child(kit::icon_sized(Icon::ArrowDownUp, 14.)),
             )
-            .child(div().flex_1().min_w_0().truncate().child(self.status.info.clone()))
+            .child(div().flex_1().min_w_0().child(self.status.info.clone()))
             .child(
                 div()
                     .w(px(192.))

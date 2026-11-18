@@ -400,7 +400,7 @@ impl ConnectionDialog {
                 row(index)
                     .aria_label(name.clone())
                     .child(kit::icon_sized(Icon::Folder, 14.).text_color(theme::color(ui::PRIMARY)))
-                    .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                    .child(div().flex_1().min_w_0().child(name.clone()))
                     .when(*name == current, |d| d.child(kit::icon_sized(Icon::Check, 14.))),
             );
         }
@@ -410,7 +410,7 @@ impl ConnectionDialog {
                 row(choices.existing.len())
                     .aria_label(label.clone())
                     .child(kit::icon_sized(Icon::FolderPlus, 14.).text_color(theme::color(ui::PRIMARY)))
-                    .child(div().flex_1().min_w_0().truncate().child(label)),
+                    .child(div().flex_1().min_w_0().child(label)),
             );
         }
         let list = (!rows.is_empty()).then(|| {

@@ -320,7 +320,8 @@ pub fn format_bytes(bytes: u64) -> String {
         value /= 1024.;
         unit += 1;
     }
-    if unit == 0 { format!("{bytes} B") } else if value >= 100. { format!("{value:.0} {}", UNITS[unit]) } else { format!("{value:.1} {}", UNITS[unit]) }
+    // 数字和单位之间是不断行空格（U+00A0）：折行时不会拆成「3.3」「GB」两行
+    if unit == 0 { format!("{bytes}\u{a0}B") } else if value >= 100. { format!("{value:.0}\u{a0}{}", UNITS[unit]) } else { format!("{value:.1}\u{a0}{}", UNITS[unit]) }
 }
 
 pub fn format_uptime(secs: u64) -> String {
@@ -1002,9 +1003,19 @@ impl SystemPanel {
                         .flex()
                         .flex_col()
                         .gap(px(3.))
-                        .child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(title))
-                        .child(div().truncate().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).font_features(TABULAR.clone()).child(value))
-                        .when_some(sub, |d, sub| d.child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(sub))),
+                        .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(title))
+                        // 数值不截断也不从中间折开：负载的三个数各是一段，窄了整段换到下一行
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_x(px(10.))
+                                .text_size(px(19.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_features(TABULAR.clone())
+                                .children(value.split("  ").map(|part| div().whitespace_nowrap().child(part.to_string()))),
+                        )
+                        .when_some(sub, |d, sub| d.child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(sub))),
                 )
         };
         let dash = || "—".to_string();
@@ -1835,10 +1846,11 @@ mod tests {
 
     #[test]
     fn formats_sizes_and_uptime_for_people() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(8 * 1024 * 1024 * 1024), "8.0 GB");
-        assert_eq!(format_bytes(200 * 1024 * 1024), "200 MB");
+        // 数字和单位之间是不断行空格：哪里折行都不会拆成「3.3」「GB」两行
+        assert_eq!(format_bytes(512), "512\u{a0}B");
+        assert_eq!(format_bytes(1536), "1.5\u{a0}KB");
+        assert_eq!(format_bytes(8 * 1024 * 1024 * 1024), "8.0\u{a0}GB");
+        assert_eq!(format_bytes(200 * 1024 * 1024), "200\u{a0}MB");
         assert_eq!(format_uptime(30), "1 分钟");
         assert_eq!(format_uptime(3 * 3600 + 20 * 60), "3 小时 20 分");
         assert_eq!(format_uptime(12 * 86400 + 5 * 3600), "12 天 5 小时");

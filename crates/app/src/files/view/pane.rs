@@ -358,7 +358,7 @@ impl FileManager {
                                         }))
                                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_suggestion(kind, &open, window, cx)))
                                         .child(kit::icon_sized(Icon::Folder, 14.).text_color(theme::color(ui::PRIMARY)))
-                                        .child(div().min_w_0().truncate().child(entry.name))
+                                        .child(div().min_w_0().child(entry.name))
                                 })),
                         ))
                     }),

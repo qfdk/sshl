@@ -178,12 +178,13 @@ pub fn basename(path: &str) -> String {
 
 pub fn format_file_size(bytes: u64) -> String {
     if bytes == 0 {
-        return "0 B".into();
+        return "0\u{a0}B".into();
     }
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let index = ((bytes as f64).ln() / 1024f64.ln()).floor() as usize;
     let index = index.min(UNITS.len() - 1);
-    format!("{:.2} {}", bytes as f64 / 1024f64.powi(index as i32), UNITS[index])
+    // 数字和单位之间是不断行空格：折行时不拆开
+    format!("{:.2}\u{a0}{}", bytes as f64 / 1024f64.powi(index as i32), UNITS[index])
 }
 
 #[repr(C)]
@@ -425,9 +426,9 @@ mod tests {
 
     #[test]
     fn sizes_and_permissions_format_like_before() {
-        assert_eq!(format_file_size(0), "0 B");
-        assert_eq!(format_file_size(512 * 1024), "512.00 KB");
-        assert_eq!(format_file_size(1200 * 1024), "1.17 MB");
+        assert_eq!(format_file_size(0), "0\u{a0}B");
+        assert_eq!(format_file_size(512 * 1024), "512.00\u{a0}KB");
+        assert_eq!(format_file_size(1200 * 1024), "1.17\u{a0}MB");
         assert_eq!(format_permissions(Some(0o100644)), "644");
         assert_eq!(format_permissions(Some(0o40755)), "755");
         assert_eq!(format_permissions(None), "-");

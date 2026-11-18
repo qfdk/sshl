@@ -285,7 +285,7 @@ impl Render for PromptHost {
                             .min_w_0()
                             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(options.title.clone()))
                             .when_some(options.detail.clone(), |d, detail| {
-                                d.child(div().text_size(px(14.)).text_color(theme::alpha(ui::FOREGROUND, 0.8)).truncate().child(detail))
+                                d.child(div().text_size(px(14.)).text_color(theme::alpha(ui::FOREGROUND, 0.8)).child(detail))
                             })
                             .when_some(options.message.clone(), |d, message| {
                                 d.child(div().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(message))

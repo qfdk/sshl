@@ -140,8 +140,8 @@ impl ImportDialog {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().font_weight(FontWeight::MEDIUM).child(c.alias.clone()))
-                    .child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(target)),
+                    .child(div().font_weight(FontWeight::MEDIUM).child(c.alias.clone()))
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(target)),
             )
             .child(div().flex_shrink_0().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if row.exists { tr!("已存在").into() } else { key }))
     }

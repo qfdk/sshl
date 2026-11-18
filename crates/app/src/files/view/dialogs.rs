@@ -129,7 +129,7 @@ impl FileManager {
                             .gap(px(6.))
                             .min_w_0()
                             .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(tr!("修改文件权限")))
-                            .child(div().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).truncate().child(dialog.path.clone())),
+                            .child(div().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(dialog.path.clone())),
                     )
                     .child(
                         div()

@@ -1418,7 +1418,7 @@ fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<W
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().flex_1().min_w_0().truncate().child(info))
+                .child(div().flex_1().min_w_0().child(info))
                 .when(running, |row| {
                     row.child(
                         kit::mini_button("toast-stop", crate::assets::Icon::X, tr!("停止传输"), ui::MUTED_FOREGROUND)

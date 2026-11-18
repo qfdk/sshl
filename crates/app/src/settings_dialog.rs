@@ -611,7 +611,7 @@ impl SettingsDialog {
         let palette = current.terminal_theme();
         // 第二行是浅灰的 ls 输出，用 7 号白；浅色主题的白在浅底上看不清，改用前景色
         let dim = if palette.is_light() { palette.foreground } else { palette.ansi[7] };
-        let preview_line = |text: SharedString, color: Rgb| div().truncate().text_color(term::hsla(color)).child(text);
+        let preview_line = |text: SharedString, color: Rgb| div().text_color(term::hsla(color)).child(text);
         div()
             .flex()
             .flex_col()
@@ -642,16 +642,18 @@ impl SettingsDialog {
                                 .id("font-family")
                                 .role(Role::ComboBox)
                                 .aria_label(tr!("字体"))
-                                .h(px(40.))
+                                .min_h(px(40.))
                                 .px_3()
+                                .py(px(8.))
                                 .flex()
                                 .items_center()
                                 .justify_between()
+                                .gap_2()
                                 .rounded(px(8.))
                                 .border_1()
                                 .border_color(theme::color(if self.family_open { ui::RING } else { ui::BORDER }))
                                 .cursor_pointer()
-                                .child(div().truncate().child(selected))
+                                .child(div().min_w_0().child(selected))
                                 .child(kit::icon_sized(Icon::ChevronDown, 14.))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.family_open = !this.family_open;
@@ -729,8 +731,8 @@ impl SettingsDialog {
                 .text_color(term::hsla(t.foreground))
                 .line_height(px(16.))
                 .cursor_pointer()
-                .child(div().truncate().font_family(DEFAULT_FONT_FAMILY).text_size(px(11.)).child(sample))
-                .child(div().truncate().text_xs().child(t.name))
+                .child(div().font_family(DEFAULT_FONT_FAMILY).text_size(px(11.)).child(sample))
+                .child(div().text_xs().child(t.name))
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_theme(id, cx)))
         });
         div().id("terminal-themes").role(Role::RadioGroup).aria_label(tr!("配色")).grid().grid_cols(4).gap(px(6.)).children(cards)
@@ -756,7 +758,7 @@ impl SettingsDialog {
             .aria_label(label)
             .child(kit::checkbox((id, 0usize), checked).flex_shrink_0())
             .child(div().flex_shrink_0().text_sm().child(label))
-            .child(div().min_w_0().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint))
+            .child(div().min_w_0().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint))
             .on_click(cx.listener(move |_, _, _, cx| {
                 settings::preview(cx, |s| {
                     let value = field(s);
@@ -873,11 +875,11 @@ impl SettingsDialog {
         };
         let muted = recording || keys.is_empty();
         div()
-            .h(px(34.))
+            .min_h(px(34.))
             .flex()
             .items_center()
             .gap_2()
-            .child(div().flex_1().min_w_0().truncate().text_sm().child(label.clone()))
+            .child(div().flex_1().min_w_0().text_sm().child(label.clone()))
             .when(changed && !recording, |row| {
                 row.child(
                     kit::mini_button(("shortcut-reset", index), Icon::RotateCcw, tr!("恢复默认"), ui::MUTED_FOREGROUND).on_click(cx.listener(move |this, _, _, cx| {
@@ -1092,8 +1094,8 @@ impl SettingsDialog {
                             )
                         })
                         .child(kit::icon_sized(Icon::Server, 14.))
-                        .child(div().truncate().child(name.clone()))
-                        .child(div().truncate().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{}@{}", m.username, m.host)))
+                        .child(div().min_w_0().child(name.clone()))
+                        .child(div().min_w_0().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{}@{}", m.username, m.host)))
                         .on_drag(DraggedMember { id: drag_id, name: name.clone() }, |dragged, _, _, cx| {
                             let name = dragged.name.clone();
                             cx.new(|_| DragPreview(name))

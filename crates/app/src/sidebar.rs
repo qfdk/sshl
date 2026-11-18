@@ -198,7 +198,7 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::alpha(ui::FOREGROUND, 0.04)))
                 .child(kit::icon_sized(if group_collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, 14.))
-                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                .child(div().flex_1().min_w_0().child(name.clone()))
                 .child(count.to_string())
                 .on_click(cx.listener(move |_, _, _, cx| {
                     let name = toggle_name.clone();
@@ -288,10 +288,9 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().font_weight(FontWeight::MEDIUM).line_height(px(20.)).child(name.clone()))
+                    .child(div().font_weight(FontWeight::MEDIUM).line_height(px(20.)).child(name.clone()))
                     .child(
                         div()
-                            .truncate()
                             .font_family(settings::DEFAULT_FONT_FAMILY)
                             .text_size(px(11.))
                             .line_height(px(16.))

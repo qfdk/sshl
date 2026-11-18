@@ -285,7 +285,6 @@ impl FavoritePanel {
                         ),
                         None => d.child(
                             div()
-                                .truncate()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .when(current, |t| t.text_color(theme::color(ui::PRIMARY)))
@@ -295,7 +294,6 @@ impl FavoritePanel {
                     .when(!parent.is_empty(), |d| {
                         d.child(
                             div()
-                                .truncate()
                                 .font_family(settings::DEFAULT_FONT_FAMILY)
                                 .text_size(px(11.))
                                 .text_color(theme::color(ui::MUTED_FOREGROUND))

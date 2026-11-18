@@ -154,7 +154,8 @@ impl QuickConnect {
             .id(("quick-connect", position))
             .role(Role::MenuItem)
             .aria_label(SharedString::from(conn.name.clone()))
-            .h(px(42.))
+            .min_h(px(42.))
+            .py(px(4.))
             .px_2()
             .flex()
             .items_center()
@@ -196,10 +197,9 @@ impl QuickConnect {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::MEDIUM).line_height(px(18.)).child(conn.name.clone()))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).line_height(px(18.)).child(conn.name.clone()))
                     .child(
                         div()
-                            .truncate()
                             .font_family(settings::DEFAULT_FONT_FAMILY)
                             .text_size(px(11.))
                             .line_height(px(15.))
@@ -208,7 +208,7 @@ impl QuickConnect {
                     ),
             )
             .when(!group.is_empty(), |row| {
-                row.child(div().flex_shrink_0().max_w(px(120.)).truncate().text_size(px(11.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(group))
+                row.child(div().flex_shrink_0().max_w(px(120.)).text_size(px(11.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(group))
             })
     }
 }

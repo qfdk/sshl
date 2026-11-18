@@ -47,11 +47,11 @@ impl Render for DragPreview {
                 } else {
                     kit::icon_sized(Icon::FileText, 14.).text_color(theme::color(ui::MUTED_FOREGROUND))
                 })
-                .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(self.label.clone()))
+                .child(div().min_w_0().font_weight(FontWeight::MEDIUM).child(self.label.clone()))
                 .when_some(self.destination.clone(), |d, destination| {
                     let name = basename(&destination);
                     let name = if name.is_empty() || destination == "/" { "/".to_string() } else { name };
-                    d.child(div().flex_shrink_0().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if upload { tr!("上传到 {}", name) } else { tr!("下载到 {}", name) }))
+                    d.child(div().min_w_0().text_color(theme::color(ui::MUTED_FOREGROUND)).child(if upload { tr!("上传到 {}", name) } else { tr!("下载到 {}", name) }))
                 }),
         )
     }

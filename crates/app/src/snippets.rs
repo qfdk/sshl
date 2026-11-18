@@ -192,7 +192,6 @@ impl SnippetPanel {
                     .gap(px(1.))
                     .child(
                         div()
-                            .truncate()
                             .text_size(px(13.))
                             .map(|t| if named { t.font_weight(FontWeight::MEDIUM) } else { t.font_family(settings::DEFAULT_FONT_FAMILY) })
                             .child(title),
@@ -200,7 +199,6 @@ impl SnippetPanel {
                     .when_some(detail, |d, detail| {
                         d.child(
                             div()
-                                .truncate()
                                 .font_family(settings::DEFAULT_FONT_FAMILY)
                                 .text_size(px(11.))
                                 .text_color(theme::color(ui::MUTED_FOREGROUND))
