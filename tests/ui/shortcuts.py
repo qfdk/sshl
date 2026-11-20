@@ -214,6 +214,24 @@ def l_busy_tab_enter_cancels():
     return expect(not s["prompt"] and len(s["tabs"]) == 1 and running(7005), f"{s}")
 
 
+def l_busy_space_closes():
+    # the prompt opens with its default button selected: Space presses it
+    local_tab(7008)
+    key("w", "cmd")
+    key("space", wait=0.8)
+    s = state()
+    return expect(len(s["tabs"]) == 0 and not running(7008), f"{s} sleep={running(7008)}")
+
+
+def l_busy_shift_tab_enter_cancels():
+    local_tab(7009)
+    key("w", "cmd")
+    key("tab", "shift")
+    key("enter")
+    s = state()
+    return expect(not s["prompt"] and len(s["tabs"]) == 1 and running(7009), f"{s}")
+
+
 def l_close_second_keyboard_reaches_first():
     local_tab(7006)
     local_tab(7007)
@@ -392,6 +410,8 @@ CASES = [
     ("本机·跑程序 ⌘W ⌘W Esc → 不关，程序在", l_busy_cmd_w_twice_esc),
     ("确认框 Tab Tab 空格 → 关", l_busy_tab_tab_space),
     ("确认框 Tab ↵（=取消）→ 不关", l_busy_tab_enter_cancels),
+    ("确认框 空格（默认按钮已选中）→ 关", l_busy_space_closes),
+    ("确认框 ⇧Tab ↵（=取消）→ 不关", l_busy_shift_tab_enter_cancels),
     ("关掉第二个标签后键盘回到第一个", l_close_second_keyboard_reaches_first),
     ("⌘Q → 弹框，Esc 不退", q_cmd_q_esc),
     ("⌘Q ↵ → 退出", q_cmd_q_enter),

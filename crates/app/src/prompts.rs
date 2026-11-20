@@ -1,6 +1,6 @@
 //! 应用内提示 / 确认 / 密码框（旧 lib/dialogs.ts 的原生版）。多个请求排队，一个一个显示；
 //! 回车 = 确认（默认按钮），Esc = 取消；最后一个关掉后焦点还给弹出前的地方（多半是终端）。
-//! Tab / ⇧Tab 在框里的按钮（和密码框、复选框）之间转、出不了框，空格或回车按下 Tab 选中的那个（同系统对话框）。
+//! 弹出时选中默认按钮（画焦点框）；Tab / ⇧Tab 在框里的按钮（和密码框、复选框）之间转、出不了框，空格或回车按下选中的那个（同系统对话框）。
 
 use std::collections::VecDeque;
 
@@ -210,9 +210,10 @@ impl PromptHost {
                 let focus = input.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
             }
+            // 焦点直接放在默认按钮上（画焦点框）：一眼看出回车 / 空格按的是它，Tab 从它往下转
             _ => {
                 self._subscriptions.clear();
-                window.focus(&self.focus, cx);
+                window.focus(&self.ok_focus, cx);
             }
         }
     }
@@ -286,19 +287,33 @@ impl PromptHost {
             Some(Focused::Ok) => self.settle(true, None, window, cx),
             Some(Focused::Check) if key == "space" => self.toggle_check(cx),
             Some(Focused::Choice(value)) => self.settle(true, Some(value), window, cx),
-            // 框本身、复选框上的回车 = 默认按钮；密码框里的回车（它自己的 PressEnter）和空格归输入框
-            _ if key == "enter" && !password => self.settle(true, None, window, cx),
+            // 框本身（鼠标点了框里的空白）上的回车、空格和复选框上的回车 = 默认按钮（它画着焦点框，见 `default_ringed`）；
+            // 密码框里的回车（它自己的 PressEnter）和空格归输入框
+            Some(Focused::Check) | None if !password => self.settle(true, None, window, cx),
             _ => return,
         }
         cx.stop_propagation();
     }
+
+    /// 默认按钮画不画焦点框：画的就是回车会按下的那个。焦点在它上面、在框本身上，或者在鼠标点过的复选框上
+    /// （复选框只有 Tab 选中时自己画框，空格勾它）。密码框不画：焦点在输入框里，看得出来。
+    fn default_ringed(&self, password: bool, window: &Window) -> bool {
+        match self.focused(window) {
+            Some(Focused::Ok) => true,
+            Some(Focused::Check) => !window.last_input_was_keyboard(),
+            None => !password,
+            Some(Focused::Cancel | Focused::Choice(_)) => false,
+        }
+    }
 }
 
 impl Render for PromptHost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(head) = self.queue.front() else {
             return div().into_any_element();
         };
+        let ok_ringed = self.default_ringed(matches!(head.kind, Kind::Password { .. }), window);
+        let cancel_ringed = self.cancel_focus.is_focused(window);
         let options = &head.options;
         let is_alert = matches!(head.kind, Kind::Alert(_));
         let password = match &head.kind {
@@ -341,7 +356,8 @@ impl Render for PromptHost {
                                     .child(div().text_size(px(12.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已保存的密码")))
                                     .child(div().flex().flex_wrap().gap(px(6.)).children(choices.into_iter().zip(choice_focus).enumerate().map(|(i, (choice, focus))| {
                                         let value = choice.value.clone();
-                                        kit::focus_ring(kit::button(("prompt-choice", i), Variant::Outline).track_focus(&focus))
+                                        let ringed = focus.is_focused(window);
+                                        kit::ring(kit::button(("prompt-choice", i), Variant::Outline).track_focus(&focus), ringed)
                                             .h(px(32.))
                                             .px(px(10.))
                                             .text_size(px(12.))
@@ -377,16 +393,17 @@ impl Render for PromptHost {
                 kit::modal_footer()
                     .when(!is_alert, |f| {
                         f.child(
-                            kit::focus_ring(kit::button("prompt-cancel", Variant::Outline).track_focus(&self.cancel_focus))
+                            kit::ring(kit::button("prompt-cancel", Variant::Outline).track_focus(&self.cancel_focus), cancel_ringed)
                                 .aria_label(options.cancel_label.clone())
                                 .child(options.cancel_label.clone())
                                 .on_click(cx.listener(|host, _, window, cx| host.settle(false, None, window, cx))),
                         )
                     })
                     .child(
-                        kit::focus_ring(
+                        kit::ring(
                             kit::button("prompt-ok", if options.destructive { Variant::Destructive } else { Variant::Primary })
                                 .track_focus(&self.ok_focus),
+                            ok_ringed,
                         )
                         .aria_label(options.confirm_label.clone())
                         .child(options.confirm_label.clone())
@@ -448,12 +465,43 @@ mod tests {
         let cx = window(cx);
         assert_eq!(answer(cx, "enter"), Some(true), "回车 = 默认按钮");
         assert_eq!(answer(cx, "escape"), Some(false));
-        assert_eq!(answer(cx, "tab enter"), Some(false), "Tab 先选中「取消」");
+        assert_eq!(answer(cx, "tab enter"), Some(false), "Tab 从默认按钮转到「取消」");
         assert_eq!(answer(cx, "tab tab enter"), Some(true));
         assert_eq!(answer(cx, "tab tab space"), Some(true), "空格按下选中的按钮");
         assert_eq!(answer(cx, "tab tab tab space"), Some(false), "转一圈回到「取消」，不跑出框");
-        assert_eq!(answer(cx, "shift-tab enter"), Some(true));
+        assert_eq!(answer(cx, "shift-tab enter"), Some(false));
+        assert_eq!(answer(cx, "shift-tab shift-tab enter"), Some(true));
         assert_eq!(answer(cx, "tab escape"), Some(false));
+    }
+
+    /// 弹出时看不出回车会按哪个（用户：「看不出来是不是关闭」）：焦点要落在默认按钮上（它画焦点框），空格也按它。
+    #[gpui::test]
+    fn the_default_button_is_selected_when_a_prompt_opens(cx: &mut TestAppContext) {
+        let cx = window(cx);
+        let host = cx.update(|_, cx| host(cx));
+        let _answer = cx.update(|window, cx| confirm(window, cx, Options::new("关闭「本机」").confirm("关闭")));
+        cx.run_until_parked();
+        let ok = cx.update(|window, cx| host.read(cx).ok_focus.is_focused(window));
+        assert!(ok, "焦点在「关闭」上");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(answer(cx, "space"), Some(true), "空格 = 默认按钮");
+    }
+
+    /// 鼠标点了框里的空白（焦点到框本身），默认按钮照样是回车、空格按的那个。
+    #[gpui::test]
+    fn space_presses_the_default_button_after_clicking_the_prompt(cx: &mut TestAppContext) {
+        let cx = window(cx);
+        let host = cx.update(|_, cx| host(cx));
+        let mut answer = cx.update(|window, cx| confirm(window, cx, Options::new("关闭「本机」").confirm("关闭")));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let focus = host.read(cx).focus.clone();
+            window.focus(&focus, cx);
+        });
+        cx.simulate_keystrokes("space");
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv().ok().flatten(), Some(true));
     }
 
     #[gpui::test]

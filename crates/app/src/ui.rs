@@ -119,15 +119,22 @@ pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
 /// 键盘（Tab）选中的按钮、复选框外面一圈焦点框，鼠标点的不画（同系统对话框）。元素要 `track_focus`。
 /// 用外扩阴影画：不占布局，按钮不会因为选中变大。
 pub fn focus_ring<E: InteractiveElement>(element: E) -> E {
-    element.focus_visible(|s| {
-        s.shadow(vec![BoxShadow {
-            color: theme::alpha(ui::RING, 0.6),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(3.),
-            inset: false,
-        }])
-    })
+    element.focus_visible(|s| s.shadow(ring_shadow()))
+}
+
+/// 同一圈焦点框，`on` 时就画，不管上一次输入是不是键盘：提示框里回车 / 空格会按下的那个按钮，鼠标点开的框也要看得出来。
+pub fn ring<E: Styled>(element: E, on: bool) -> E {
+    if on { element.shadow(ring_shadow()) } else { element }
+}
+
+fn ring_shadow() -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: theme::alpha(ui::RING, 0.6),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(3.),
+        inset: false,
+    }]
 }
 
 /// 带图标和文字的按钮。
