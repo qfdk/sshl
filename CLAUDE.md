@@ -340,7 +340,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   整个会话的环境都跟进 SSHL；不去掉的话本机终端里再开的 claude 以为自己是那次会话的子会话，提示「Transcript saving is off」、不存对话记录，
   而且从这样的终端里再部署又会带进下一个 SSHL（用户反复遇到过）。
   工作区里本机标签 id 是 `local:<n>`（`Session.local`）：没有文件管理和填充密码，顶栏只切 终端 / 系统（`workspace::main_tabs_for`，⌘O 不切），
-  shell 退出标签直接关；⌘W 前台只有 shell 时直接关，有程序在跑（`tcgetpgrp` ≠ shell）才问；新标签从当前本机标签前台进程的目录开始
+  shell 退出标签直接关；用户关本机标签（⌘W、×、右键「关闭」）一律先问（用户 2026-11-20：「只要是关闭标签都要有一个确认框」，以前只有 shell 时直接关），有程序在跑（`tcgetpgrp` ≠ shell）时说会结束它；新标签从当前本机标签前台进程的目录开始
   （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段的「本机」、本机的目录收藏都归属 `local`（`workspace::LOCAL_SCOPE`），所有本机标签共用。
   标签切换 ⌘⇧] / ⌘⇧[、⌃Tab / ⌃⇧Tab（`groups::cycle_tab`，两头绕回）；⌘1 … ⌘9 切到第几个标签（`groups::nth_tab`，本机标签也算，
   没那么多就不动）。点标签、⌘ 数字、⌘⇧] 都走 `Workspace::select_tab`。按住 ⌘ 时前 9 个标签角上浮出序号，视图按钮浮出 I / O / P

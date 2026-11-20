@@ -491,6 +491,7 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("保存连接失败", "Couldn't save the connection"),
     ("连接失败", "Connection failed"),
     ("「{}」还在运行，关闭标签会结束它。", "“{}” is still running. Closing the tab will end it."),
+    ("关闭标签会结束这个终端。", "Closing the tab will end this terminal."),
     ("关闭「{}」", "Close “{}”"),
     ("这个会话", "this session"),
     ("正在进行的文件传输会中断。", "File transfers in progress will be interrupted."),

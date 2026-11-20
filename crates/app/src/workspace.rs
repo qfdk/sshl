@@ -760,13 +760,14 @@ impl Workspace {
     /// 所有断开入口（标签 ×、侧栏、右键菜单、顶栏按钮、⌘W）都走这里，统一先确认。
     pub(crate) fn disconnect(&mut self, connection_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session(connection_id) else { return };
-        // 本机标签：前台只有 shell 时直接关；有程序在跑（vim、ssh、dev server）才问
+        // 本机标签一律先问（用户：「只要是关闭标签都要有一个确认框」）：关了就回不来，shell 的目录、环境、历史都没了。
+        // 有程序在跑（vim、ssh、dev server）时说清会结束它
         if session.local {
             let connection_id = connection_id.to_string();
-            let Some(program) = session.view.read(cx).local_busy() else {
-                return self.disconnect_now(&connection_id, window, cx);
+            let message = match session.view.read(cx).local_busy() {
+                Some(program) => tr!("「{}」还在运行，关闭标签会结束它。", program),
+                None => tr!("关闭标签会结束这个终端。").to_string(),
             };
-            let message = tr!("「{}」还在运行，关闭标签会结束它。", program);
             let answer = prompts::confirm(window, cx, Options::new(tr!("关闭「{}」", self.tab_name(session))).message(message).confirm(tr!("关闭")));
             cx.spawn_in(window, async move |this, cx| {
                 if answer.await.unwrap_or(false) {
