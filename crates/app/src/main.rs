@@ -91,8 +91,23 @@ fn main() {
 
         // 快捷键：gpui-base 的、设置里能改的、写死的，一次建好（键盘布局变了、设置改了会重建）
         keymap::init(cx);
-        // ⌘Q 先到工作区（开着标签时要确认，见 Workspace::request_quit）；没有窗口接的时候才到这里
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // ⌘Q 先到工作区（开着标签时要确认，见 Workspace::request_quit）。没有主窗口时（⌘M 最小化了）菜单的 ⌘Q 没人接，
+        // 落到这里：一样交给工作区去问，不能不声不响把所有会话关掉。按键分发途中窗口正被占着，等这一轮完了再进去
+        cx.on_action(|_: &Quit, cx| {
+            let Some(window) = cx.windows().first().and_then(|w| w.downcast::<gpui_base::Root>()) else { return cx.quit() };
+            cx.defer(move |cx| {
+                let asked = window.update(cx, |root, window, cx| {
+                    let workspace = root.view().clone().downcast::<Workspace>().ok()?;
+                    // 最小化的窗口拿出来，不然确认框在看不见的窗口里
+                    window.activate_window();
+                    workspace.update(cx, |workspace, cx| workspace.request_quit(window, cx));
+                    Some(())
+                });
+                if !matches!(asked, Ok(Some(()))) {
+                    cx.quit();
+                }
+            });
+        });
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());

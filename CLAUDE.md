@@ -29,6 +29,7 @@ brew install zig                   # Zig 0.17：libghostty-vt 构建用
 cargo run -p sshl                  # 开发版（debug；libghostty-vt 也是 Zig Debug，刷屏很慢，测性能用 release）
 cargo test -p sshl-core            # 后端单元测试（集成测试 #[ignore]，要 SSHL_SFTP_IT / SSHL_SUDO_IT 指向测试容器）
 cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键位、设置迁移、文件管理逻辑）+ 提示框的键盘交互（gpui 的 test-support，只在测试里开）
+python3 tests/ui/shortcuts.py     # 快捷键 × 状态矩阵（真实按键投给后台的测试实例，不抢焦点；要先 build --release --features devhook，SSHL_UI_SSH=<已存的连接> 加跑 SSH 的）
 cargo clippy --workspace --all-targets   # 自己的 crate 保持零警告（vendor/russh 的 3 条不改：一条没用的 import、两条弃用的 std::u32::MAX / u8::MAX，补丁保持最小）
 scripts/bundle.sh                  # release 构建 + 组装 target/release/bundle/SSHL.app（ad-hoc 签名）
 scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 + 自定义图标），先跑 bundle.sh
@@ -54,7 +55,9 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。
   关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock 走 `on_reopen` 显示；⌘Q 退出。
   ⌘Q 开着标签时先确认（`Workspace::request_quit`，用户手滑按到过，所有会话一起没了），没有标签直接退。按住 ⌘Q 会连发：确认框开着时后面几次不叠框、也不算确认。
-  这个动作要由工作区的元素接（`.on_action`），不能在全局处理函数里 `window.update`：按键分发途中窗口正被占着，拿不到，会落进「直接退」的兜底。
+  这个动作要由工作区的元素接（`.on_action`），不能在全局处理函数里直接 `window.update`：按键分发途中窗口正被占着，拿不到。
+  没有主窗口时（⌘M 最小化了）菜单的 ⌘Q 没人接、落到 `main.rs` 的全局处理：它 `cx.defer` 等这一轮完了再进窗口，把窗口拿出来交给 `request_quit` 问，
+  不能直接退（以前就是直接退，最小化后手滑按 ⌘Q 所有会话不声不响全没了）。已经有提示框开着时 ⌘Q 不再排一个「退出」在后面。
 - **终端线程模型**：libghostty-vt 的类型都是 `!Send`，每个会话一个终端线程独占它（`terminal/engine.rs`）。
   SSH 输出、键鼠、改尺寸都以 `Input` 消息进来；界面只拿 `Frame` 快照来画，行是 `Arc<Row>`，没变的行沿用。
   每轮先处理控制消息（按键、^C 不排在积压输出后面），输出按 64KB 切片解析，刷屏时最多 16ms 出一帧。
@@ -175,6 +178,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
     后台挪焦点的地方（`refocus`、`activate`、`session_gone`）也不动——要挪焦点一律走 `refocus`，别直接 `window.focus` 到终端。
     以前按两下 ⌘W（或按住连发）会排几个一样的确认框，回车关掉第一个、关标签时 `session_gone` 又把焦点从第二个框上抢走，之后键盘全落空。
   - 焦点所在的东西没了（关掉的标签的终端）：`on_focus_lost` 交给 `refocus`，焦点回当前内容区。
+  - 改了快捷键、对话框、面板、关标签 / 退出的逻辑，跑一遍 `tests/ui/shortcuts.py`（用户：「快捷键在各种状态下要好好测」），新状态 / 新快捷键往里加一行。
 - **连接流程**（`workspace.rs`）：一个连接只开一个会话；连上才出标签，慢于 300ms 才显示连接遮罩（Esc / 取消可中止）。
   切换到已开会话是乐观切换，探活在后台，失效且用户仍停在该会话上时原地重连；用户主动断开不算失效。
   远端关闭 / 掉线时标签和屏幕留着（灰点），终端里提示按 Enter 原地重连（`TerminalView::reconnect`：新 shell 通道经

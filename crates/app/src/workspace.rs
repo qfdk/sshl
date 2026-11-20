@@ -1304,9 +1304,12 @@ impl Workspace {
             cx.quit();
             return;
         };
-        if std::mem::replace(&mut self.quit_asking, true) {
+        // 已经有提示框开着（关标签的确认、或者上一次 ⌘Q 的）：不再排一个「退出」在它后面，
+        // 不然 Esc 掉眼前这个，后面那个又冒出来，看着像键盘不管用
+        if self.quit_asking || prompts::is_open(cx) {
             return;
         }
+        self.quit_asking = true;
         self.finish_rename(true, window, cx);
         let answer = prompts::confirm(window, cx, Options::new(tr!("退出 SSHL？")).message(message).confirm(tr!("退出")));
         cx.spawn_in(window, async move |this, cx| {
