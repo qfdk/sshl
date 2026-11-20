@@ -341,6 +341,11 @@ impl FileManager {
 
     // ---------------------------------------------------------------- 对外接口
 
+    /// 新建文件夹 / 修改权限的对话框开着（焦点在框里，工作区别挪走）。
+    pub fn dialog_open(&self) -> bool {
+        self.new_folder.is_some() || self.permission.is_some()
+    }
+
     /// 文件管理标签显示 / 隐藏。显示时加载两侧并同步终端用户。
     pub fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.active == active {
@@ -765,7 +770,7 @@ mod tests {
     /// 还是它自己的回车，不能顺带把选中的文件改名（gpui-base 的单行输入框处理完回车会让它接着往外传）。
     #[test]
     fn enter_renames_only_in_the_file_list() {
-        gpui::actions!(test, [InputEnter]);
+        gpui::actions!(files_test, [InputEnter]);
         let mut keymap = Keymap::new(vec![KeyBinding::new("enter", InputEnter, Some("Input"))]);
         keymap.add_bindings(crate::keymap::default_bindings());
         keymap.add_bindings(key_bindings());

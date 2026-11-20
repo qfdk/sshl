@@ -2,9 +2,9 @@
 //! 交互行为（输入法、焦点、选择）用 gpui-base，外观按旧界面的 shadcn 样式自己画。
 
 use gpui::{
-    AnyElement, App, AppContext, Bounds, ClickEvent, Div, Element, ElementId, Entity, FontWeight, GlobalElementId, Hsla,
+    AnyElement, App, AppContext, Bounds, BoxShadow, ClickEvent, Div, Element, ElementId, Entity, FontWeight, GlobalElementId, Hsla,
     InspectorElementId, InteractiveElement, IntoElement, LayoutId, ListAlignment, ListState, ParentElement, Pixels, Role, SharedString, Stateful,
-    StatefulInteractiveElement, Style, Styled, TransformationMatrix, Window, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Style, Styled, TransformationMatrix, Window, div, point, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{Input, InputState};
 
@@ -114,6 +114,20 @@ pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
             .text_color(theme::color(ui::FOREGROUND))
             .hover(|s| s.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND))),
     }
+}
+
+/// 键盘（Tab）选中的按钮、复选框外面一圈焦点框，鼠标点的不画（同系统对话框）。元素要 `track_focus`。
+/// 用外扩阴影画：不占布局，按钮不会因为选中变大。
+pub fn focus_ring<E: InteractiveElement>(element: E) -> E {
+    element.focus_visible(|s| {
+        s.shadow(vec![BoxShadow {
+            color: theme::alpha(ui::RING, 0.6),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(3.),
+            inset: false,
+        }])
+    })
 }
 
 /// 带图标和文字的按钮。

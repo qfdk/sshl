@@ -7,6 +7,7 @@ use gpui::{
     KeyBinding, KeyDownEvent, MouseButton, ParentElement, PathPromptOptions, Render, Role, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, actions, deferred, div, prelude::FluentBuilder, px,
 };
+use gpui_base::FocusTrapElement;
 use gpui_base::input::{InputEvent, InputState, Position};
 use sshl_core::config_store::{AuthKind, StoredConnection};
 
@@ -485,7 +486,6 @@ impl Render for ConnectionDialog {
         let editing = self.editing.is_some();
         let this = cx.entity().downgrade();
         let body = div()
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.emit(ConnectionDialogEvent::Cancel);
@@ -596,7 +596,8 @@ impl Render for ConnectionDialog {
                         kit::labeled_button("connection-submit", Variant::Primary, None, if editing { tr!("保存") } else { tr!("连接") })
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
-            );
+            )
+            .focus_trap("connection-trap", &self.focus);
         kit::modal("connection-dialog", 520., body)
     }
 }
@@ -608,7 +609,7 @@ mod tests {
     #[test]
     fn arrows_and_escape_reach_the_group_dropdown_before_the_input_box() {
         use gpui::{KeyContext, Keymap, Keystroke};
-        gpui::actions!(test, [InputDown, InputEscape]);
+        gpui::actions!(connection_dialog_test, [InputDown, InputEscape]);
         // 同 gpui-base：输入框自己的键先绑（main.rs 里 gpui_base::init 在前）
         let mut keymap = Keymap::new(vec![KeyBinding::new("down", InputDown, Some("Input")), KeyBinding::new("escape", InputEscape, Some("Input"))]);
         keymap.add_bindings(key_bindings());
@@ -622,7 +623,7 @@ mod tests {
         assert_eq!(first("up", &group).as_deref(), Some("connection_dialog::GroupPrev"));
         assert_eq!(first("escape", &group).as_deref(), Some("connection_dialog::GroupDismiss"));
         // 对话框里别的输入框不受影响
-        assert_eq!(first("escape", &["Root", "Workspace", "Input"]).as_deref(), Some("test::InputEscape"));
+        assert_eq!(first("escape", &["Root", "Workspace", "Input"]).as_deref(), Some("connection_dialog_test::InputEscape"));
     }
 
     #[test]

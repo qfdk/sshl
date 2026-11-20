@@ -28,7 +28,7 @@ tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 ss
 brew install zig                   # Zig 0.17：libghostty-vt 构建用
 cargo run -p sshl                  # 开发版（debug；libghostty-vt 也是 Zig Debug，刷屏很慢，测性能用 release）
 cargo test -p sshl-core            # 后端单元测试（集成测试 #[ignore]，要 SSHL_SFTP_IT / SSHL_SUDO_IT 指向测试容器）
-cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键位、设置迁移、文件管理逻辑）
+cargo test -p sshl                 # 界面纯逻辑测试（分组、帧、键位、设置迁移、文件管理逻辑）+ 提示框的键盘交互（gpui 的 test-support，只在测试里开）
 cargo clippy --workspace --all-targets   # 自己的 crate 保持零警告（vendor/russh 的 3 条不改：一条没用的 import、两条弃用的 std::u32::MAX / u8::MAX，补丁保持最小）
 scripts/bundle.sh                  # release 构建 + 组装 target/release/bundle/SSHL.app（ad-hoc 签名）
 scripts/deploy.sh                  # 装到 /Applications（Developer ID 重签 + 自定义图标），先跑 bundle.sh
@@ -163,6 +163,18 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   要自己加对应的 `rounded_*`。
 - **提示框**：一律用 `prompts::alert / confirm / password`（应用内模态框，排队显示，回车确认、Esc 取消，关掉后焦点还给
   弹出前的地方）。不要用系统 NSAlert / `cx.prompt`：原生弹窗按钮是英文、窄、中文长句被拦腰折行，与应用风格不一。
+  键盘同系统对话框：Tab / ⇧Tab 在框里的按钮（和密码框、复选框、已保存密码）之间转，选中的按钮画焦点框（`kit::focus_ring`，
+  只在键盘选中时画），空格或回车按下它；没用 Tab 选过时回车 = 默认按钮。测试在 `prompts.rs`（GPUI 测试窗口 + 模拟按键）。
+- **对话框和焦点**（用户报过「确认框键盘关不掉」：焦点不在框里，回车落在框后面）：
+  - 对话框的外层用 gpui-base 的 `.focus_trap(id, &焦点句柄)`，不用 `track_focus`：Root 把 Tab 绑成切到窗口里下一个能停的地方，
+    不圈住的话会切到框后面（侧栏搜索框、地址栏），框还开着、敲的字和回车却去了后面。新加对话框照这个做。
+  - 浮层面板（⌘K、命令片段、目录收藏）和 ⌘F 搜索条不能套陷阱：鼠标按下带焦点句柄的元素时 GPUI 会把焦点给它，
+    点一下面板空白处搜索框就失焦、上下键失灵。它们在自己的 `… > Input` 上下文里把 Tab / ⇧Tab 绑成上下选（搜索条是下一个 / 上一个），
+    别绑 `NoAction`：那样 Tab 落进输入框，成了搜索词里的一个制表符（终端里绑 NoAction 是对的，Tab 要发给 shell）。
+  - 对话框 / 提示框开着时（`Workspace::dialog_holds_focus`），工作区快捷键不动（`modal_open`：⌘W、⌘T、⌘,、切标签、切视图、开面板），
+    后台挪焦点的地方（`refocus`、`activate`、`session_gone`）也不动——要挪焦点一律走 `refocus`，别直接 `window.focus` 到终端。
+    以前按两下 ⌘W（或按住连发）会排几个一样的确认框，回车关掉第一个、关标签时 `session_gone` 又把焦点从第二个框上抢走，之后键盘全落空。
+  - 焦点所在的东西没了（关掉的标签的终端）：`on_focus_lost` 交给 `refocus`，焦点回当前内容区。
 - **连接流程**（`workspace.rs`）：一个连接只开一个会话；连上才出标签，慢于 300ms 才显示连接遮罩（Esc / 取消可中止）。
   切换到已开会话是乐观切换，探活在后台，失效且用户仍停在该会话上时原地重连；用户主动断开不算失效。
   远端关闭 / 掉线时标签和屏幕留着（灰点），终端里提示按 Enter 原地重连（`TerminalView::reconnect`：新 shell 通道经

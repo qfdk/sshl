@@ -214,6 +214,8 @@ impl Workspace {
                     }
                 }
             }),
+            // 焦点所在的东西没了（关掉的标签的终端、收起的面板里的输入框）：交回当前内容区，不然按键谁也收不到
+            cx.on_focus_lost(window, |this, window, cx| this.refocus(window, cx)),
             cx.subscribe_in(&snippet_panel, window, Self::snippet_panel_event),
             cx.subscribe_in(&favorite_panel, window, Self::favorite_panel_event),
             cx.subscribe_in(&quick_connect, window, Self::quick_connect_event),
@@ -698,7 +700,7 @@ impl Workspace {
         if !main_tabs_for(local).contains(&self.main_tab) {
             self.main_tab = MainTab::Terminal;
             self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
-            self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
+            self.system_panel.update(cx, |panel, cx| panel.set_active(false, cx));
         }
         let id = connection_id.to_string();
         let machine = if local { Some(Machine::Local) } else { file_session.as_ref().map(|s| Machine::Remote(s.session_id.clone())) };
@@ -712,6 +714,7 @@ impl Workspace {
             }
         });
         if self.main_tab == MainTab::Terminal
+            && !self.dialog_holds_focus(cx)
             && let Some(session) = self.session(connection_id) {
                 let focus = session.view.read(cx).focus_handle(cx);
                 window.focus(&focus, cx);
@@ -857,12 +860,14 @@ impl Workspace {
             if self.main_tab != MainTab::Terminal {
                 self.main_tab = MainTab::Terminal;
                 self.file_manager.update(cx, |files, cx| files.set_active(false, window, cx));
-                self.system_panel.update(cx, |panel, cx| panel.set_active(false, window, cx));
+                self.system_panel.update(cx, |panel, cx| panel.set_active(false, cx));
             }
             self.system_panel.update(cx, |panel, cx| panel.set_machine(None, None, cx));
             self.fill_menu = None;
             self.top_panel = None;
-            window.focus(&self.focus, cx);
+            if !self.dialog_holds_focus(cx) {
+                window.focus(&self.focus, cx);
+            }
         }
     }
 
@@ -982,8 +987,11 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 对话框关掉后焦点回到当前终端（否则要再点一下才能继续输入）。
+    /// 对话框关掉后焦点回到当前终端（否则要再点一下才能继续输入）。还有框开着时不动，焦点留在框里。
     pub(crate) fn refocus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_holds_focus(cx) {
+            return;
+        }
         if self.main_tab == MainTab::Files && self.active.is_some() {
             let focus = self.file_manager.read(cx).focus_handle(cx);
             window.focus(&focus, cx);
@@ -1074,8 +1082,18 @@ impl Workspace {
 
     /// 有对话框 / 提示框开着，或正在连接（连接遮罩）：这时快捷键不在它们背后切标签、切视图、弹面板。
     fn modal_open(&self, cx: &App) -> bool {
-        let dialog_open = self.connection_dialog.is_some() || self.import_dialog.is_some() || self.settings_dialog.is_some() || self.snippet_dialog.is_some();
-        self.pending.is_some() || dialog_open || prompts::is_open(cx)
+        self.pending.is_some() || self.dialog_holds_focus(cx)
+    }
+
+    /// 有对话框 / 提示框开着：焦点归它（框里 Tab 出不去）。切标签、会话没了、面板收起这些地方都不能把焦点挪走，
+    /// 不然框还开着、回车却落在框后面，键盘关不掉它。连接中的遮罩不拿焦点，不算。
+    fn dialog_holds_focus(&self, cx: &App) -> bool {
+        self.connection_dialog.is_some()
+            || self.import_dialog.is_some()
+            || self.settings_dialog.is_some()
+            || self.snippet_dialog.is_some()
+            || self.file_manager.read(cx).dialog_open()
+            || prompts::is_open(cx)
     }
 
     /// 快捷键切标签 / 切视图之前：有对话框时不动（返回 false）；浮着的面板（⌘K、命令片段、填充密码、右键菜单）先收掉。
@@ -1266,6 +1284,10 @@ impl Workspace {
     // ---------- 快捷键 ----------
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        // 框开着时不动：再按 ⌘W（或按住连发）会再排一个一样的确认框，回车只关掉第一个，看着像回车不管用
+        if self.modal_open(cx) {
+            return;
+        }
         // 正在改名：先收掉。不然断开的确认框会记着「关掉后把焦点还给改名输入框」，取消时输入框已经没了，
         // 焦点落空，键盘什么都按不动
         self.finish_rename(true, window, cx);
@@ -1317,7 +1339,7 @@ impl Workspace {
         if tab == MainTab::System {
             self.file_manager.update(cx, |files, cx| files.sync_identity_quietly(window, cx));
         }
-        self.system_panel.update(cx, |panel, cx| panel.set_active(tab == MainTab::System, window, cx));
+        self.system_panel.update(cx, |panel, cx| panel.set_active(tab == MainTab::System, cx));
         self.refocus(window, cx);
         cx.notify();
     }
@@ -1505,12 +1527,21 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.show_main_tab(MainTab::System, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_top_panel(TopPanel::Snippets, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFavorites, window, cx| this.toggle_top_panel(TopPanel::Favorites, window, cx)))
-            .on_action(cx.listener(|this, _: &NewConnection, window, cx| this.open_connection_dialog(None, window, cx)))
+            // 框开着时 ⌘T / ⌘, 不再叠一个框上去（⌘T 还会把正在填的新建连接整个换掉）
+            .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
+                if !this.modal_open(cx) {
+                    this.open_connection_dialog(None, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewLocalTerminal, window, cx| this.new_local_terminal(window, cx)))
             .on_action(cx.listener(Self::select_nth_tab))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                if !this.modal_open(cx) {
+                    this.open_settings(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
             .on_action(cx.listener(|this, _: &OpenQuickConnect, window, cx| this.toggle_quick_connect(window, cx)))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))

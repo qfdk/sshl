@@ -26,6 +26,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", QuickNext, Some("QuickConnect > Input")),
         KeyBinding::new("enter", QuickOpen, Some("QuickConnect > Input")),
         KeyBinding::new("escape", QuickClose, Some("QuickConnect > Input")),
+        // Tab 同 ↓ / ↑：不让 Root 把焦点切到面板外（面板还在，敲的字却进了侧栏搜索框）；NoAction 会把制表符打进搜索框
+        KeyBinding::new("tab", QuickNext, Some("QuickConnect > Input")),
+        KeyBinding::new("shift-tab", QuickPrev, Some("QuickConnect > Input")),
     ]
 }
 

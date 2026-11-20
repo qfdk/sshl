@@ -50,6 +50,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", FindNext, Some("TerminalSearch > Input")),
         KeyBinding::new("shift-enter", FindPrev, Some("TerminalSearch > Input")),
         KeyBinding::new("escape", FindClose, Some("TerminalSearch > Input")),
+        // 搜索条里 Tab 同回车（下一个 / 上一个）：不让 Root 把焦点切到别处（搜索条还开着，敲的字却进了侧栏搜索框），
+        // 也不能绑 NoAction——那样 Tab 落进输入框，搜的词里多出一个制表符
+        KeyBinding::new("tab", FindNext, Some("TerminalSearch > Input")),
+        KeyBinding::new("shift-tab", FindPrev, Some("TerminalSearch > Input")),
         KeyBinding::new("tab", NoAction, Some(CONTEXT)),
         KeyBinding::new("shift-tab", NoAction, Some(CONTEXT)),
     ]
@@ -1484,7 +1488,7 @@ mod tests {
 
     use super::*;
 
-    gpui::actions!(test, [FocusNext]);
+    gpui::actions!(terminal_test, [FocusNext]);
 
     fn resolve(keymap: &Keymap, key: &'static str) -> usize {
         let stack: Vec<KeyContext> = ["Root", "Workspace", CONTEXT].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
@@ -1595,7 +1599,7 @@ mod tests {
 
     #[test]
     fn search_keys_reach_the_search_bar_before_the_input_box() {
-        gpui::actions!(test, [InputEnter, InputEscape]);
+        gpui::actions!(terminal_test, [InputEnter, InputEscape]);
         let mut keymap = Keymap::new(vec![
             KeyBinding::new("enter", InputEnter, Some("Input")),
             KeyBinding::new("escape", InputEscape, Some("Input")),

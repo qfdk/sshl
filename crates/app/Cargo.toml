@@ -39,3 +39,7 @@ futures = "0.3"
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# 界面交互测试（测试窗口、模拟按键）；只在测试构建里打开，正式构建不受影响。
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

@@ -1,8 +1,13 @@
 //! 新建文件夹、修改权限两个对话框。
 
+use gpui::KeyDownEvent;
+use gpui_base::FocusTrapElement;
+
 use super::*;
 
 pub(super) struct PermissionDialog {
+    /// 整个框：Tab 出不去的范围。
+    focus: FocusHandle,
     path: String,
     value: String,
     checks: [bool; 9],
@@ -11,6 +16,7 @@ pub(super) struct PermissionDialog {
 }
 
 pub(super) struct NewFolderDialog {
+    focus: FocusHandle,
     input: Entity<InputState>,
     _subscription: Subscription,
 }
@@ -27,7 +33,7 @@ impl FileManager {
                 this.create_folder(window, cx);
             }
         });
-        self.new_folder = Some(NewFolderDialog { input, _subscription: subscription });
+        self.new_folder = Some(NewFolderDialog { focus: cx.focus_handle(), input, _subscription: subscription });
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -69,7 +75,31 @@ impl FileManager {
                 cx.notify();
             }
         });
-        self.permission = Some(PermissionDialog { path: entry.path.clone(), checks: permissions_to_checks(&value), value, input, _subscription: subscription });
+        // 焦点留在后面的文件列表上的话，回车会给选中的那个文件改名。全选：直接敲新的权限就换掉
+        input.update(cx, |input, cx| {
+            input.select_all(window, cx);
+            input.focus(window, cx);
+        });
+        self.permission = Some(PermissionDialog {
+            focus: cx.focus_handle(),
+            path: entry.path.clone(),
+            checks: permissions_to_checks(&value),
+            value,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn close_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.permission = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_folder = None;
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -102,7 +132,7 @@ impl FileManager {
             Outcome::Failed(error) => alert(cx, tr!("修改权限失败"), error),
             _ => {
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.permission = None;
+                    this.close_permissions(window, cx);
                     this.invalidate(PaneKind::Remote);
                     this.refresh_list(PaneKind::Remote, window, cx);
                 });
@@ -116,6 +146,12 @@ impl FileManager {
         let groups = [tr!("所有者"), tr!("组"), tr!("其他用户")];
         let bits = [tr!("读取"), tr!("写入"), tr!("执行")];
         let body = div()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_permissions(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .p_5()
@@ -183,10 +219,10 @@ impl FileManager {
             .child(
                 kit::modal_footer()
                     .child(
-                        kit::button("perm-cancel", Variant::Outline).aria_label(tr!("取消")).child(tr!("取消")).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.permission = None;
-                            cx.notify();
-                        })),
+                        kit::button("perm-cancel", Variant::Outline)
+                            .aria_label(tr!("取消"))
+                            .child(tr!("取消"))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_permissions(window, cx))),
                     )
                     .child(
                         kit::button("perm-apply", Variant::Primary)
@@ -195,12 +231,19 @@ impl FileManager {
                             .when(!valid, |b| b.opacity(0.5).cursor_default())
                             .when(valid, |b| b.on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.apply_permissions(window, cx)))),
                     ),
-            );
+            )
+            .focus_trap("permission-trap", &dialog.focus);
         kit::modal("permission-dialog", 512., body).into_any_element()
     }
 
     pub(super) fn render_new_folder_dialog(&self, dialog: &NewFolderDialog, cx: &mut Context<Self>) -> AnyElement {
         let body = div()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_new_folder(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .p_5()
@@ -213,11 +256,10 @@ impl FileManager {
             .child(
                 kit::modal_footer()
                     .child(
-                        kit::button("folder-cancel", Variant::Outline).aria_label(tr!("取消")).child(tr!("取消")).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            this.new_folder = None;
-                            window.focus(&this.focus, cx);
-                            cx.notify();
-                        })),
+                        kit::button("folder-cancel", Variant::Outline)
+                            .aria_label(tr!("取消"))
+                            .child(tr!("取消"))
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_new_folder(window, cx))),
                     )
                     .child(
                         kit::button("folder-create", Variant::Primary)
@@ -225,7 +267,8 @@ impl FileManager {
                             .child(tr!("新建"))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.create_folder(window, cx))),
                     ),
-            );
+            )
+            .focus_trap("new-folder-trap", &dialog.focus);
         kit::modal("new-folder-dialog", 420., body).into_any_element()
     }
 

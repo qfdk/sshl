@@ -1,5 +1,6 @@
 //! 应用内提示 / 确认 / 密码框（旧 lib/dialogs.ts 的原生版）。多个请求排队，一个一个显示；
 //! 回车 = 确认（默认按钮），Esc = 取消；最后一个关掉后焦点还给弹出前的地方（多半是终端）。
+//! Tab / ⇧Tab 在框里的按钮（和密码框、复选框）之间转、出不了框，空格或回车按下 Tab 选中的那个（同系统对话框）。
 
 use std::collections::VecDeque;
 
@@ -9,6 +10,7 @@ use gpui::{
     KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
     div, prelude::FluentBuilder, px,
 };
+use gpui_base::FocusTrapElement;
 use gpui_base::input::{InputEvent, InputState};
 
 use crate::assets::Icon;
@@ -84,7 +86,15 @@ enum Kind {
     Confirm(oneshot::Sender<bool>),
     /// 带复选框的确认：回（按了确认，勾了复选框）。
     Check { checked: bool, reply: oneshot::Sender<(bool, bool)> },
-    Password { choices: Vec<Choice>, input: Entity<InputState>, reply: oneshot::Sender<Option<PasswordAnswer>> },
+    Password { choices: Vec<Choice>, choice_focus: Vec<FocusHandle>, input: Entity<InputState>, reply: oneshot::Sender<Option<PasswordAnswer>> },
+}
+
+/// Tab 选中的是哪个按钮。
+enum Focused {
+    Cancel,
+    Ok,
+    Check,
+    Choice(String),
 }
 
 struct Request {
@@ -94,7 +104,11 @@ struct Request {
 
 pub struct PromptHost {
     queue: VecDeque<Request>,
+    /// 整个框：弹出时焦点在这里（回车 = 默认按钮），也是 Tab 出不去的那个范围。
     focus: FocusHandle,
+    cancel_focus: FocusHandle,
+    ok_focus: FocusHandle,
+    check_focus: FocusHandle,
     /// 第一个提示弹出前的焦点，最后一个关掉后还回去。
     restore: Option<FocusHandle>,
     input_focused: bool,
@@ -109,6 +123,9 @@ pub fn init(cx: &mut App) -> Entity<PromptHost> {
     let host = cx.new(|cx| PromptHost {
         queue: VecDeque::new(),
         focus: cx.focus_handle(),
+        cancel_focus: cx.focus_handle().tab_stop(true),
+        ok_focus: cx.focus_handle().tab_stop(true),
+        check_focus: cx.focus_handle().tab_stop(true),
         restore: None,
         input_focused: false,
         _subscriptions: Vec::new(),
@@ -155,7 +172,8 @@ pub fn password(
     let (reply, rx) = oneshot::channel();
     let placeholder = placeholder.into();
     let input = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(placeholder.clone()));
-    push(window, cx, Request { options, kind: Kind::Password { choices, input, reply } });
+    let choice_focus = choices.iter().map(|_| cx.focus_handle().tab_stop(true)).collect();
+    push(window, cx, Request { options, kind: Kind::Password { choices, choice_focus, input, reply } });
     rx
 }
 
@@ -238,18 +256,41 @@ impl PromptHost {
         }
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.settle(false, None, window, cx);
-                cx.stop_propagation();
-            }
-            "enter" if !matches!(self.queue.front().map(|r| &r.kind), Some(Kind::Password { .. })) => {
-                self.settle(true, None, window, cx);
-                cx.stop_propagation();
-            }
-            _ => {}
+    fn focused(&self, window: &Window) -> Option<Focused> {
+        if self.cancel_focus.is_focused(window) {
+            return Some(Focused::Cancel);
         }
+        if self.ok_focus.is_focused(window) {
+            return Some(Focused::Ok);
+        }
+        if self.check_focus.is_focused(window) {
+            return Some(Focused::Check);
+        }
+        let Some(Request { kind: Kind::Password { choices, choice_focus, .. }, .. }) = self.queue.front() else { return None };
+        choices.iter().zip(choice_focus).find(|(_, focus)| focus.is_focused(window)).map(|(choice, _)| Focused::Choice(choice.value.clone()))
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.settle(false, None, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if key != "enter" && key != "space" {
+            return;
+        }
+        let password = matches!(self.queue.front().map(|r| &r.kind), Some(Kind::Password { .. }));
+        match self.focused(window) {
+            Some(Focused::Cancel) => self.settle(false, None, window, cx),
+            Some(Focused::Ok) => self.settle(true, None, window, cx),
+            Some(Focused::Check) if key == "space" => self.toggle_check(cx),
+            Some(Focused::Choice(value)) => self.settle(true, Some(value), window, cx),
+            // 框本身、复选框上的回车 = 默认按钮；密码框里的回车（它自己的 PressEnter）和空格归输入框
+            _ if key == "enter" && !password => self.settle(true, None, window, cx),
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 }
 
@@ -261,7 +302,7 @@ impl Render for PromptHost {
         let options = &head.options;
         let is_alert = matches!(head.kind, Kind::Alert(_));
         let password = match &head.kind {
-            Kind::Password { choices, input, .. } => Some((choices.clone(), input.clone())),
+            Kind::Password { choices, choice_focus, input, .. } => Some((choices.clone(), choice_focus.clone(), input.clone())),
             _ => None,
         };
         let check = match &head.kind {
@@ -269,7 +310,6 @@ impl Render for PromptHost {
             _ => None,
         };
         let body = div()
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .child(
                 div()
@@ -291,7 +331,7 @@ impl Render for PromptHost {
                                 d.child(div().text_size(px(14.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(message))
                             }),
                     )
-                    .when_some(password, |d, (choices, input)| {
+                    .when_some(password, |d, (choices, choice_focus, input)| {
                         d.when(!choices.is_empty(), |d| {
                             d.child(
                                 div()
@@ -299,9 +339,9 @@ impl Render for PromptHost {
                                     .flex_col()
                                     .gap(px(6.))
                                     .child(div().text_size(px(12.)).text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已保存的密码")))
-                                    .child(div().flex().flex_wrap().gap(px(6.)).children(choices.into_iter().enumerate().map(|(i, choice)| {
+                                    .child(div().flex().flex_wrap().gap(px(6.)).children(choices.into_iter().zip(choice_focus).enumerate().map(|(i, (choice, focus))| {
                                         let value = choice.value.clone();
-                                        kit::button(("prompt-choice", i), Variant::Outline)
+                                        kit::focus_ring(kit::button(("prompt-choice", i), Variant::Outline).track_focus(&focus))
                                             .h(px(32.))
                                             .px(px(10.))
                                             .text_size(px(12.))
@@ -324,7 +364,7 @@ impl Render for PromptHost {
                                 .text_size(px(13.))
                                 .cursor_pointer()
                                 // 方框自己也能点（辅助功能「按下」落在它上面），点了不再冒泡到整行，免得切换两次
-                                .child(kit::checkbox("prompt-check-box", checked).aria_label(label.clone()).on_click(cx.listener(|host, _, _, cx| {
+                                .child(kit::focus_ring(kit::checkbox("prompt-check-box", checked).track_focus(&self.check_focus)).aria_label(label.clone()).on_click(cx.listener(|host, _, _, cx| {
                                     cx.stop_propagation();
                                     host.toggle_check(cx);
                                 })))
@@ -337,19 +377,92 @@ impl Render for PromptHost {
                 kit::modal_footer()
                     .when(!is_alert, |f| {
                         f.child(
-                            kit::button("prompt-cancel", Variant::Outline)
+                            kit::focus_ring(kit::button("prompt-cancel", Variant::Outline).track_focus(&self.cancel_focus))
                                 .aria_label(options.cancel_label.clone())
                                 .child(options.cancel_label.clone())
                                 .on_click(cx.listener(|host, _, window, cx| host.settle(false, None, window, cx))),
                         )
                     })
                     .child(
-                        kit::button("prompt-ok", if options.destructive { Variant::Destructive } else { Variant::Primary })
-                            .aria_label(options.confirm_label.clone())
-                            .child(options.confirm_label.clone())
-                            .on_click(cx.listener(|host, _, window, cx| host.settle(true, None, window, cx))),
+                        kit::focus_ring(
+                            kit::button("prompt-ok", if options.destructive { Variant::Destructive } else { Variant::Primary })
+                                .track_focus(&self.ok_focus),
+                        )
+                        .aria_label(options.confirm_label.clone())
+                        .child(options.confirm_label.clone())
+                        .on_click(cx.listener(|host, _, window, cx| host.settle(true, None, window, cx))),
                     ),
-            );
+            )
+            .focus_trap("prompt-trap", &self.focus);
         kit::modal("prompt", 420., body).into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, VisualTestContext};
+
+    use super::*;
+
+    /// 框后面还有一个 Tab 能停的地方（真实界面里是侧栏的搜索框、地址栏）。
+    struct Page {
+        host: Entity<PromptHost>,
+        behind: FocusHandle,
+    }
+
+    impl Render for Page {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(div().track_focus(&self.behind).size(px(10.))).child(self.host.clone())
+        }
+    }
+
+    fn window(cx: &mut TestAppContext) -> &mut VisualTestContext {
+        let host = cx.update(|cx| {
+            gpui_base::init(cx);
+            init(cx)
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let page = cx.new(|cx| Page { host, behind: cx.focus_handle().tab_stop(true) });
+            gpui_base::Root::new(page, window, cx)
+        });
+        cx
+    }
+
+    /// 弹一个确认框（取消 / 关闭），按这几个键，回答案；按完框还开着就是 None。
+    fn answer(cx: &mut VisualTestContext, keys: &str) -> Option<bool> {
+        let mut answer = cx.update(|window, cx| confirm(window, cx, Options::new("关闭「本机」").confirm("关闭")));
+        cx.run_until_parked();
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        let result = answer.try_recv().ok().flatten();
+        if result.is_none() {
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+        }
+        result
+    }
+
+    /// Tab 曾经把焦点切到框后面去（终端、侧栏搜索框），之后回车、空格都到不了框里，只能用鼠标点。
+    #[gpui::test]
+    fn keyboard_reaches_every_button_of_a_confirm(cx: &mut TestAppContext) {
+        let cx = window(cx);
+        assert_eq!(answer(cx, "enter"), Some(true), "回车 = 默认按钮");
+        assert_eq!(answer(cx, "escape"), Some(false));
+        assert_eq!(answer(cx, "tab enter"), Some(false), "Tab 先选中「取消」");
+        assert_eq!(answer(cx, "tab tab enter"), Some(true));
+        assert_eq!(answer(cx, "tab tab space"), Some(true), "空格按下选中的按钮");
+        assert_eq!(answer(cx, "tab tab tab space"), Some(false), "转一圈回到「取消」，不跑出框");
+        assert_eq!(answer(cx, "shift-tab enter"), Some(true));
+        assert_eq!(answer(cx, "tab escape"), Some(false));
+    }
+
+    #[gpui::test]
+    fn space_toggles_the_checkbox_and_enter_still_confirms(cx: &mut TestAppContext) {
+        let cx = window(cx);
+        let mut answer = cx.update(|window, cx| confirm_with_check(window, cx, Options::new("替换").checkbox("全部这样处理")));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab space enter");
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv().ok().flatten(), Some((true, true)));
     }
 }

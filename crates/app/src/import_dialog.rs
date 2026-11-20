@@ -5,6 +5,7 @@ use gpui::{
     Context, EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
     ParentElement, Render, Role, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px,
 };
+use gpui_base::FocusTrapElement;
 use sshl_core::config_store::{self, AuthKind, SaveConnectionInput, StoredConnection};
 use sshl_core::ssh_config::{self, ImportCandidate};
 
@@ -161,7 +162,6 @@ impl Render for ImportDialog {
             }
         };
         let body = div()
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     cx.emit(ImportDialogEvent::Close);
@@ -186,7 +186,8 @@ impl Render for ImportDialog {
                             .when(checked == 0, |b| b.opacity(0.5).cursor_default())
                             .when(checked > 0, |b| b.on_click(cx.listener(|this, _, _, cx| this.import(cx)))),
                     ),
-            );
+            )
+            .focus_trap("import-trap", &self.focus);
         kit::modal("import-dialog", 520., body)
     }
 }

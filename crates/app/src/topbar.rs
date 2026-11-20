@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn enter_and_escape_reach_the_tab_rename_before_the_input_box() {
         use gpui::{KeyContext, Keymap, Keystroke};
-        gpui::actions!(test, [InputEnter, InputEscape]);
+        gpui::actions!(topbar_test, [InputEnter, InputEscape]);
         // 同 gpui-base：输入框自己的回车 / Esc 先绑（main.rs 里 gpui_base::init 在前）
         let mut keymap = Keymap::new(vec![
             KeyBinding::new("enter", InputEnter, Some("Input")),
@@ -671,7 +671,7 @@ mod tests {
         // 别的输入框（侧栏搜索）里回车还是输入框自己的
         let search: Vec<KeyContext> = ["Root", "Workspace", "Input"].iter().map(|c| KeyContext::parse(c).unwrap()).collect();
         let bindings = keymap.bindings_for_input(&[Keystroke::parse("enter").unwrap()], &search).0;
-        assert_eq!(bindings.first().map(|b| b.action().name()), Some("test::InputEnter"));
+        assert_eq!(bindings.first().map(|b| b.action().name()), Some("topbar_test::InputEnter"));
     }
 
     #[test]

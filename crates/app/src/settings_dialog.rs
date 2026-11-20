@@ -7,6 +7,7 @@ use gpui::{
     HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, Render, Role, SharedString,
     StatefulInteractiveElement, StyledText, Styled, Subscription, Toggled, Window, deferred, div, prelude::FluentBuilder, px,
 };
+use gpui_base::FocusTrapElement;
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, ConnectionLayoutInput, StoredConnection};
 
@@ -480,7 +481,6 @@ impl Render for SettingsDialog {
             Tab::Groups => self.groups_panel(window, cx),
         };
         let body = div()
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     if this.family_open {
@@ -537,7 +537,8 @@ impl Render for SettingsDialog {
                             .p_5()
                             .child(panel),
                     ),
-            );
+            )
+            .focus_trap("settings-trap", &self.focus);
         kit::modal("settings-dialog", 768., body)
     }
 }

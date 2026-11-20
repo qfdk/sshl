@@ -27,6 +27,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", FavoriteNext, Some("FavoritePanel > Input")),
         KeyBinding::new("enter", FavoriteGo, Some("FavoritePanel > Input")),
         KeyBinding::new("escape", FavoriteClose, Some("FavoritePanel > Input")),
+        // Tab 同 ↓ / ↑：不让 Root 把焦点切到面板外（面板还在，敲的字却进了侧栏搜索框）；NoAction 会把制表符打进搜索框
+        KeyBinding::new("tab", FavoriteNext, Some("FavoritePanel > Input")),
+        KeyBinding::new("shift-tab", FavoritePrev, Some("FavoritePanel > Input")),
     ]
 }
 

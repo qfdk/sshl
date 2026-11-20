@@ -587,4 +587,32 @@ mod tests {
         let b = intern(&String::from("cmd-shift-k"));
         assert!(std::ptr::eq(a, b));
     }
+
+    /// 面板（⌘K、命令片段、目录收藏）和 ⌘F 搜索条里的 Tab 在里面上下选，不交给 Root 去切焦点：
+    /// 切走的话面板还开着，敲的字却进了侧栏搜索框。也不能是空绑定——那样 Tab 落进输入框，成了搜索词里的一个制表符。
+    #[test]
+    fn tab_stays_inside_panels_and_the_find_bar() {
+        gpui::actions!(keymap_test, [RootTab]);
+        // 同 gpui-base Root：tab / shift-tab 切换焦点
+        let mut keymap = gpui::Keymap::new(vec![
+            KeyBinding::new("tab", RootTab, Some("Root")),
+            KeyBinding::new("shift-tab", RootTab, Some("Root")),
+        ]);
+        keymap.add_bindings(default_bindings());
+        for (context, next, prev) in [
+            ("QuickConnect", "quick_connect::QuickNext", "quick_connect::QuickPrev"),
+            ("SnippetPanel", "snippets::SnippetNext", "snippets::SnippetPrev"),
+            ("FavoritePanel", "favorites::FavoriteNext", "favorites::FavoritePrev"),
+            ("TerminalSearch", "terminal::FindNext", "terminal::FindPrev"),
+        ] {
+            let stack: Vec<gpui::KeyContext> =
+                ["Root", "Workspace", context, "Input"].iter().map(|c| gpui::KeyContext::parse(c).unwrap()).collect();
+            let first = |key: &'static str| {
+                let bindings = keymap.bindings_for_input(&[Keystroke::parse(key).unwrap()], &stack).0;
+                bindings.first().map(|b| b.action().name().to_string())
+            };
+            assert_eq!(first("tab").as_deref(), Some(next), "{context}");
+            assert_eq!(first("shift-tab").as_deref(), Some(prev), "{context}");
+        }
+    }
 }

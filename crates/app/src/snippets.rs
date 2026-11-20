@@ -6,6 +6,7 @@ use gpui::{
     ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, actions,
     div, prelude::FluentBuilder, px,
 };
+use gpui_base::FocusTrapElement;
 use gpui_base::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use sshl_core::config_store::{self, SaveSnippetInput, Snippet};
 
@@ -25,6 +26,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", SnippetRun, Some("SnippetPanel > Input")),
         KeyBinding::new("shift-enter", SnippetInsert, Some("SnippetPanel > Input")),
         KeyBinding::new("escape", SnippetClose, Some("SnippetPanel > Input")),
+        // Tab 同 ↓ / ↑：不让 Root 把焦点切到面板外（面板还在，敲的字却进了侧栏搜索框）；NoAction 会把制表符打进搜索框
+        KeyBinding::new("tab", SnippetNext, Some("SnippetPanel > Input")),
+        KeyBinding::new("shift-tab", SnippetPrev, Some("SnippetPanel > Input")),
         KeyBinding::new("cmd-enter", SnippetSave, Some("SnippetDialog > Input")),
         KeyBinding::new("escape", SnippetClose, Some("SnippetDialog > Input")),
         // 点了「所有服务器 / 本机」之后焦点在对话框本身上
@@ -365,7 +369,6 @@ impl Render for SnippetDialog {
         let this = cx.entity().downgrade();
         let body = div()
             .key_context("SnippetDialog")
-            .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SnippetSave, _, cx| this.save(cx)))
             .on_action(cx.listener(|_, _: &SnippetClose, _, cx| cx.emit(SnippetDialogEvent::Close)))
             .child(
@@ -404,7 +407,8 @@ impl Render for SnippetDialog {
                 kit::modal_footer()
                     .child(kit::labeled_button("snippet-cancel", Variant::Outline, None, tr!("取消")).on_click(cx.listener(|_, _, _, cx| cx.emit(SnippetDialogEvent::Close))))
                     .child(kit::labeled_button("snippet-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save(cx)))),
-            );
+            )
+            .focus_trap("snippet-trap", &self.focus);
         kit::modal("snippet-dialog", 480., body)
     }
 }

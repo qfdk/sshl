@@ -719,14 +719,13 @@ impl SystemPanel {
     }
 
     /// 「系统」标签显示 / 隐藏：显示时立刻刷新并每 3 秒刷新一次，隐藏就停。
-    pub fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
         }
         self.active = active;
-        if active {
-            window.focus(&self.focus, cx);
-        } else {
+        // 显示时的焦点由工作区给（`Workspace::refocus`：有框开着时不挪）
+        if !active {
             self.menu = None;
             // 切到终端 / 文件管理：磁盘扫描停下
             self.stop_scans(cx);
