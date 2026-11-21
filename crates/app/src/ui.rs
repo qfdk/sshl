@@ -12,17 +12,22 @@ use crate::assets::Icon;
 use crate::theme::{self, ui};
 
 pub fn icon(icon: Icon) -> Glyph {
-    Glyph { icon, size: px(16.), color: None }
+    icon_sized(icon, 16.)
 }
 
 pub fn icon_sized(icon: Icon, size: f32) -> Glyph {
-    Glyph { icon, size: px(size), color: None }
+    glyph(icon.path(), size)
+}
+
+/// 任意单色 SVG（系统标志的单色路径）照线条图标的规矩画。
+pub fn glyph(path: SharedString, size: f32) -> Glyph {
+    Glyph { path, size: px(size), color: None }
 }
 
 /// 线条图标。不指定颜色时用所在位置继承下来的文字颜色（同 CSS 的 currentColor）：
 /// gpui 自带的 svg 元素只认自身的 text_color，不继承。
 pub struct Glyph {
-    icon: Icon,
+    path: SharedString,
     size: Pixels,
     color: Option<Hsla>,
 }
@@ -66,7 +71,7 @@ impl Element for Glyph {
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
         let color = self.color.unwrap_or_else(|| window.text_style().color);
-        let _ = window.paint_svg(bounds, self.icon.path(), None, TransformationMatrix::unit(), color, cx);
+        let _ = window.paint_svg(bounds, self.path.clone(), None, TransformationMatrix::unit(), color, cx);
     }
 }
 

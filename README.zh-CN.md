@@ -49,7 +49,7 @@ SSHL 本身全程靠语音完成：发给 AI 编程工具的每一条提示词�
 - 密码 / 私钥（含私钥密码）认证；私钥选「自动」时按 `~/.ssh/config` 和 SSH Agent 免密登录；可从 `~/.ssh/config` 导入主机
 - 快速连接（⌘K）：敲几个字母回车就连，已经开着的直接切过去
 - 分组管理，侧边栏拖拽排序、跨组移动；侧边栏可整个收起（⌘B），终端占满宽度
-- 连接的图标是服务器的系统（Ubuntu、Debian、CentOS、Alpine、macOS…），登录后自动认出来
+- 连接的图标是服务器的系统（Ubuntu、Debian、CentOS、Alpine、macOS…），登录后自动认出来；不想要的话在设置 →「外观」里换成通用的服务器图标
 - 后台预热连接池 + `TCP_NODELAY`，首次连接快，首屏输出不丢不乱序
 
 **文件管理**
@@ -63,7 +63,7 @@ SSHL 本身全程靠语音完成：发给 AI 编程工具的每一条提示词�
 **系统**（⌘P）
 - 负载、内存、磁盘、运行时间
 - 进程、监听端口、systemd 服务三个列表，可搜索（命中的字高亮）、排序；可以结束进程、启停服务、开关开机启动
-- 进程合起来看：服务器上 nginx 的 master 和 worker、PostgreSQL 和它的后台进程各是一行，点开看每个进程；常见的服务端软件（nginx、Redis、PostgreSQL、Docker、Node.js、Python…）带标志
+- 进程合起来看：服务器上 nginx 的 master 和 worker、PostgreSQL 和它的后台进程各是一行，点开看每个进程；常见的服务端软件和 AI 工具（nginx、Redis、PostgreSQL、Docker、Node.js、Claude Code、Codex、Gemini CLI、Ollama…）带标志
 - 磁盘占用：磁盘快满时看是哪个文件夹、哪个文件占得多——点「开始扫描」，再像 ncdu 一样按大小一层层往下点，列表旁边是矩形树图。扫描用低优先级跑，离开这一页就停，不会一直压着服务器
 - 本机终端标签也有，看的是这台 Mac：进程按应用合起来、带应用图标（Chrome 的 Helper 算 Chrome，Docker 的虚拟机算 Docker），监听端口（别的用户的端口也能看到是哪个进程）和磁盘占用，端口被占了直接找到进程结束掉
 

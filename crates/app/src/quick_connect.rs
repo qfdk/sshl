@@ -11,7 +11,7 @@ use gpui::{
 use gpui_base::input::{Input, InputEvent, InputState};
 use sshl_core::config_store::StoredConnection;
 
-use crate::assets::Icon;
+use crate::assets::{COLOR_LOGO_SIZE, Icon};
 use crate::groups;
 use crate::settings;
 use crate::sidebar::connection_icon;
@@ -180,7 +180,7 @@ impl QuickConnect {
                     .relative()
                     .flex_shrink_0()
                     .text_color(theme::color(if connected { ui::FOREGROUND } else { ui::MUTED_FOREGROUND }))
-                    .child(connection_icon(&conn.os, 16., &[ui::CARD, ui::ACCENT]))
+                    .child(connection_icon(&conn.os, settings::get(cx).connection_icons, COLOR_LOGO_SIZE, &[ui::CARD, ui::ACCENT]))
                     .when(connected, |d| {
                         d.child(
                             div()

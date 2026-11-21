@@ -1,4 +1,4 @@
-//! 打进二进制的资源：Lucide 图标（ISC，线宽 2.5）、服务端软件的标志（Simple Icons，CC0）和应用图标。
+//! 打进二进制的资源：Lucide 图标（ISC，线宽 2.5）、服务端软件和系统的标志（Simple Icons，CC0；几个系统另有官方彩色版）和应用图标。
 
 use std::borrow::Cow;
 
@@ -71,8 +71,8 @@ icons! {
     Zap => "zap",
 }
 
-/// 服务端软件和系统的标志（Simple Icons 16.36.0，Redis 是 12.0.0；CC0，单色路径 + 品牌标准色）：进程列表认出常见软件时画它，
-/// 侧栏的连接画连上时认出的系统（`brands.rs`）。
+/// 服务端软件、AI 工具和系统的标志（单色路径 + 品牌标准色；Simple Icons 16.36.0，Redis 是 12.0.0，OpenAI 来自 gilbarbara/logos；
+/// 大多是 CC0，个别另有许可，见 `assets/icons/brands/LICENSE`）：进程列表认出常见软件时画它，侧栏的连接画连上时认出的系统（`brands.rs`）。
 macro_rules! brands {
     ($($variant:ident => $file:literal, $hex:literal, $title:literal),* $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,6 +115,7 @@ macro_rules! brands {
 }
 
 brands! {
+    OnePanel => "1panel", 0x0854c1, "1Panel",
     AdGuard => "adguard", 0x68bc71, "AdGuard",
     AlibabaCloud => "alibabacloud", 0xff6a00, "Alibaba Cloud",
     AlmaLinux => "almalinux", 0x000000, "AlmaLinux",
@@ -130,6 +131,7 @@ brands! {
     Cloudflare => "cloudflare", 0xf38020, "Cloudflare",
     Consul => "consul", 0xf24c53, "Consul",
     Containerd => "containerd", 0x575757, "containerd",
+    Cursor => "cursor", 0x000000, "Cursor",
     Debian => "debian", 0xa81d33, "Debian",
     Deepin => "deepin", 0x007cff, "deepin",
     Deno => "deno", 0x000000, "Deno",
@@ -139,17 +141,24 @@ brands! {
     Elementary => "elementary", 0x64baff, "elementary",
     EndeavourOs => "endeavouros", 0x7f7fff, "EndeavourOS",
     Envoy => "envoyproxy", 0xac6199, "Envoy Proxy",
+    Erlang => "erlang", 0xa90533, "Erlang",
     Etcd => "etcd", 0x419eda, "etcd",
     Fedora => "fedora", 0x51a2da, "Fedora",
     FreeBsd => "freebsd", 0xab2b28, "FreeBSD",
     Gentoo => "gentoo", 0x54487a, "Gentoo",
     Gitea => "gitea", 0x609926, "Gitea",
+    GitHubActions => "githubactions", 0x2088ff, "GitHub Actions",
+    Copilot => "githubcopilot", 0x000000, "GitHub Copilot",
     GitLab => "gitlab", 0xfc6d26, "GitLab",
+    Gemini => "googlegemini", 0x8e75b2, "Google Gemini",
     Grafana => "grafana", 0xf46800, "Grafana",
     Gunicorn => "gunicorn", 0x499848, "Gunicorn",
     HaProxy => "haproxy", 0x169bd6, "HAProxy",
+    HuggingFace => "huggingface", 0xffd21e, "Hugging Face",
     InfluxDb => "influxdb", 0x22adf6, "InfluxDB",
+    Ipfs => "ipfs", 0x65c2cb, "IPFS",
     Jellyfin => "jellyfin", 0x00a4dc, "Jellyfin",
+    Jupyter => "jupyter", 0xf37626, "Jupyter",
     K3s => "k3s", 0xffc61c, "K3s",
     KaliLinux => "kalilinux", 0x557c94, "Kali Linux",
     Kubernetes => "kubernetes", 0x326ce5, "Kubernetes",
@@ -159,15 +168,23 @@ brands! {
     MariaDb => "mariadb", 0x003545, "MariaDB",
     Meilisearch => "meilisearch", 0xff5caa, "Meilisearch",
     MinIo => "minio", 0xc72e49, "MinIO",
+    MlFlow => "mlflow", 0x0194e2, "MLflow",
     MongoDb => "mongodb", 0x47a248, "MongoDB",
     MySql => "mysql", 0x4479a1, "MySQL",
+    N8n => "n8n", 0xea4b71, "n8n",
     Nats => "natsdotio", 0x27aae1, "NATS.io",
     Neovim => "neovim", 0x57a143, "Neovim",
+    NextJs => "nextdotjs", 0x000000, "Next.js",
     Nginx => "nginx", 0x009639, "NGINX",
     NixOs => "nixos", 0x5277c3, "NixOS",
     Node => "nodedotjs", 0x5fa04e, "Node.js",
     Nomad => "nomad", 0x00ca8e, "Nomad",
+    Nvidia => "nvidia", 0x76b900, "NVIDIA",
+    Ollama => "ollama", 0x000000, "Ollama",
+    // Simple Icons 里没有 OpenAI，取自 gilbarbara/logos（CC0）
+    OpenAi => "openai", 0x000000, "OpenAI",
     OpenBsd => "openbsd", 0xf2ca30, "OpenBSD",
+    OpenCode => "opencode", 0x000000, "OpenCode",
     Java => "openjdk", 0x000000, "OpenJDK",
     OpenSuse => "opensuse", 0x73ba25, "openSUSE",
     OpenVpn => "openvpn", 0xea7e20, "OpenVPN",
@@ -183,13 +200,18 @@ brands! {
     Prometheus => "prometheus", 0xe6522c, "Prometheus",
     Python => "python", 0x3776ab, "Python",
     QBittorrent => "qbittorrent", 0x2f67ba, "qbittorrent",
+    Qemu => "qemu", 0xff6600, "QEMU",
+    Qwen => "qwen", 0x6950ef, "Qwen",
     RaspberryPi => "raspberrypi", 0xa22846, "Raspberry Pi",
+    Ray => "ray", 0x028cf0, "Ray",
     RedHat => "redhat", 0xee0000, "Red Hat",
     // Redis 用 12.0.0 的经典叠方块标志：16.x 里换成了 2024 年的新「R」，用户看着「不太对」
     Redis => "redis", 0xdc382d, "Redis",
     RockyLinux => "rockylinux", 0x10b981, "Rocky Linux",
     Ruby => "ruby", 0xcc342d, "Ruby",
     Slackware => "slackware", 0x000000, "Slackware",
+    Snapcraft => "snapcraft", 0xe95420, "Snapcraft",
+    Streamlit => "streamlit", 0xff4b4b, "Streamlit",
     Suse => "suse", 0x0c322c, "SUSE",
     Syncthing => "syncthing", 0x0891d1, "Syncthing",
     Tailscale => "tailscale", 0x242424, "Tailscale",
@@ -198,11 +220,47 @@ brands! {
     Transmission => "transmission", 0xd70008, "Transmission",
     Ubuntu => "ubuntu", 0xe95420, "Ubuntu",
     Vault => "vault", 0xffec6e, "Vault",
+    Vaultwarden => "vaultwarden", 0x000000, "Vaultwarden",
     Vim => "vim", 0x019733, "Vim",
+    Vllm => "vllm", 0x30a2ff, "vLLM",
     VoidLinux => "voidlinux", 0x478061, "Void Linux",
     WireGuard => "wireguard", 0x88171a, "WireGuard",
     Zorin => "zorin", 0x15a6f0, "Zorin",
 }
+
+/// 官方标志是多色或带底形的系统，连接图标画官方彩色版（`assets/icons/brands/color/`，来源和许可见那里的 LICENSE）：
+/// 单色路径一涂就走样（Ubuntu 只剩三个小人、Tux 成了一块剪影、CentOS 只剩细线）。
+/// 由 img() 画，SVG 的宽高写成 [`COLOR_LOGO_SIZE`]（见下面的测试）。
+macro_rules! color_logos {
+    ($($variant:ident => $file:literal),* $(,)?) => {
+        impl Brand {
+            pub fn color_path(self) -> Option<SharedString> {
+                match self {
+                    $(Brand::$variant => Some(concat!("brands/color/", $file, ".svg").into()),)*
+                    _ => None,
+                }
+            }
+        }
+
+        fn color_logo_bytes(path: &str) -> Option<&'static [u8]> {
+            match path {
+                $(concat!("brands/color/", $file, ".svg") => Some(include_bytes!(concat!("../../../assets/icons/brands/color/", $file, ".svg"))),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+color_logos! {
+    AlmaLinux => "almalinux",
+    CentOs => "centos",
+    Linux => "linux",
+    RaspberryPi => "raspberrypi",
+    Ubuntu => "ubuntu",
+}
+
+/// 彩色标志 SVG 里写的宽高（pt），同侧栏、⌘K 的连接图标。
+pub const COLOR_LOGO_SIZE: f32 = 20.;
 
 pub const APP_ICON: &str = "icon.png";
 /// 侧栏标志的显示尺寸（pt）。图片按 2 倍屏事先缩好（见下面的测试），换图标后从根目录 icon.png 重新生成：
@@ -218,7 +276,7 @@ impl AssetSource for Assets {
         if path == APP_ICON {
             return Ok(Some(Cow::Borrowed(APP_ICON_BYTES)));
         }
-        Ok(icon_bytes(path).or_else(|| brand_bytes(path)).map(Cow::Borrowed))
+        Ok(icon_bytes(path).or_else(|| brand_bytes(path)).or_else(|| color_logo_bytes(path)).map(Cow::Borrowed))
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
@@ -239,5 +297,22 @@ mod tests {
         let height = u32::from_be_bytes(APP_ICON_BYTES[20..24].try_into().unwrap());
         let expected = (APP_ICON_SIZE * 2.) as u32;
         assert_eq!((width, height), (expected, expected));
+    }
+
+    /// 彩色标志由 img() 画：gpui 按 SVG 自己写的宽高的 2 倍栅格化（`render_single_frame(bytes, 1.)`，同 img 的加载），
+    /// 再双线性缩放。宽高写成显示尺寸，2 倍屏上一像素对一像素。
+    #[test]
+    fn color_logos_rasterize_at_retina_display_size() {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        let expected = gpui::DevicePixels((COLOR_LOGO_SIZE * 2.) as i32);
+        let mut count = 0;
+        for &brand in Brand::ALL {
+            let Some(path) = brand.color_path() else { continue };
+            let bytes = Assets.load(&path).unwrap().unwrap_or_else(|| panic!("{path} 不在资源里"));
+            let image = renderer.render_single_frame(&bytes, 1.).unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!(image.size(0), gpui::size(expected, expected), "{path}");
+            count += 1;
+        }
+        assert_eq!(count, 5);
     }
 }

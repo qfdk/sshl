@@ -580,10 +580,28 @@ pub fn command_parts<'a>(command: &'a str, program: Option<&str>) -> (&'a str, &
 }
 
 /// 进程名：程序名去掉路径，冒号结尾的（「nginx: worker」）去掉冒号；内核线程整个。
+/// node / bun / python 跑的脚本是认得出的软件（`node /usr/local/bin/gemini`）时是脚本名，见 [`known_script`]。
 pub fn process_name(command: &str, program: Option<&str>) -> String {
-    let (_, name, _) = command_parts(command, program);
+    let (_, name, args) = command_parts(command, program);
     let name = name.trim_end_matches(':');
-    if name.is_empty() { command.to_string() } else { name.to_string() }
+    if name.is_empty() {
+        return command.to_string();
+    }
+    known_script(name, args).unwrap_or(name).to_string()
+}
+
+/// 解释器跑的脚本（参数里第一个不是选项的，去掉路径和 .js / .mjs / .cjs / .py）认得出是哪个软件时的脚本名：
+/// Gemini CLI、Qwen Code 这类 node 写的命令行工具不改进程名，不认脚本的话只是一个 node。认不出的（`node server.js`）不算。
+fn known_script<'a>(interpreter: &str, args: &'a str) -> Option<&'a str> {
+    let interpreter = interpreter.to_lowercase();
+    let bare = interpreter.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if !matches!(bare, "node" | "nodejs" | "bun" | "python") {
+        return None;
+    }
+    let script = args.split_whitespace().find(|arg| !arg.starts_with('-'))?;
+    let file = script.rsplit('/').next()?;
+    let stem = [".js", ".mjs", ".cjs", ".py"].iter().find_map(|ext| file.strip_suffix(ext)).unwrap_or(file);
+    brands::brand_of(stem).is_some().then_some(stem)
 }
 
 /// 搜索词在 `text` 里出现的每一处（字节范围，落在字符边界上）：不分大小写，中文也行，不重叠。空的搜索词没有。
@@ -2142,5 +2160,34 @@ mod tests {
         assert_eq!(process_name("[kworker/u4:0-events_unbound]", None), "[kworker/u4:0-events_unbound]");
         assert!(kill_error_message("kill: (1) - Operation not permitted").contains("sudo -i"));
         assert_eq!(kill_error_message("kill: (99999) - No such process"), "进程已经不在了。");
+    }
+
+    /// node / bun / python 跑的脚本是认得出的软件时，名字用脚本的（图标跟着名字认）：Gemini CLI、Qwen Code 不改进程名，
+    /// 不这样就只是一个 node。认不出的脚本照旧是解释器的名字。
+    #[test]
+    fn a_known_script_names_its_interpreter_process() {
+        assert_eq!(process_name("node /usr/local/bin/gemini --yolo", None), "gemini");
+        assert_eq!(
+            process_name("node --max-old-space-size=8192 /opt/homebrew/lib/node_modules/@google/gemini-cli/bundle/gemini.js", None),
+            "gemini",
+            "跳过参数，去掉 .js"
+        );
+        assert_eq!(process_name("/usr/local/bin/node /usr/local/bin/qwen", Some("/usr/local/bin/node")), "qwen");
+        assert_eq!(process_name("node /usr/local/bin/codex exec", None), "codex");
+        assert_eq!(process_name("/usr/bin/python3.12 /usr/local/bin/vllm serve Qwen/Qwen3-8B", None), "vllm");
+        assert_eq!(process_name("python3 /usr/local/bin/jupyter-lab --no-browser", None), "jupyter-lab");
+        assert_eq!(process_name("bun /srv/app/node_modules/.bin/next start", None), "next");
+        for (command, name) in [
+            ("node server.js", "node"),
+            ("python3 app.py", "python3"),
+            ("bun run dev", "bun"),
+            ("node", "node"),
+            ("/usr/bin/python3 /usr/bin/fail2ban-server -xf start", "python3"),
+            // 不是解释器：参数里的程序名不算
+            ("sudo /usr/local/bin/gemini", "sudo"),
+        ] {
+            assert_eq!(process_name(command, None), name, "{command}");
+        }
+        assert_eq!(brands::brand_of(&process_name("node /usr/local/bin/gemini", None)), Some(crate::assets::Brand::Gemini));
     }
 }

@@ -16,7 +16,7 @@ use crate::backend;
 use crate::groups::{self, Side};
 use crate::keymap::{self, COMMANDS, Command, Group, Recorded};
 use crate::prompts::{self, Options};
-use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Language, Settings};
+use crate::settings::{self, ConnectionIcons, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Language, Settings};
 use crate::sidebar::{DragPreview, connection_icon};
 use crate::terminal::frame::Rgb;
 use crate::theme::term::{self, Theme};
@@ -222,18 +222,8 @@ impl SettingsDialog {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         // 预览过的字体 / 字号 / 配色没保存就换回去
-        let snapshot = self.snapshot.clone();
         let current = settings::get(cx).clone();
-        let restored = Settings {
-            font_size: snapshot.font_size,
-            font_family: snapshot.font_family,
-            copy_on_select: snapshot.copy_on_select,
-            right_click_paste: snapshot.right_click_paste,
-            terminal_theme: snapshot.terminal_theme,
-            appearance: snapshot.appearance,
-            key_bindings: snapshot.key_bindings,
-            ..current.clone()
-        };
+        let restored = unsaved_reverted(&self.snapshot, &current);
         if restored != current {
             settings::replace(cx, restored);
         }
@@ -773,8 +763,14 @@ impl SettingsDialog {
     fn appearance_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let current = settings::get(cx).appearance;
         let language = settings::get(cx).language;
+        let connection_icons = settings::get(cx).connection_icons;
         let entity = cx.entity();
         let language_entity = entity.clone();
+        let icons_entity = entity.clone();
+        let icon_options = [
+            (ConnectionIcons::System, None, SharedString::from(tr!("服务器的系统"))),
+            (ConnectionIcons::Generic, None, tr!("通用图标").into()),
+        ];
         // 语言名用它自己的文字写，不跟着界面语言变：换错了也认得出哪个是自己的
         let languages = [(Language::System, None, SharedString::from(tr!("跟随系统"))), (Language::Zh, None, "简体中文".into()), (Language::En, None, "English".into())];
         let options = [
@@ -807,6 +803,18 @@ impl SettingsDialog {
                     language_entity.update(cx, |_, cx| cx.notify());
                 },
             ))))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(kit::field_label(tr!("连接图标")))
+                    .child(div().w(px(300.)).child(kit::segmented("connection-icons", &icon_options, connection_icons, move |value, _, cx| {
+                        settings::preview(cx, |s| s.connection_icons = value);
+                        icons_entity.update(cx, |_, cx| cx.notify());
+                    })))
+                    .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("连上时认出服务器的系统（Ubuntu、Debian…），画它的标志"))),
+            )
             .child(
                 div()
                     .pt_3()
@@ -981,6 +989,7 @@ impl SettingsDialog {
             _ => None,
         };
         let count = members.len();
+        let icons = settings::get(cx).connection_icons;
         let (toggle_group, drop_group, move_group, remove_group, drag_group) = (group.clone(), group.clone(), group.clone(), group.clone(), group.clone());
         let header = div()
             .id(SharedString::from(format!("tree-group-{label}")))
@@ -1094,7 +1103,7 @@ impl SettingsDialog {
                                     .map(|l| if side == Side::Before { l.top(px(-2.)) } else { l.bottom(px(-2.)) }),
                             )
                         })
-                        .child(connection_icon(&m.os, 14., &[ui::CARD, ui::MUTED]))
+                        .child(connection_icon(&m.os, icons, 14., &[ui::CARD, ui::MUTED]))
                         // 名字长了折行；地址短，整段一行写，不从中间断开
                         .child(div().min_w_0().child(name.clone()))
                         .child(div().flex_shrink_0().whitespace_nowrap().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{}@{}", m.username, m.host)))
@@ -1129,9 +1138,52 @@ impl SettingsDialog {
     }
 }
 
+/// 关掉不保存：「终端」「外观」「快捷键」几页预览过的换回打开时的（`snapshot`），别的（侧栏收起、收起的分组）照当前的。
+fn unsaved_reverted(snapshot: &Settings, current: &Settings) -> Settings {
+    Settings {
+        font_size: snapshot.font_size,
+        font_family: snapshot.font_family.clone(),
+        copy_on_select: snapshot.copy_on_select,
+        right_click_paste: snapshot.right_click_paste,
+        terminal_theme: snapshot.terminal_theme.clone(),
+        appearance: snapshot.appearance,
+        language: snapshot.language,
+        connection_icons: snapshot.connection_icons,
+        key_bindings: snapshot.key_bindings.clone(),
+        ..current.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 关掉不保存：几页里预览过的都换回打开时的（语言以前漏了：点了 English 再关掉，界面还是英文，下次存设置时写进磁盘）；
+    /// 不归这几页管的（侧栏收起、收起的分组）照当前的。
+    #[test]
+    fn closing_without_saving_reverts_every_previewed_setting() {
+        let snapshot = Settings::default();
+        let current = Settings {
+            font_size: 20.,
+            font_family: "Menlo".into(),
+            copy_on_select: true,
+            right_click_paste: true,
+            terminal_theme: "nord".into(),
+            appearance: Appearance::Dark,
+            language: Language::En,
+            connection_icons: ConnectionIcons::Generic,
+            sidebar_collapsed: true,
+            collapsed_groups: vec!["k3s".into()],
+            ..Settings::default()
+        };
+        let mut previewed = current.clone();
+        previewed.key_bindings.insert("quick-connect".into(), Vec::new());
+        let reverted = unsaved_reverted(&snapshot, &previewed);
+        assert_eq!(
+            reverted,
+            Settings { sidebar_collapsed: true, collapsed_groups: vec!["k3s".into()], ..Settings::default() }
+        );
+    }
 
     #[test]
     fn nerd_font_mono_variants_are_never_offered() {

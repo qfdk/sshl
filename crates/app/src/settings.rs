@@ -34,6 +34,18 @@ impl Language {
     }
 }
 
+/// 设置里的「连接图标」（侧栏、⌘K、分组树）。不认识的值按默认。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionIcons {
+    /// 一律服务器图标。
+    Generic,
+    /// 连上时认出的服务器系统的标志（Ubuntu、Debian…）；还没认出的是服务器图标。
+    #[default]
+    #[serde(other)]
+    System,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -56,6 +68,8 @@ pub struct Settings {
     pub appearance: Appearance,
     /// 界面语言：跟随系统 / 简体中文 / English。
     pub language: Language,
+    /// 连接图标画服务器的系统还是通用的服务器图标。
+    pub connection_icons: ConnectionIcons,
     /// 改过的快捷键（命令 id → 快捷键，空 = 不要快捷键）；没改过的不存，用默认的（`keymap::COMMANDS`）。
     pub key_bindings: Overrides,
 }
@@ -74,6 +88,7 @@ impl Default for Settings {
             terminal_theme: term::DEFAULT_ID.into(),
             appearance: Appearance::System,
             language: Language::System,
+            connection_icons: ConnectionIcons::System,
             key_bindings: Overrides::new(),
         }
     }
@@ -315,6 +330,18 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""appearance":"dark""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().appearance, Appearance::Dark);
+    }
+
+    #[test]
+    fn connection_icons_default_to_the_system_logo_and_round_trip() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert_eq!(old.connection_icons, ConnectionIcons::System, "旧设置里没有这一项：画系统标志");
+        let s = Settings { connection_icons: ConnectionIcons::Generic, ..Settings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""connectionIcons":"generic""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().connection_icons, ConnectionIcons::Generic);
+        let unknown: Settings = serde_json::from_str(r#"{"connectionIcons":"rainbow"}"#).unwrap();
+        assert_eq!(unknown.connection_icons, ConnectionIcons::System, "不认识的值按默认");
     }
 
     #[test]

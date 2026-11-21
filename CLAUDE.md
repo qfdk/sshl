@@ -16,7 +16,7 @@ crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
   src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）：view.rs 只放状态和整体布局，做法按功能分在 view/ 下
-assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件和系统的标志（icons/brands，Simple Icons 16.36.0，CC0；Redis 用 12.0.0 的经典标志）、应用图标、Info.plist 模板
+assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件、AI 工具和系统的标志（icons/brands，Simple Icons 16.36.0，Redis 用 12.0.0 的经典标志，OpenAI 来自 gilbarbara/logos；大多 CC0，个别另有许可，逐个记在 icons/brands/LICENSE；几个系统的官方彩色版在 icons/brands/color/，许可另见那里的 LICENSE）、应用图标、Info.plist 模板
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
 scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
 tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
@@ -209,9 +209,17 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   存进 `connections.os`，和记着的一样不写库；没认出来就留着原来的。存原始值、画的时候再查标志（`brands::of_os`）：认得的发行版画它的，
   认不出的 Linux（Oracle Linux、Amazon Linux：Simple Icons 里没有）画企鹅，不借 ID_LIKE（Oracle Linux 的是 fedora）；macOS 画苹果；
   NetBSD（标志是一行字，小了看不清）、还没认过的画服务器图标。改了主机或端口就清空（`config_store::upsert_connection_in`），下次连上再认。
-  侧栏、⌘K、设置的分组树共用 `sidebar::connection_icon`：品牌色在这一处的几种底色（平常 / 选中 / 悬停）上对比都 ≥ 2:1 才用，否则这一处整个用正文色
-  （`brands::color_on`，同一处的标志不随选中变色）——所以深色下 Debian 的红在侧栏上是红的，在 ⌘K（深蓝选中行）里是正文色。
-  新加一个发行版：从 Simple Icons 同一版本拿 SVG 放进 `assets/icons/brands/`、`brands!` 表登记，`brands::distro` 按 os-release 的 ID 加一行。
+  侧栏、⌘K、设置的分组树共用 `sidebar::connection_icon`（侧栏、⌘K 20pt——用户嫌 16pt「小了一点」，分组树 14pt；放在同样大的格子里，后面的字对齐）。
+  怎么画由 `brands::os_logo` 定。浅色外观：官方标志是多色或带底形的（Ubuntu、Tux、CentOS、树莓派、AlmaLinux）画官方彩色版——Simple Icons 只有单色路径，
+  Ubuntu 只剩三个小人、涂成橙色像一圈虚线（用户：「不像官方图标」）。彩色版在 `assets/icons/brands/color/`（`color_logos!` 表），用 `img()` 画：
+  gpui 按 SVG 自己写的宽高的 2 倍栅格化，所以 SVG 的宽高写成 20（`COLOR_LOGO_SIZE`，有测试），2 倍屏上一像素对一像素。
+  其余是单色路径涂品牌色，在这一处的几种底色（平常 / 选中 / 悬停）上对比都 ≥ 2:1 才用，否则这一处整个用正文色
+  （`brands::color_on`，同一处的标志不随选中变色）。
+  深色外观（夜间）下一律纯色（`Logo::Plain`，用户：「纯色模式，给夜间模式用」）：单色路径用 `kit::glyph` 画，跟着所在位置的文字颜色，
+  同旁边的服务器图标（连着的是正文色，没连的淡一些）。用户确认过「没连是灰色、连上之后是白色」是对的，别改成一律白色。彩色版在深色底上不好看（Tux 的黑身子融进底色），白色的单色图形就是各家给深色底用的那一版。
+  设置 →「外观」的「连接图标」（`settings.connection_icons`）选「通用图标」时一律服务器图标（用户：「有些人不想显示图标」），系统照样在后台认。
+  新加一个发行版：从 Simple Icons 同一版本拿 SVG 放进 `assets/icons/brands/`、`brands!` 表登记，`brands::distro` 按 os-release 的 ID 加一行；
+  官方标志是多色的，另找许可宽松的彩色版（gilbarbara/logos 是 CC0、devicon 是 MIT）放进 `color/`、`color_logos!` 登记，宽高改成 20，LICENSE 记来源。
 - **快捷键可改**（设置 →「快捷键」页，`keymap.rs`，`settings.key_bindings` 只存改过的：命令 id → 快捷键列表，空列表 = 不要快捷键）：
   能改的登记在 `keymap::COMMANDS`（新建连接、本机终端、⌘K、关标签、切标签、⌘1…9、终端 / 文件管理 / 系统、面板、侧栏、设置、终端的拷贝粘贴查找字号、
   文件管理的全选 / 隐藏文件 / 收藏、退出 / 隐藏 / 最小化），默认值就是原来写死的那些；面板里的上下 / 回车 / Esc 这类导航键写死在各模块的 `key_bindings`，不开放。
@@ -292,8 +300,14 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   系统目录下的程序或 root / `_` 账号跑的是齿轮，别的是终端。不用系统的通用可执行文件图标（小尺寸下是一排黑方块）。
   远程服务器（用户问「远程的话能不能带出图标来」）没有应用图标：按进程名认出常见的服务端软件（`brands.rs`：nginx、redis、postgres、docker、
   node、python、php-fpm8.2、`*_exporter`…）画品牌标志（单色 SVG 按品牌色画，和卡片底色对比不到 2:1 的——深色下近黑的 Bun、浅色下浅黄的 Vault——用正文色）；
-  认不出的同本机：系统目录下的、或不是登录用户自己跑的算系统服务（齿轮），其余终端。本机不在 .app 里的命令行程序（claude、node）也用标志。
-  新加一个软件：从 Simple Icons 同一版本下 SVG 放进 `assets/icons/brands/`，`assets.rs` 的 `brands!` 表登记（带品牌色），`brands.rs` 的名字表加一行。
+  认不出的同本机：系统目录下的、或不是登录用户自己跑的算系统服务（齿轮），其余终端。本机不在 .app 里的命令行程序（claude、codex、node）也用标志。
+  AI 工具（用户要的）：claude、codex（OpenAI）、gemini、copilot、cursor-agent、opencode、qwen，跑模型的 ollama、vllm、Hugging Face 的 TGI、`nvidia-*`、jupyter…
+  node / bun / python 跑的脚本是认得出的软件时，这一行的名字和图标用脚本的（`system_panel::known_script`：`node /usr/local/bin/gemini` 是 gemini）——
+  Gemini CLI、Qwen Code 不改进程名（npm 包里查过，没设 process.title），不认脚本的话只是一个 node；认不出的脚本（`node server.js`）照旧是解释器的名字。
+  名字表是照用户 10 台服务器上实际跑着的进程挑的（2026-11-21）：sshd、systemd、cron、v2ray、openresty 这些 Simple Icons 里没有，照旧齿轮；
+  VMware（vmtoolsd）的标志是一行字，22pt 下看不清，不收。
+  新加一个软件：从 Simple Icons 同一版本下 SVG 放进 `assets/icons/brands/`，`assets.rs` 的 `brands!` 表登记（带品牌色），`brands.rs` 的名字表加一行；
+  Simple Icons 数据里这个标志带 license 字段的（不是 CC0），在 `assets/icons/brands/LICENSE` 记上许可和来源，MIT / BSD 的附原文。
   数字用界面字体的等宽数字（`tnum`），等宽字体只留给命令行和监听地址。「进程」列按进程名排（不按命令行路径；本机的应用按显示名）。
   窄窗口：指标两段一组（每段至少 `SEGMENT_MIN_WIDTH`），放不下一排四段就 2 × 2；进程名先放全（比整格还长就折行），命令行拿剩下的宽度，整段放得下才显示：
   它在一行高、能换行、超出就裁掉的格子里，前面垫一个零宽的元素，放不下时整段挤到第二行被裁掉——不会出现半截；藏起来时悬停那块空白看全文。
@@ -389,7 +403,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   点了过去、悬停的 × 直接删（不用先进那个目录）、↑↓ ↵ 可选，一敲字换成子目录补全。文件管理里不另放收藏按钮 / 菜单（顶栏那个星星是全局入口）。
   地址栏的两个下拉都包在 `deferred` 里画，否则会被后面的表头和文件行盖住。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
-- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观、语言）。首次启动从旧版 WebView 的
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观、语言、连接图标）。首次启动从旧版 WebView 的
   localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
 - **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
   （填充密码由后端解密直接写通道）。

@@ -7,11 +7,11 @@ use gpui::{
 };
 use sshl_core::config_store::StoredConnection;
 
-use crate::assets::{APP_ICON, APP_ICON_SIZE, Icon};
-use crate::brands;
+use crate::assets::{APP_ICON, APP_ICON_SIZE, COLOR_LOGO_SIZE, Icon};
+use crate::brands::{self, Logo};
 use crate::groups::{self, Side};
 use crate::keymap;
-use crate::settings;
+use crate::settings::{self, ConnectionIcons};
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, MenuEntry, MenuItem, Variant};
 use crate::workspace::{ConnectionMenu, DraggedConnection, DropTarget, Workspace, controls, drag_region};
@@ -33,18 +33,21 @@ impl Render for DragPreview {
     }
 }
 
-/// 连接的图标：连上过、认出了系统的画它的标志（Ubuntu、Debian…，品牌色；在 `surfaces` 这几种底色上看不清就用正文色），
-/// 否则画服务器图标（跟着所在位置的文字颜色）。侧栏、⌘K、设置里的分组树共用。
-pub(crate) fn connection_icon(os: &str, size: f32, surfaces: &[ui::Token]) -> AnyElement {
-    match brands::of_os(os) {
-        Some(brand) => svg()
-            .path(brand.path())
-            .size(px(size))
-            .flex_shrink_0()
-            .text_color(theme::color(brands::color_on(brand, surfaces, theme::is_dark())))
-            .into_any_element(),
+/// 连接的图标：连上过、认出了系统的画它的标志（[`brands::os_logo`]：浅色外观下 Ubuntu、Tux 这类多色的画官方彩色版，
+/// 别的涂品牌色，在 `surfaces` 这几种底色上看不清就用正文色；深色外观下纯色），否则画服务器图标（跟着所在位置的文字颜色）。
+/// 设置里选了「通用图标」（`icons`）时一律服务器图标。都放在 `size` 见方的格子里，后面的字对齐。侧栏、⌘K、设置里的分组树共用。
+pub(crate) fn connection_icon(os: &str, icons: ConnectionIcons, size: f32, surfaces: &[ui::Token]) -> AnyElement {
+    let brand = match icons {
+        ConnectionIcons::System => brands::of_os(os),
+        ConnectionIcons::Generic => None,
+    };
+    let icon = match brand.map(|brand| (brand, brands::os_logo(brand, surfaces, theme::is_dark()))) {
+        Some((_, Logo::Color(path))) => img(path).size(px(size)).into_any_element(),
+        Some((brand, Logo::Tinted(color))) => svg().path(brand.path()).size(px(size)).text_color(theme::color(color)).into_any_element(),
+        Some((brand, Logo::Plain)) => kit::glyph(brand.path(), size).into_any_element(),
         None => kit::icon_sized(Icon::Server, size).into_any_element(),
-    }
+    };
+    div().size(px(size)).flex_shrink_0().flex().items_center().justify_center().child(icon).into_any_element()
 }
 
 /// 收起 / 展开侧栏的按钮（⌘B）：展开时在侧栏头部，收起时在顶栏红绿灯右边。
@@ -282,7 +285,7 @@ impl Workspace {
                     .relative()
                     .flex_shrink_0()
                     .text_color(theme::color(if connected { ui::FOREGROUND } else { ui::MUTED_FOREGROUND }))
-                    .child(connection_icon(&conn.os, 16., &[ui::SHELL, ui::CARD]))
+                    .child(connection_icon(&conn.os, settings::get(cx).connection_icons, COLOR_LOGO_SIZE, &[ui::SHELL, ui::CARD]))
                     .when(connected, |d| {
                         d.child(
                             div()

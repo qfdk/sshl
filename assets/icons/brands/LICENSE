@@ -1,0 +1,200 @@
+Single-colour logos of server software, AI tools and operating systems, drawn in
+the process list and on connections. Most come from Simple Icons 16.36.0
+(https://simpleicons.org, CC0 1.0); Redis is the classic mark from Simple Icons
+12.0.0 and OpenAI comes from gilbarbara/logos (CC0 1.0). The paths are used as-is
+and filled with the brand colour or the interface text colour. Some logos carry
+their own licence, listed per logo below. The full-colour logos in color/ have
+their own LICENSE.
+
+The logos are trademarks of their owners. SSHL uses them only to show which
+program is running or which system a server runs; this does not imply any
+affiliation with or endorsement by those owners.
+
+- 1Panel (1panel.svg): CC0-1.0 (Simple Icons)
+- AdGuard (adguard.svg): CC0-1.0 (Simple Icons)
+- Alibaba Cloud (alibabacloud.svg): CC0-1.0 (Simple Icons)
+- AlmaLinux (almalinux.svg): CC0-1.0 (Simple Icons)
+- Alpine Linux (alpinelinux.svg): CC0-1.0 (Simple Icons)
+- Apache (apache.svg): Apache-2.0
+  https://www.apache.org/foundation/press/kit
+- Apple (apple.svg): CC0-1.0 (Simple Icons)
+- Arch Linux (archlinux.svg): CC0-1.0 (Simple Icons)
+- Bun (bun.svg): CC0-1.0 (Simple Icons)
+- Caddy (caddy.svg): CC0-1.0 (Simple Icons)
+- CentOS (centos.svg): CC0-1.0 (Simple Icons)
+- Claude (claude.svg): CC0-1.0 (Simple Icons)
+- ClickHouse (clickhouse.svg): CC0-1.0 (Simple Icons)
+- Cloudflare (cloudflare.svg): CC0-1.0 (Simple Icons)
+- Consul (consul.svg): CC0-1.0 (Simple Icons)
+- containerd (containerd.svg): CC0-1.0 (Simple Icons)
+- Cursor (cursor.svg): CC0-1.0 (Simple Icons)
+- Debian (debian.svg): CC-BY-SA-3.0
+  https://www.debian.org/logos
+- deepin (deepin.svg): CC0-1.0 (Simple Icons)
+- Deno (deno.svg): MIT
+  https://github.com/denoland/docs/blob/5dee713844c7447f80acd4093caa9d350d80bf36/static/img/logo.svg
+- Docker (docker.svg): CC0-1.0 (Simple Icons)
+- Dovecot (dovecot.svg): CC0-1.0 (Simple Icons)
+- Eclipse Mosquitto (eclipsemosquitto.svg): CC0-1.0 (Simple Icons)
+- elementary (elementary.svg): CC0-1.0 (Simple Icons)
+- EndeavourOS (endeavouros.svg): CC0-1.0 (Simple Icons)
+- Envoy Proxy (envoyproxy.svg): CC0-1.0 (Simple Icons)
+- Erlang (erlang.svg): CC0-1.0 (Simple Icons)
+- etcd (etcd.svg): CC0-1.0 (Simple Icons)
+- Fedora (fedora.svg): custom
+  https://docs.fedoraproject.org/en-US/project/brand/
+- FreeBSD (freebsd.svg): CC0-1.0 (Simple Icons)
+- Gentoo (gentoo.svg): CC-BY-SA-2.5
+  https://wiki.gentoo.org/wiki/Project:Artwork/Artwork#Variations_of_the_.22g.22_logo
+- Gitea (gitea.svg): CC0-1.0 (Simple Icons)
+- GitHub Actions (githubactions.svg): CC0-1.0 (Simple Icons)
+- GitHub Copilot (githubcopilot.svg): MIT
+  https://primer.style/foundations/icons/copilot-24
+- GitLab (gitlab.svg): CC0-1.0 (Simple Icons)
+- Google Gemini (googlegemini.svg): CC0-1.0 (Simple Icons)
+- Grafana (grafana.svg): CC0-1.0 (Simple Icons)
+- Gunicorn (gunicorn.svg): CC0-1.0 (Simple Icons)
+- HAProxy (haproxy.svg): CC0-1.0 (Simple Icons)
+- Hugging Face (huggingface.svg): CC0-1.0 (Simple Icons)
+- InfluxDB (influxdb.svg): CC0-1.0 (Simple Icons)
+- IPFS (ipfs.svg): CC-BY-SA-3.0
+  https://github.com/ipfs-inactive/logo/tree/73169b495332415b174ac2f37ec27c4b2ee8da83
+- Jellyfin (jellyfin.svg): CC0-1.0 (Simple Icons)
+- Jupyter (jupyter.svg): CC0-1.0 (Simple Icons)
+- K3s (k3s.svg): CC0-1.0 (Simple Icons)
+- Kali Linux (kalilinux.svg): CC0-1.0 (Simple Icons)
+- Kubernetes (kubernetes.svg): CC0-1.0 (Simple Icons)
+- Linux (linux.svg): CC0-1.0 (Simple Icons)
+- Linux Mint (linuxmint.svg): CC0-1.0 (Simple Icons)
+- Manjaro (manjaro.svg): CC0-1.0 (Simple Icons)
+- MariaDB (mariadb.svg): CC0-1.0 (Simple Icons)
+- Meilisearch (meilisearch.svg): CC0-1.0 (Simple Icons)
+- MinIO (minio.svg): CC0-1.0 (Simple Icons)
+- MLflow (mlflow.svg): CC0-1.0 (Simple Icons)
+- MongoDB (mongodb.svg): CC0-1.0 (Simple Icons)
+- MySQL (mysql.svg): CC0-1.0 (Simple Icons)
+- n8n (n8n.svg): CC0-1.0 (Simple Icons)
+- NATS.io (natsdotio.svg): CC0-1.0 (Simple Icons)
+- Neovim (neovim.svg): CC-BY-SA-3.0
+  https://neovim.io
+- Next.js (nextdotjs.svg): CC0-1.0 (Simple Icons)
+- NGINX (nginx.svg): CC0-1.0 (Simple Icons)
+- NixOS (nixos.svg): CC-BY-4.0
+  https://brand.nixos.org/logos/nixos-logomark-black-flat-minimal.svg
+- Node.js (nodedotjs.svg): CC0-1.0 (Simple Icons)
+- Nomad (nomad.svg): CC0-1.0 (Simple Icons)
+- NVIDIA (nvidia.svg): CC0-1.0 (Simple Icons)
+- Ollama (ollama.svg): CC0-1.0 (Simple Icons)
+- OpenAI (openai.svg): CC0-1.0 (gilbarbara/logos, https://github.com/gilbarbara/logos)
+- OpenBSD (openbsd.svg): CC0-1.0 (Simple Icons)
+- OpenCode (opencode.svg): CC0-1.0 (Simple Icons)
+- OpenJDK (openjdk.svg): BSD-3-Clause
+  https://hg.openjdk.java.net/duke/duke/file/ca00f100dafc/vector/Agent.svg
+- openSUSE (opensuse.svg): CC0-1.0 (Simple Icons)
+- OpenVPN (openvpn.svg): CC0-1.0 (Simple Icons)
+- OpenWrt (openwrt.svg): CC0-1.0 (Simple Icons)
+- PHP (php.svg): CC-BY-SA-4.0
+  https://php.net/download-logos.php
+- Pi-hole (pihole.svg): CC0-1.0 (Simple Icons)
+- Plex (plex.svg): CC0-1.0 (Simple Icons)
+- PM2 (pm2.svg): CC0-1.0 (Simple Icons)
+- Podman (podman.svg): CC0-1.0 (Simple Icons)
+- Pop!_OS (popos.svg): CC0-1.0 (Simple Icons)
+- Portainer (portainer.svg): CC0-1.0 (Simple Icons)
+- PostgreSQL (postgresql.svg): CC0-1.0 (Simple Icons)
+- Prometheus (prometheus.svg): CC0-1.0 (Simple Icons)
+- Python (python.svg): CC0-1.0 (Simple Icons)
+- qbittorrent (qbittorrent.svg): CC0-1.0 (Simple Icons)
+- QEMU (qemu.svg): CC0-1.0 (Simple Icons)
+- QWen (qwen.svg): CC0-1.0 (Simple Icons)
+- Raspberry Pi (raspberrypi.svg): CC0-1.0 (Simple Icons)
+- Ray (ray.svg): CC0-1.0 (Simple Icons)
+- Red Hat (redhat.svg): CC0-1.0 (Simple Icons)
+- Redis (Simple Icons 12.0.0) (redis.svg): CC0-1.0 (Simple Icons)
+- Rocky Linux (rockylinux.svg): CC-BY-SA-4.0
+  https://github.com/rocky-linux/branding/blob/94e97dd30b87d909cc4f6a6838a2926f77f9ac47/logo/src/icon-black.svg
+- Ruby (ruby.svg): CC-BY-SA-2.5
+  https://www.ruby-lang.org/en/about/logo/
+- Slackware (slackware.svg): CC0-1.0 (Simple Icons)
+- Snapcraft (snapcraft.svg): CC-BY-SA-3.0
+  https://design.ubuntu.com/resources
+- Streamlit (streamlit.svg): CC0-1.0 (Simple Icons)
+- SUSE (suse.svg): CC0-1.0 (Simple Icons)
+- Syncthing (syncthing.svg): CC0-1.0 (Simple Icons)
+- Tailscale (tailscale.svg): CC0-1.0 (Simple Icons)
+- tmux (tmux.svg): CC0-1.0 (Simple Icons)
+- Traefik Proxy (traefikproxy.svg): CC0-1.0 (Simple Icons)
+- Transmission (transmission.svg): CC0-1.0 (Simple Icons)
+- Ubuntu (ubuntu.svg): CC0-1.0 (Simple Icons)
+- Vault (vault.svg): CC0-1.0 (Simple Icons)
+- Vaultwarden (vaultwarden.svg): CC0-1.0 (Simple Icons)
+- Vim (vim.svg): CC0-1.0 (Simple Icons)
+- vLLM (vllm.svg): CC0-1.0 (Simple Icons)
+- Void Linux (voidlinux.svg): CC0-1.0 (Simple Icons)
+- WireGuard (wireguard.svg): CC0-1.0 (Simple Icons)
+- Zorin (zorin.svg): CC0-1.0 (Simple Icons)
+
+--------------------------------------------------------------------------------
+GitHub Copilot (githubcopilot.svg), from Primer Octicons:
+
+    MIT License
+
+    Copyright (c) 2026 GitHub Inc.
+
+Deno (deno.svg), from denoland/docs:
+
+    MIT License
+
+    Copyright (c) 2018-2024 the Deno authors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+    (The same MIT permission notice applies to githubcopilot.svg above.)
+
+OpenJDK (openjdk.svg), Duke from the OpenJDK duke project:
+
+    BSD 3-Clause License
+
+    Copyright (c) 2006, Sun Microsystems, Inc.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+    3. Neither the name of the copyright holder nor the names of its contributors
+       may be used to endorse or promote products derived from this software
+       without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Logos under CC BY / CC BY-SA, Apache-2.0 or custom terms are used unmodified apart
+from colour; their licences are at https://creativecommons.org/licenses/,
+https://www.apache.org/licenses/LICENSE-2.0 and the sources listed above.

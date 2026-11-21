@@ -49,7 +49,7 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 - Password or private key authentication (including key passphrases). With the key set to "Auto", SSHL logs in through `~/.ssh/config` and the SSH agent without asking. Hosts can be imported from `~/.ssh/config`
 - Quick connect (⌘K): type a few letters and press Enter; a connection that is already open is switched to instead
 - Groups, with drag-and-drop to reorder and move between groups in the sidebar. The sidebar can be hidden entirely (⌘B) so the terminal takes the full width
-- Each connection shows its server's OS logo (Ubuntu, Debian, CentOS, Alpine, macOS…), detected automatically when you log in
+- Each connection shows its server's OS logo (Ubuntu, Debian, CentOS, Alpine, macOS…), detected automatically when you log in; Settings → Appearance can switch to a plain server icon
 - A background pool of pre-warmed connections plus `TCP_NODELAY` make the first connection fast, and the first screen of output is never lost or reordered
 
 **File manager**
@@ -63,7 +63,7 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 **System** (⌘P)
 - Load, memory, disk, uptime
 - Three lists — processes, listening ports, systemd services — with search (matches are highlighted) and sorting. You can kill processes, start / stop services, and toggle start-on-boot
-- Processes are folded together: on a server, nginx's master and workers or PostgreSQL and its background processes are one row you can expand; well-known server software (nginx, Redis, PostgreSQL, Docker, Node.js, Python…) shows its logo
+- Processes are folded together: on a server, nginx's master and workers or PostgreSQL and its background processes are one row you can expand; well-known server software and AI tools (nginx, Redis, PostgreSQL, Docker, Node.js, Claude Code, Codex, Gemini CLI, Ollama…) show their logos
 - Disk usage: when a disk fills up, see which folders and files take the space — click Start scan, then go down folder by folder, biggest first (like ncdu), with a treemap beside the list. Scans run at low priority and stop when you leave the tab, so they never keep loading a server
 - Local terminal tabs have it too, for this Mac: processes grouped by app with their icons (Chrome's helpers count as Chrome, Docker's virtual machine as Docker), listening ports (every user's port shows its process) and disk usage, so you can find what holds a port and kill it
 
