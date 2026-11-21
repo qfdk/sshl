@@ -26,6 +26,7 @@ mod terminal;
 mod theme;
 mod topbar;
 mod ui;
+mod update;
 mod workspace;
 
 use std::borrow::Cow;
@@ -36,7 +37,7 @@ use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBound
 
 use workspace::Workspace;
 
-actions!(sshl, [Quit, Hide, HideOthers, ShowAll]);
+actions!(sshl, [Quit, Hide, HideOthers, ShowAll, CheckForUpdates, About]);
 
 /// 无障碍树是懒建的：第一次有人来问才开始建，那一次答的是一棵空树（没有焦点元素），下一帧才有真的。
 /// 听写工具每次按住只问一次，不提前建的话每次启动后头几次按住都落空。这里自己先问一次，等于把它提前打开。
@@ -75,6 +76,8 @@ fn main() {
         if let Some(window) = cx.windows().first() {
             let _ = window.update(cx, |_, window, _| window.activate_window());
         }
+        // 从程序坞点开也是打开：检查更新（离上次不满一小时不查）
+        update::check_on_open(cx);
     });
     app.run(move |cx: &mut App| {
         gpui_base::init(cx);
@@ -106,6 +109,25 @@ fn main() {
                 if !matches!(asked, Ok(Some(()))) {
                     cx.quit();
                 }
+            });
+        });
+        // 菜单栏「检查更新…」：同 ⌘Q，等这一轮按键 / 菜单分发完了再进窗口（结果的提示框要弹在窗口里）
+        cx.on_action(|_: &CheckForUpdates, cx| {
+            let Some(window) = cx.windows().first().copied() else { return };
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| update::check_now(window, cx, update::Report::Prompt));
+            });
+        });
+        // 菜单栏「关于 SSHL」：打开设置的「关于」页
+        cx.on_action(|_: &About, cx| {
+            let Some(window) = cx.windows().first().and_then(|w| w.downcast::<gpui_base::Root>()) else { return };
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |root, window, cx| {
+                    window.activate_window();
+                    if let Ok(workspace) = root.view().clone().downcast::<Workspace>() {
+                        workspace.update(cx, |workspace, cx| workspace.open_about(window, cx));
+                    }
+                });
             });
         });
         cx.on_action(|_: &Hide, cx| cx.hide());
@@ -149,6 +171,8 @@ fn main() {
             })
             .expect("open main window");
         warm_accessibility();
+        // 打开时检查更新：窗口出来后在后台查，不在启动路径上
+        update::init(cx);
 
         // 关窗口（红点 / ⌘W 没有标签时）只隐藏应用，会话、预热连接、界面都留着
         let _ = window.update(cx, |_, window, cx| {
@@ -180,6 +204,9 @@ pub fn set_menus(cx: &mut App) {
         Menu {
             name: "SSHL".into(),
             items: vec![
+                MenuItem::action(tr!("关于 SSHL"), About),
+                MenuItem::action(tr!("检查更新…"), CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::action(tr!("隐藏 SSHL"), Hide),
                 MenuItem::action(tr!("隐藏其他"), HideOthers),
                 MenuItem::action(tr!("全部显示"), ShowAll),

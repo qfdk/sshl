@@ -47,15 +47,18 @@ icons! {
     GripVertical => "grip-vertical",
     HardDrive => "hard-drive",
     House => "house",
+    Info => "info",
     Keyboard => "keyboard",
     KeyRound => "key-round",
     LoaderCircle => "loader-circle",
     Lock => "lock",
+    MessageSquare => "message-square",
     PanelLeft => "panel-left",
     Pencil => "pencil",
     Plus => "plus",
     RefreshCw => "refresh-cw",
     RotateCcw => "rotate-ccw",
+    Scale => "scale",
     Search => "search",
     Server => "server",
     Settings => "settings",
@@ -269,12 +272,39 @@ pub const APP_ICON: &str = "icon.png";
 pub const APP_ICON_SIZE: f32 = 30.;
 const APP_ICON_BYTES: &[u8] = include_bytes!("../../../assets/sidebar-logo.png");
 
+/// 设置 →「关于」里的应用图标：128 像素的那张按 2 倍屏画成 64pt（侧栏那张只有 60 像素，放大会糊）。
+pub const ABOUT_ICON: &str = "about-icon.png";
+pub const ABOUT_ICON_SIZE: f32 = 64.;
+const ABOUT_ICON_BYTES: &[u8] = include_bytes!("../../../assets/icons/128x128.png");
+/// 深色外观用：图标的深色方块和深色卡片几乎一个颜色，边上补一圈 1pt、18% 白的描边（同 macOS 深色下图标的边），
+/// 沿着图标自己的透明度算，贴合连续曲率的圆角。换图标后重新生成：
+/// `magick 128x128.png -alpha extract a.png; magick a.png -morphology Erode Disk:1.5 e.png; magick a.png e.png -compose minus_src -composite edge.png;`
+/// `magick -size 128x128 xc:white \( edge.png -evaluate multiply 0.18 \) -alpha off -compose CopyOpacity -composite ring.png;`
+/// `magick 128x128.png ring.png -compose over -composite -strip about-icon-dark.png`
+pub const ABOUT_ICON_DARK: &str = "about-icon-dark.png";
+const ABOUT_ICON_DARK_BYTES: &[u8] = include_bytes!("../../../assets/icons/about-icon-dark.png");
+
+/// 「关于」页「特别感谢 Voilà Pro」的横幅（同 README 里那张，仓库根目录的 voila-banner.png）。
+/// 500×120 像素按 2 倍屏画成 250×60pt，一像素对一像素（见下面的测试）。
+pub const VOILA_BANNER: &str = "voila-banner.png";
+pub const VOILA_BANNER_SIZE: (f32, f32) = (250., 60.);
+const VOILA_BANNER_BYTES: &[u8] = include_bytes!("../../../voila-banner.png");
+
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         if path == APP_ICON {
             return Ok(Some(Cow::Borrowed(APP_ICON_BYTES)));
+        }
+        if path == VOILA_BANNER {
+            return Ok(Some(Cow::Borrowed(VOILA_BANNER_BYTES)));
+        }
+        if path == ABOUT_ICON {
+            return Ok(Some(Cow::Borrowed(ABOUT_ICON_BYTES)));
+        }
+        if path == ABOUT_ICON_DARK {
+            return Ok(Some(Cow::Borrowed(ABOUT_ICON_DARK_BYTES)));
         }
         Ok(icon_bytes(path).or_else(|| brand_bytes(path)).or_else(|| color_logo_bytes(path)).map(Cow::Borrowed))
     }
@@ -297,6 +327,17 @@ mod tests {
         let height = u32::from_be_bytes(APP_ICON_BYTES[20..24].try_into().unwrap());
         let expected = (APP_ICON_SIZE * 2.) as u32;
         assert_eq!((width, height), (expected, expected));
+    }
+
+    /// 「关于」页的图标和横幅同侧栏标志：按 2 倍屏的像素放好，画出来一像素对一像素。
+    #[test]
+    fn about_images_match_retina_pixel_size() {
+        let icon = (ABOUT_ICON_SIZE, ABOUT_ICON_SIZE);
+        for (bytes, (width, height)) in [(VOILA_BANNER_BYTES, VOILA_BANNER_SIZE), (ABOUT_ICON_BYTES, icon), (ABOUT_ICON_DARK_BYTES, icon)] {
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+            let actual = (u32::from_be_bytes(bytes[16..20].try_into().unwrap()), u32::from_be_bytes(bytes[20..24].try_into().unwrap()));
+            assert_eq!(actual, ((width * 2.) as u32, (height * 2.) as u32));
+        }
     }
 
     /// 彩色标志由 img() 画：gpui 按 SVG 自己写的宽高的 2 倍栅格化（`render_single_frame(bytes, 1.)`，同 img 的加载），

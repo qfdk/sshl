@@ -52,7 +52,7 @@ const STATUS_WIDTH: f32 = 104.;
 const BOOT_WIDTH: f32 = 96.;
 /// 指标那一段的同色浅底、圆环轨道的不透明度：[浅色, 深色]。
 pub const SEGMENT_TINT: [f32; 2] = [0.06, 0.10];
-const RING_TRACK: [f32; 2] = [0.16, 0.22];
+pub const RING_TRACK: [f32; 2] = [0.16, 0.22];
 /// 搜索命中的那一段的底色（琥珀色）：[浅色, 深色]。
 const MATCH_TINT: [f32; 2] = [0.28, 0.4];
 /// 软件标志画多大：标志铺满自己的方框，应用图标四周有留白，画小一点看着一样大。

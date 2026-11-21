@@ -206,6 +206,10 @@ impl Workspace {
             cx.observe_window_appearance(window, |_, window, cx| sync_appearance(window, cx)),
             // 窗口退到后台（⌘ 点链接后浏览器抢了前台）：之后松开 ⌘ 我们收不到，角标不能一直挂着
             cx.observe_window_activation(window, |this, window, cx| {
+                // 切回 SSHL 的这一刻：自动检查查到的新版本这时候弹（正敲着字时弹框会抢走回车，见 update.rs）
+                if window.is_window_active() {
+                    crate::update::show_pending(window, cx);
+                }
                 if !window.is_window_active() {
                     this.hint_task = None;
                     if this.hint_visible {
@@ -1017,6 +1021,19 @@ impl Workspace {
         }));
         self.settings_dialog = Some(dialog);
         cx.notify();
+    }
+
+    /// 菜单栏「关于 SSHL」：设置开着就切到「关于」页；有别的对话框 / 提示框开着时不动（同 ⌘,）。
+    pub(crate) fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_dialog.is_none() {
+            if self.modal_open(cx) {
+                return;
+            }
+            self.open_settings(window, cx);
+        }
+        if let Some(dialog) = &self.settings_dialog {
+            dialog.update(cx, |dialog, cx| dialog.show_about(cx));
+        }
     }
 
     /// 对话框关掉后焦点回到当前终端（否则要再点一下才能继续输入）。还有框开着时不动，焦点留在框里。

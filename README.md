@@ -78,6 +78,8 @@ Download the macOS build from [Releases](https://github.com/qfdk/sshl/releases),
 
 The app is signed with a Developer ID and notarized by Apple, so it opens with a double-click.
 
+Each time you open SSHL it checks GitHub for a new release and, when there is one, offers to open its download page; SSHL → Check for Updates… checks right away, and Settings → About turns the check off. Nothing is downloaded or installed automatically, and apart from your own servers this is the only request SSHL makes.
+
 When you connect to a host on your local network, macOS asks for the "Local Network" permission — allow it. If you get `No route to host`, enable SSHL in System Settings → Privacy & Security → Local Network.
 
 ### Build from source

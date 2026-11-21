@@ -70,6 +70,10 @@ pub struct Settings {
     pub language: Language,
     /// 连接图标画服务器的系统还是通用的服务器图标。
     pub connection_icons: ConnectionIcons,
+    /// 打开 SSHL 时检查更新（设置 →「关于」，`update.rs`）；关了手动检查照样能用。
+    pub auto_check_updates: bool,
+    /// 新版本提示框里点了「以后再说」的版本（tag，`v0.7.6`）：这个版本不再自动提醒（`update.rs`）。
+    pub skipped_update: String,
     /// 改过的快捷键（命令 id → 快捷键，空 = 不要快捷键）；没改过的不存，用默认的（`keymap::COMMANDS`）。
     pub key_bindings: Overrides,
 }
@@ -89,6 +93,8 @@ impl Default for Settings {
             appearance: Appearance::System,
             language: Language::System,
             connection_icons: ConnectionIcons::System,
+            auto_check_updates: true,
+            skipped_update: String::new(),
             key_bindings: Overrides::new(),
         }
     }
@@ -106,8 +112,13 @@ pub fn clamp_font_size(size: f32) -> f32 {
     if size.is_finite() && size > 0.0 { size.clamp(8.0, 40.0) } else { DEFAULT_FONT_SIZE }
 }
 
+/// 数据目录 `~/.sshl`（连接库、主密钥、设置、主机密钥记录；设置 →「关于」里显示、能打开）。
+pub fn data_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".sshl"))
+}
+
 fn path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".sshl").join("settings.json"))
+    data_dir().map(|dir| dir.join("settings.json"))
 }
 
 pub fn init(cx: &mut App) {
@@ -166,7 +177,8 @@ fn load() -> Settings {
     migrated
 }
 
-fn save(settings: &Settings) {
+/// 写盘（不动内存里的设置）。一般用 `update` / `persist`；设置对话框「关于」页的开关要只写那一项（`settings_dialog::saved_with`）。
+pub fn save(settings: &Settings) {
     let Some(path) = path() else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -342,6 +354,16 @@ mod tests {
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().connection_icons, ConnectionIcons::Generic);
         let unknown: Settings = serde_json::from_str(r#"{"connectionIcons":"rainbow"}"#).unwrap();
         assert_eq!(unknown.connection_icons, ConnectionIcons::System, "不认识的值按默认");
+    }
+
+    #[test]
+    fn update_checks_are_on_unless_turned_off() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert!(old.auto_check_updates, "旧设置里没有这一项：自动检查");
+        let s = Settings { auto_check_updates: false, ..Settings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""autoCheckUpdates":false"#), "{json}");
+        assert!(!serde_json::from_str::<Settings>(&json).unwrap().auto_check_updates);
     }
 
     #[test]

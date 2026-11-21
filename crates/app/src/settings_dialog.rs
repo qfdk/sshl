@@ -1,17 +1,18 @@
-//! 设置（旧 SettingsDialog.tsx + GroupTree.tsx）：终端字号 / 字体 / 配色、外观、快捷键（实时预览，点保存才写盘），分组管理（改完要点保存）。
+//! 设置（旧 SettingsDialog.tsx + GroupTree.tsx）：终端字号 / 字体 / 配色、外观、快捷键（实时预览，点保存才写盘），分组管理（改完要点保存），
+//! 关于（版本、检查更新、赞助商）。
 
 use std::collections::HashSet;
 
 use gpui::{
     AnyElement, AppContext, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     HighlightStyle, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement, StyledText, Styled, Subscription, Toggled, Window, deferred, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, StyledText, Styled, Subscription, Toggled, Window, deferred, div, img, prelude::FluentBuilder, px,
 };
 use gpui_base::FocusTrapElement;
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, ConnectionLayoutInput, StoredConnection};
 
-use crate::assets::Icon;
+use crate::assets::{ABOUT_ICON, ABOUT_ICON_DARK, ABOUT_ICON_SIZE, Icon, VOILA_BANNER, VOILA_BANNER_SIZE};
 use crate::backend;
 use crate::groups::{self, Side};
 use crate::keymap::{self, COMMANDS, Command, Group, Recorded};
@@ -23,6 +24,21 @@ use crate::theme::term::{self, Theme};
 use crate::theme::Appearance;
 use crate::theme::{self, ui};
 use crate::ui::{self as kit, Variant};
+use crate::system_panel::{RING_TRACK, SEGMENT_TINT, readable};
+use crate::update;
+
+const REPOSITORY: &str = "https://github.com/qfdk/sshl";
+const ISSUES: &str = "https://github.com/qfdk/sshl/issues";
+const RELEASES: &str = "https://github.com/qfdk/sshl/releases";
+/// 设置对话框主体（标题栏下面）的高度：每一页一样高，最高的「终端」页刚好放下不滚动。
+const SETTINGS_BODY_HEIGHT: f32 = 600.;
+/// 「关于」页状态段悬停时底色比平常深这么多（能点）。
+const SEGMENT_HOVER: f32 = 0.05;
+/// 「关于」页状态段的圆形图标位：比系统页的（58pt）小得多（用户：「卡片过于大了」），一排放三段。
+const ABOUT_GAUGE: f32 = 24.;
+const LICENSE: &str = "https://github.com/qfdk/sshl/blob/main/LICENSE";
+/// 「特别感谢」的 Voilà Pro。ref 和 README 里的（github-sshl）分开，看得出是从应用里点过去的。
+const THANKS: &str = "https://voilapro.app/?ref=sshl-app";
 
 /// 只列非 Mono 版：Mono 版把图标压成一格宽，和正常字符大小不一样（用户不要）。
 const NERD_CANDIDATES: &[&str] = &[
@@ -72,6 +88,7 @@ enum Tab {
     Appearance,
     Shortcuts,
     Groups,
+    About,
 }
 
 pub enum SettingsDialogEvent {
@@ -120,6 +137,8 @@ pub struct SettingsDialog {
     record_hint: bool,
     /// 录的时候截住所有按键（先于快捷键生效，⌘Q / ⌘W 也录得进来）；不录了就丢掉。
     recorder: Option<Subscription>,
+    /// 「关于」页刚点了「复制版本信息」：按钮写「已复制」，一会儿变回来。
+    version_copied: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -168,6 +187,7 @@ impl SettingsDialog {
             recording: None,
             record_hint: false,
             recorder: None,
+            version_copied: false,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -290,6 +310,14 @@ impl SettingsDialog {
         self.recorder = Some(cx.intercept_keystrokes(move |event, window, cx| {
             let _ = this.update(cx, |this, cx| this.recorded(&event.keystroke, window, cx));
         }));
+        cx.notify();
+    }
+
+    /// 菜单栏「关于 SSHL」：打开（或切到）「关于」这一页。
+    pub fn show_about(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::About;
+        self.family_open = false;
+        self.stop_recording(cx);
         cx.notify();
     }
 
@@ -464,11 +492,15 @@ impl Render for SettingsDialog {
                     this.stop_recording(cx);
                 }))
         };
+        // 每一页一样高（用户：「关于」那页「高度太低」「窗口被压扁了」，切页时也不再忽高忽低）：按最高的「终端」页放得下定，
+        // 窗口矮时按窗口收（标题栏 52 + 上下留白），放不下的页在右边滚动；各页最外层撑满、底下那一栏贴底
+        let body_height = px(SETTINGS_BODY_HEIGHT).min(window.viewport_size().height - px(96.));
         let panel = match self.tab {
             Tab::Font => self.font_panel(window, cx),
             Tab::Appearance => self.appearance_panel(cx),
             Tab::Shortcuts => self.shortcuts_panel(window, cx),
             Tab::Groups => self.groups_panel(window, cx),
+            Tab::About => self.about_panel(cx),
         };
         let body = div()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -498,7 +530,7 @@ impl Render for SettingsDialog {
             .child(
                 div()
                     .flex()
-                    .min_h(px(352.))
+                    .h(body_height)
                     .child(
                         div()
                             .w(px(144.))
@@ -514,15 +546,17 @@ impl Render for SettingsDialog {
                             .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, tr!("终端"), self.tab == Tab::Font, cx))
                             .child(tab_button("settings-tab-appearance", Tab::Appearance, Icon::Moon, tr!("外观"), self.tab == Tab::Appearance, cx))
                             .child(tab_button("settings-tab-shortcuts", Tab::Shortcuts, Icon::Keyboard, tr!("快捷键"), self.tab == Tab::Shortcuts, cx))
-                            .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, tr!("分组管理"), self.tab == Tab::Groups, cx)),
+                            .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, tr!("分组管理"), self.tab == Tab::Groups, cx))
+                            .child(tab_button("settings-tab-about", Tab::About, Icon::Info, tr!("关于"), self.tab == Tab::About, cx)),
                     )
-                    // 窗口矮（最小 600）时「终端」这页放不下：右边这块自己滚动，标题栏和保存按钮不会被挤出窗口
+                    // 窗口矮（最小 600）时放不下：右边这块自己滚动，标题栏和保存按钮不会被挤出窗口
                     .child(
                         div()
                             .id("settings-panel")
                             .flex_1()
                             .min_w_0()
-                            .max_h(window.viewport_size().height - px(96.))
+                            .flex()
+                            .flex_col()
                             .overflow_y_scroll()
                             .p_5()
                             .child(panel),
@@ -607,6 +641,8 @@ impl SettingsDialog {
             .flex()
             .flex_col()
             .gap_4()
+            .flex_grow(1.)
+            .flex_shrink_0()
             .child(
                 div()
                     .relative()
@@ -686,6 +722,7 @@ impl SettingsDialog {
             .child(
                 div()
                     .pt_3()
+                    .mt_auto()
                     .flex()
                     .justify_between()
                     .border_t_1()
@@ -782,6 +819,8 @@ impl SettingsDialog {
             .flex()
             .flex_col()
             .gap_4()
+            .flex_grow(1.)
+            .flex_shrink_0()
             .child(
                 div()
                     .flex()
@@ -818,6 +857,7 @@ impl SettingsDialog {
             .child(
                 div()
                     .pt_3()
+                    .mt_auto()
                     .flex()
                     .justify_end()
                     .border_t_1()
@@ -825,6 +865,327 @@ impl SettingsDialog {
                     .child(kit::labeled_button("appearance-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
+    }
+
+    /// 关于：用 SSHL 自己的设计语言（用户：照搬 termlet「有点抄」，学 macOS 系统设置也不对——「不是 Swift 原生」）。
+    /// 主体是一张和系统页指标卡一样的卡片：三段同色浅底，各一个圆形图标位、小标题、大号的值、一行能点的小字——
+    /// 版本（复制版本信息）、更新（状态跟着检查结果换颜色，检查更新 / 前往下载）、数据目录（在访达中打开）。
+    /// 上面图标、名字、一句介绍；下面打开时检查的开关、一排链接，最底下版权和特别感谢 Voilà Pro（小图标一行字，不放横幅）。
+    /// 开关点了就生效、马上写盘（只写这一项，见 [`saved_with`]）。
+    fn about_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let auto_check = settings::get(cx).auto_check_updates;
+        let version = update::current_version();
+        let muted = theme::color(ui::MUTED_FOREGROUND);
+        let dark = usize::from(theme::is_dark());
+        // 分节小标题加粗（画布改法 C；用户：「理论上这里要加粗」）
+        let section_title = |text: &'static str| div().text_sm().font_weight(FontWeight::SEMIBOLD).child(text);
+        // 同系统页指标卡的一段（小得多：用户嫌「卡片过于大了」）。有动作的整段都能点（悬停底色加深），
+        // 最下面一行小字带图标说点了做什么
+        let segment = |id: &'static str, color: ui::Token, icon: Icon, title: SharedString, value: SharedString, action: Option<(Icon, SharedString)>| {
+            let hover = theme::alpha(color, SEGMENT_TINT[dark] + SEGMENT_HOVER);
+            div()
+                .id(id)
+                .flex_1()
+                .min_w(px(150.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px_3()
+                .py(px(9.))
+                .rounded(px(8.))
+                .bg(theme::alpha(color, SEGMENT_TINT[dark]))
+                .when_some(action.as_ref(), |d, (_, label)| d.role(Role::Button).aria_label(label.clone()).cursor_pointer().hover(move |s| s.bg(hover)))
+                .child(
+                    div()
+                        .size(px(ABOUT_GAUGE))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(theme::alpha(color, RING_TRACK[dark]))
+                        .text_color(theme::color(readable(color)))
+                        .child(kit::icon_sized(icon, 13.)),
+                )
+                // 两行（用户：上面三张「卡片有点儿过于大了」，原来小标题、值、动作三行）：小标题和值一行，动作一行
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(6.))
+                                .child(div().text_xs().text_color(muted).whitespace_nowrap().child(title))
+                                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).whitespace_nowrap().child(value)),
+                        )
+                        .when_some(action, |d, (glyph, label)| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme::color(readable(color)))
+                                    .child(kit::icon_sized(glyph, 12.))
+                                    .child(label),
+                            )
+                        }),
+                )
+        };
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .child(img(if theme::is_dark() { ABOUT_ICON_DARK } else { ABOUT_ICON }).size(px(ABOUT_ICON_SIZE)).flex_shrink_0())
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_size(px(22.)).font_weight(FontWeight::SEMIBOLD).child("SSHL"))
+                    .child(div().text_sm().text_color(muted).child(tr!("用 Rust 写的 SSH 客户端：终端、文件管理、系统监控"))),
+            );
+
+        let copy_label = if self.version_copied { tr!("已复制") } else { tr!("复制版本信息") };
+        // 三段的颜色取系统页指标卡那几种里色相离得最远的（用户：「三个颜色都太靠近了」「根据我们之前的配色风格来」）：
+        // 版本蓝、数据目录紫，更新跟着状态（已是最新绿、有新版橙、失败红，还没检查 / 检查中是中性灰，不和另两段撞色）
+        let version_segment = segment(
+            "about-version",
+            ui::PRIMARY,
+            Icon::Info,
+            tr!("版本").into(),
+            version.clone().into(),
+            Some((if self.version_copied { Icon::Check } else { Icon::Copy }, copy_label.into())),
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.copy_version_info(cx)));
+        let check = cx.listener(|_, _, window, cx| {
+            update::check_now(window, cx, update::Report::Inline);
+            cx.notify();
+        });
+        let update_segment = match (update::is_checking(cx), update::last_outcome(cx)) {
+            (true, _) => segment("about-update", ui::MUTED_FOREGROUND, Icon::RefreshCw, tr!("更新").into(), tr!("检查中…").into(), None),
+            (false, None) => segment(
+                "about-update",
+                ui::MUTED_FOREGROUND,
+                Icon::RefreshCw,
+                tr!("更新").into(),
+                tr!("还没检查").into(),
+                Some((Icon::RefreshCw, tr!("检查更新").into())),
+            )
+            .on_click(check),
+            (false, Some(update::Outcome::UpToDate)) => segment(
+                "about-update",
+                ui::SUCCESS,
+                Icon::Check,
+                tr!("更新").into(),
+                tr!("已是最新").into(),
+                Some((Icon::RefreshCw, tr!("再检查一次").into())),
+            )
+            .on_click(check),
+            (false, Some(update::Outcome::Newer(release))) => {
+                let url = release.url.clone();
+                segment(
+                    "about-update",
+                    ui::WARNING,
+                    Icon::Download,
+                    tr!("更新").into(),
+                    release.tag.clone().into(),
+                    Some((Icon::Download, tr!("前往下载").into())),
+                )
+                .on_click(move |_, _, cx| cx.open_url(&url))
+            }
+            (false, Some(update::Outcome::Failed(error))) => segment(
+                "about-update",
+                ui::DESTRUCTIVE,
+                Icon::RefreshCw,
+                tr!("更新").into(),
+                tr!("检查失败").into(),
+                Some((Icon::RefreshCw, tr!("重试").into())),
+            )
+            .on_click(check)
+            .tooltip(move |window, cx| kit::tooltip(error.clone().into(), window, cx)),
+        };
+        let data_dir = settings::data_dir();
+        let shown_dir = data_dir.as_ref().map(|dir| home_relative(dir)).unwrap_or_default();
+        let data_segment = segment(
+            "about-data",
+            ui::VIOLET,
+            Icon::HardDrive,
+            tr!("数据目录").into(),
+            shown_dir.into(),
+            Some((Icon::FolderOpen, tr!("在访达中打开").into())),
+        )
+        .on_click(move |_, _, cx| {
+            if let Some(dir) = &data_dir {
+                cx.open_with_system(dir);
+            }
+        });
+        // 三段直接并排，不套外框（画布改法 C：框套框太杂）
+        let card = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(version_segment)
+            .child(update_segment)
+            .child(data_segment);
+
+        let auto = div()
+            .id("auto-check-updates")
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .role(Role::CheckBox)
+            .aria_label(tr!("打开 SSHL 时检查更新"))
+            .child(kit::checkbox(("auto-check-updates", 0usize), auto_check).flex_shrink_0())
+            .child(div().text_sm().child(tr!("打开 SSHL 时检查更新")))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_auto_check(cx)));
+
+        // 用到的开源项目：说明 SSHL 建在什么上面（用户：「我们是 Rust 写的」），也是给它们的署名；三列两行，点了开项目主页
+        let projects = [
+            ("GPUI", tr!("界面框架（来自 Zed）"), "https://github.com/zed-industries/zed/tree/main/crates/gpui"),
+            ("libghostty-vt", tr!("终端模拟（Ghostty 内核）"), "https://github.com/ghostty-org/ghostty"),
+            ("russh", tr!("SSH 和 SFTP"), "https://github.com/Eugeny/russh"),
+            ("JetBrains Mono", tr!("终端字体"), "https://www.jetbrains.com/lp/mono/"),
+            ("Lucide", tr!("线条图标"), "https://lucide.dev"),
+            ("Simple Icons", tr!("软件和系统的标志"), "https://simpleicons.org"),
+        ];
+        let project = |index: usize, (name, purpose, url): (&'static str, &'static str, &'static str)| {
+            div()
+                .id(("about-project", index))
+                .role(Role::Link)
+                .aria_label(name)
+                .flex_1()
+                .min_w_0()
+                .px_3()
+                .py_2()
+                .rounded(px(8.))
+                .bg(theme::color(ui::MUTED))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::color(ui::SECONDARY)))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(name))
+                .child(div().text_xs().text_color(muted).child(purpose))
+                .on_click(move |_, _, cx| cx.open_url(url))
+        };
+        let mut projects = projects.into_iter().enumerate();
+        let mut project_row = || div().flex().gap_2().children(projects.by_ref().take(3).map(|(index, item)| project(index, item)));
+        let built_with = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title(tr!("用到的开源项目")))
+            .child(div().flex().flex_col().gap_2().child(project_row()).child(project_row()));
+
+        let link = |id: &'static str, icon: Icon, label: SharedString, url: &'static str| {
+            div()
+                .id(id)
+                .role(Role::Link)
+                .aria_label(label.clone())
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.text_color(theme::color(ui::FOREGROUND)))
+                .child(kit::icon_sized(icon, 14.))
+                .child(label)
+                .on_click(move |_, _, cx| cx.open_url(url))
+        };
+        // 链接和版权一行：左边链接、右边版权，上面一条分隔线（画布改法 C）
+        let links = div()
+            .pt_3()
+            .border_t_1()
+            .border_color(theme::color(ui::BORDER))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x(px(18.))
+            .gap_y_2()
+            .text_size(px(13.))
+            .text_color(muted)
+            .child(link("about-source", Icon::CodeXml, tr!("源代码").into(), REPOSITORY))
+            .child(link("about-releases", Icon::FileText, tr!("更新日志").into(), RELEASES))
+            .child(link("about-issues", Icon::MessageSquare, tr!("反馈问题").into(), ISSUES))
+            .child(link("about-license", Icon::Scale, tr!("许可证（GPL-3.0）").into(), LICENSE))
+            .child(div().ml_auto().text_xs().child(tr!("版权所有 © 2026 qfdk")));
+
+        // 特别感谢 Voilà Pro：标题 + 它的横幅，放在正文里（用户：从右下角挪进来，「这样的话就显得充满了」；不写介绍文字）
+        let (banner_width, banner_height) = VOILA_BANNER_SIZE;
+        // 和「用到的开源项目」一样成一节、左对齐（画布改法 C：居中的一行飘在中间，和整页的左边线对不齐）
+        let thanks = div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(10.))
+            .child(section_title(tr!("特别感谢 Voilà Pro")))
+            .child(
+                div()
+                    .id("about-thanks")
+                    .role(Role::Link)
+                    .aria_label("Voilà Pro")
+                    .w(px(banner_width))
+                    .h(px(banner_height))
+                    .cursor_pointer()
+                    .child(img(VOILA_BANNER).w(px(banner_width)).h(px(banner_height)).rounded(px(8.)))
+                    .on_click(|_, _, cx| cx.open_url(THANKS)),
+            );
+
+        // 撑满固定的高度，链接和版权贴底；上下相邻的每两块之间一样宽，多出来的高度在这几处平分
+        // （用户：开源项目「下面的空白有些大了」——原来全堆在那一处；复选框「上下间距要一样」）。
+        // 最小 12pt：窗口高度不动（用户：「不要调整窗口高度了，减小内部间距」），整页在固定高度里放得下、不滚动
+        let gap = || div().flex_grow(1.).min_h(px(12.));
+        div()
+            .flex_grow(1.)
+            .flex_shrink_0()
+            .pt_1()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(gap())
+            .child(card)
+            .child(gap())
+            .child(auto)
+            .child(gap())
+            .child(built_with)
+            .child(gap())
+            .child(thanks)
+            .child(gap())
+            .child(links)
+            .into_any_element()
+    }
+
+    /// 「复制版本信息」：版本、系统版本、芯片架构一行进剪贴板，按钮写一会儿「已复制」。
+    fn copy_version_info(&mut self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(update::version_info()));
+        self.version_copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.version_copied = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 「关于」页的「打开 SSHL 时检查更新」：点了就生效、马上写盘（只写这一项）。
+    fn toggle_auto_check(&mut self, cx: &mut Context<Self>) {
+        let on = !settings::get(cx).auto_check_updates;
+        settings::preview(cx, |s| s.auto_check_updates = on);
+        let written = saved_with(&mut self.snapshot, settings::get(cx), |s| s.auto_check_updates = on);
+        settings::save(&written);
+        cx.notify();
     }
 
     /// 快捷键：按分组列出能改的命令。点格子再按新的组合键（录的是这个键盘布局下实际按出来的键）；
@@ -856,11 +1217,14 @@ impl SettingsDialog {
             .flex()
             .flex_col()
             .gap_4()
+            .flex_grow(1.)
+            .flex_shrink_0()
             .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("点快捷键后按新的组合键：Esc 取消，⌫ 去掉")))
             .child(div().id("shortcut-list").max_h(list_height).overflow_y_scroll().pr_2().flex().flex_col().gap_4().children(sections))
             .child(
                 div()
                     .pt_3()
+                    .mt_auto()
                     .flex()
                     .justify_between()
                     .border_t_1()
@@ -940,6 +1304,8 @@ impl SettingsDialog {
             .flex()
             .flex_col()
             .gap_4()
+            .flex_grow(1.)
+            .flex_shrink_0()
             .child(
                 div()
                     .flex()
@@ -959,6 +1325,7 @@ impl SettingsDialog {
             .child(
                 div()
                     .pt_3()
+                    .mt_auto()
                     .flex()
                     .items_center()
                     .justify_between()
@@ -1138,7 +1505,7 @@ impl SettingsDialog {
     }
 }
 
-/// 关掉不保存：「终端」「外观」「快捷键」几页预览过的换回打开时的（`snapshot`），别的（侧栏收起、收起的分组）照当前的。
+/// 关掉不保存：「终端」「外观」「快捷键」「关于」几页预览过的换回打开时的（`snapshot`），别的（侧栏收起、收起的分组）照当前的。
 fn unsaved_reverted(snapshot: &Settings, current: &Settings) -> Settings {
     Settings {
         font_size: snapshot.font_size,
@@ -1149,9 +1516,26 @@ fn unsaved_reverted(snapshot: &Settings, current: &Settings) -> Settings {
         appearance: snapshot.appearance,
         language: snapshot.language,
         connection_icons: snapshot.connection_icons,
+        auto_check_updates: snapshot.auto_check_updates,
         key_bindings: snapshot.key_bindings.clone(),
         ..current.clone()
     }
+}
+
+/// 家目录下的路径写成 `~/…`（「关于」页的数据目录），别处的原样。
+fn home_relative(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// 「关于」页的开关点了就写盘：把这一项记进打开时的设置（`snapshot`，关掉对话框时不再还原它），
+/// 写盘的是当前设置去掉别的页预览着没保存的（同关掉不保存），再带上这一项。返回要写盘的设置。
+fn saved_with(snapshot: &mut Settings, current: &Settings, change: impl FnOnce(&mut Settings)) -> Settings {
+    change(snapshot);
+    unsaved_reverted(snapshot, current)
 }
 
 #[cfg(test)]
@@ -1172,6 +1556,7 @@ mod tests {
             appearance: Appearance::Dark,
             language: Language::En,
             connection_icons: ConnectionIcons::Generic,
+            auto_check_updates: false,
             sidebar_collapsed: true,
             collapsed_groups: vec!["k3s".into()],
             ..Settings::default()
@@ -1183,6 +1568,20 @@ mod tests {
             reverted,
             Settings { sidebar_collapsed: true, collapsed_groups: vec!["k3s".into()], ..Settings::default() }
         );
+    }
+
+    /// 「关于」页的开关点了就写盘（这一页没有保存按钮）：写的是打开对话框时的设置加上这一项，
+    /// 别的页预览着没保存的（这里是字号、深色）不跟着写进去；之后关掉对话框，这一项也不会被还原。
+    #[test]
+    fn an_about_switch_is_saved_alone() {
+        let mut snapshot = Settings::default();
+        let previewed = Settings { font_size: 22., appearance: Appearance::Dark, sidebar_collapsed: true, ..Settings::default() };
+        let written = saved_with(&mut snapshot, &previewed, |s| s.auto_check_updates = false);
+        assert_eq!(written, Settings { auto_check_updates: false, sidebar_collapsed: true, ..Settings::default() });
+        assert!(!snapshot.auto_check_updates, "关掉对话框时按打开时的设置还原：这一项已经存了，不能被还原回去");
+        let closed = unsaved_reverted(&snapshot, &Settings { auto_check_updates: false, ..previewed });
+        assert!(!closed.auto_check_updates);
+        assert_eq!(closed.font_size, DEFAULT_FONT_SIZE);
     }
 
     #[test]

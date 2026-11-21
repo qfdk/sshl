@@ -224,6 +224,16 @@ fn run(line: &str, window: &mut gpui::Window, cx: &mut App) -> Result<(), String
             crate::settings::preview(cx, |s| s.language = language);
             Ok(())
         }
+        // check-update：同菜单栏「检查更新…」（开发版不自动查；SSHL_DEV_VERSION=0.7.0 起进程可以看「有新版本」的框）
+        "check-update" => {
+            crate::update::check_now(window, cx, crate::update::Report::Prompt);
+            Ok(())
+        }
+        // about：同菜单栏「关于 SSHL」（走同一个动作）
+        "about" => {
+            window.dispatch_action(Box::new(crate::About), cx);
+            Ok(())
+        }
         "selection" => {
             window.dispatch_action(Box::new(crate::terminal::view::LogSelection), cx);
             Ok(())
