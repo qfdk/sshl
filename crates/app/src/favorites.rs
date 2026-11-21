@@ -36,17 +36,27 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 // ---------------------------------------------------------------- 纯逻辑
 
 /// 按搜索词筛选：空格分开的每个词都要出现在名字或路径里（不分大小写）。返回下标。
+/// 名字（列表里的标题：起的名字，没起就是目录名）优先：以第一个词开头的最前，其次名字里中的词多的，只在路径里中的最后
+/// （用户：搜「ct」时路径里有 projects 的排在 ctf 前面不对）；同一档里照原来的顺序。
 pub fn filter_bookmarks(bookmarks: &[Bookmark], query: &str) -> Vec<usize> {
     let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    bookmarks
+    let mut matched: Vec<(usize, (bool, usize))> = bookmarks
         .iter()
         .enumerate()
         .filter(|(_, bookmark)| {
             let haystack = format!("{}\n{}", bookmark.name, bookmark.path).to_lowercase();
             terms.iter().all(|term| haystack.contains(term.as_str()))
         })
-        .map(|(i, _)| i)
-        .collect()
+        .map(|(i, bookmark)| {
+            let title = bookmark_lines(bookmark).0.to_lowercase();
+            let starts = terms.first().is_some_and(|first| title.starts_with(first.as_str()));
+            let missed = terms.iter().filter(|term| !title.contains(term.as_str())).count();
+            (i, (!starts, missed))
+        })
+        .collect();
+    // 稳定排序：同一档不动
+    matched.sort_by_key(|&(_, rank)| rank);
+    matched.into_iter().map(|(i, _)| i).collect()
 }
 
 /// 发到终端的 `cd`：普通路径原样写（看着干净），带空格、引号、`$` 之类的用单引号包住。
@@ -394,12 +404,39 @@ mod tests {
     fn every_search_word_has_to_appear_in_the_name_or_the_path() {
         let all = [bookmark("/srv/www/Blog", ""), bookmark("/var/log/nginx", "网站日志"), bookmark("/etc/nginx", "")];
         assert_eq!(filter_bookmarks(&all, ""), [0, 1, 2]);
-        assert_eq!(filter_bookmarks(&all, "NGINX"), [1, 2]);
+        assert_eq!(filter_bookmarks(&all, "NGINX"), [2, 1], "名字叫 nginx 的在只是路径里有 nginx 的前面");
         assert_eq!(filter_bookmarks(&all, "nginx log"), [1]);
         assert_eq!(filter_bookmarks(&all, " blog "), [0]);
         assert_eq!(filter_bookmarks(&all, "nginx blog"), Vec::<usize>::new());
         assert_eq!(filter_bookmarks(&all, "日志"), [1], "起的名字也能搜");
         assert_eq!(filter_bookmarks(&all, "网站 nginx"), [1], "名字和路径里各中一个词也算");
+    }
+
+    /// 名字优先（名字 = 起的名字，没起就是目录名，同列表里的标题）：名字以第一个词开头的最前，其次名字里中的词多的，
+    /// 只在路径里中的最后；同一档里照原来的顺序。敲字后选中第一行，回车进的就是名字最像的那个。
+    #[test]
+    fn matches_in_the_name_come_before_matches_in_the_path() {
+        let all = [
+            bookmark("/var/log/nginx", ""),
+            bookmark("/srv/www/Blog", ""),
+            bookmark("/home/app/logs", ""),
+            bookmark("/data/archive", "Log 归档"),
+        ];
+        assert_eq!(filter_bookmarks(&all, "log"), [2, 3, 1, 0]);
+        assert_eq!(filter_bookmarks(&all, "归档"), [3]);
+        let all = [bookmark("/opt/nginx/conf", ""), bookmark("/var/backup/x", "nginx conf 备份"), bookmark("/srv/conf/nginx", "")];
+        assert_eq!(filter_bookmarks(&all, "nginx conf"), [1, 2, 0], "两个词都在名字里的 > 名字以 nginx 开头的 > 名字里只中一个、不以它开头的");
+        assert_eq!(filter_bookmarks(&all, ""), [0, 1, 2], "不搜的时候照原来的顺序");
+        // 用户截图里的：搜「ct」，路径里的 projects 中了的不能排在 ctf 前面
+        let all = [
+            bookmark("/Users/qfdk/projects/safe/n1pay", ""),
+            bookmark("/Users/qfdk/projects", ""),
+            bookmark("/Users/qfdk/projects/qfdk/voila", ""),
+            bookmark("/Users/qfdk/projects/qfdk/sol-bot", ""),
+            bookmark("/Users/qfdk/projects/qfdk/ctf", ""),
+        ];
+        assert_eq!(filter_bookmarks(&all, "ct"), [4, 1, 0, 2, 3]);
+        assert_eq!(filter_bookmarks(&all, "qfdk")[0], 0, "名字里都没有 qfdk：照原来的顺序");
     }
 
     #[test]
