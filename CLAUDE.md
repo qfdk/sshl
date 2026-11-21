@@ -16,7 +16,7 @@ crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
   src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）：view.rs 只放状态和整体布局，做法按功能分在 view/ 下
-assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件标志（icons/brands，Simple Icons 16.36.0，CC0；Redis 用 12.0.0 的经典标志）、应用图标、Info.plist 模板
+assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件和系统的标志（icons/brands，Simple Icons 16.36.0，CC0；Redis 用 12.0.0 的经典标志）、应用图标、Info.plist 模板
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
 scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
 tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
@@ -203,6 +203,15 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   聚焦 / 点进去列出已有分组（顺序同侧栏，空分组也在），敲字按包含过滤，↑↓ 选、↵ 选中（没选中某行时 ↵ 照旧提交表单）、Esc 先收下拉再关对话框；
   敲的名字还没有就多一行「新建分组」，保存连接时分组自然建出来；只差大小写的归到已有分组。按在下拉上要 `prevent_default`，
   否则对话框拿走焦点、输入框一失焦下拉就收了，点击落空。
+- **连接图标是服务器的系统**（用户 2026-11-21：「登录之后可以自动改图标，比如 Ubuntu 或者 Debian」）：每次连上（含原地重连，`Workspace::detect_os`）
+  在后台开一个 exec 通道跑 `server_info::OS_COMMAND`（`uname -s` + os-release），`parse_os` 记成小写的 `内核` 或 `内核/发行版`
+  （`linux/ubuntu`、`linux`、`darwin`、`freebsd/freebsd`；值是服务器给的，只收 os-release ID 允许的字符、32 字以内，输出里没有 `@@` 标记的不认），
+  存进 `connections.os`，和记着的一样不写库；没认出来就留着原来的。存原始值、画的时候再查标志（`brands::of_os`）：认得的发行版画它的，
+  认不出的 Linux（Oracle Linux、Amazon Linux：Simple Icons 里没有）画企鹅，不借 ID_LIKE（Oracle Linux 的是 fedora）；macOS 画苹果；
+  NetBSD（标志是一行字，小了看不清）、还没认过的画服务器图标。改了主机或端口就清空（`config_store::upsert_connection_in`），下次连上再认。
+  侧栏、⌘K、设置的分组树共用 `sidebar::connection_icon`：品牌色在这一处的几种底色（平常 / 选中 / 悬停）上对比都 ≥ 2:1 才用，否则这一处整个用正文色
+  （`brands::color_on`，同一处的标志不随选中变色）——所以深色下 Debian 的红在侧栏上是红的，在 ⌘K（深蓝选中行）里是正文色。
+  新加一个发行版：从 Simple Icons 同一版本拿 SVG 放进 `assets/icons/brands/`、`brands!` 表登记，`brands::distro` 按 os-release 的 ID 加一行。
 - **快捷键可改**（设置 →「快捷键」页，`keymap.rs`，`settings.key_bindings` 只存改过的：命令 id → 快捷键列表，空列表 = 不要快捷键）：
   能改的登记在 `keymap::COMMANDS`（新建连接、本机终端、⌘K、关标签、切标签、⌘1…9、终端 / 文件管理 / 系统、面板、侧栏、设置、终端的拷贝粘贴查找字号、
   文件管理的全选 / 隐藏文件 / 收藏、退出 / 隐藏 / 最小化），默认值就是原来写死的那些；面板里的上下 / 回车 / Esc 这类导航键写死在各模块的 `key_bindings`，不开放。

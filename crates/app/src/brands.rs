@@ -1,5 +1,5 @@
-//! 进程名 → 服务端软件的标志。远程服务器上没有应用图标可取（Linux 没有 .app），按进程名认出常见的软件（nginx、redis、postgres、
-//! docker、node、python…）画它的标志；本机不在 .app 里的命令行程序（claude、node）也用。认不出的进程界面画齿轮 / 终端。
+//! 画哪个标志：进程名 → 服务端软件（远程服务器上没有应用图标可取，按进程名认出 nginx、redis、postgres、docker、node、python…；
+//! 本机不在 .app 里的命令行程序 claude、node 也用，认不出的进程界面画齿轮 / 终端）；连接认出的系统 → 发行版（侧栏的连接图标）。
 
 use crate::assets::Brand;
 use crate::terminal::frame::Rgb;
@@ -122,12 +122,72 @@ pub fn brand_of(name: &str) -> Option<Brand> {
         .or_else(|| name.ends_with("_exporter").then_some(Brand::Prometheus))
 }
 
-/// 画这个标志用的颜色（0xRRGGBB）：品牌色；和卡片底色对比不够就用正文色。
+/// 进程列表（卡片上）画这个标志用的颜色（0xRRGGBB），见 [`color_on`]。
 pub fn color(brand: Brand, dark: bool) -> u32 {
-    let card = luminance(Rgb::hex(ui::CARD.resolve(dark)));
+    color_on(brand, &[ui::CARD], dark)
+}
+
+/// 画在这几种底色上（一处地方的平常、选中、悬停）用的颜色：品牌色；和其中任何一种对比不够就用正文色。
+/// 同一处的标志不跟着选中 / 悬停换颜色。
+pub fn color_on(brand: Brand, surfaces: &[ui::Token], dark: bool) -> u32 {
     let own = luminance(Rgb::hex(brand.hex()));
-    let contrast = (own.max(card) + 0.05) / (own.min(card) + 0.05);
-    if contrast >= MIN_CONTRAST { brand.hex() } else { ui::FOREGROUND.resolve(dark) }
+    let visible = surfaces.iter().all(|surface| contrast(own, luminance(Rgb::hex(surface.resolve(dark)))) >= MIN_CONTRAST);
+    if visible { brand.hex() } else { ui::FOREGROUND.resolve(dark) }
+}
+
+fn contrast(a: f32, b: f32) -> f32 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// 连接记着的系统（`linux/ubuntu`、`darwin`，见 `sshl_core::server_info::parse_os`）画哪个标志：发行版认得的画它的；
+/// 认不出的 Linux 发行版（Oracle Linux、Amazon Linux：Simple Icons 里没有）画企鹅，macOS 画苹果。
+/// 还没认过、别的系统（NetBSD 的标志是一行字，小了看不清；illumos）是 None，界面画服务器图标。
+pub fn of_os(os: &str) -> Option<Brand> {
+    let (kernel, distribution) = os.split_once('/').unwrap_or((os, ""));
+    let system = match kernel {
+        "linux" => Some(Brand::Linux),
+        "darwin" => Some(Brand::Apple),
+        "freebsd" => Some(Brand::FreeBsd),
+        "openbsd" => Some(Brand::OpenBsd),
+        _ => None,
+    };
+    distro(distribution).or(system)
+}
+
+/// os-release 的 ID → 发行版的标志。
+fn distro(id: &str) -> Option<Brand> {
+    Some(match id {
+        "ubuntu" => Brand::Ubuntu,
+        "debian" => Brand::Debian,
+        // 32 位的 Raspberry Pi OS；64 位的写的是 debian
+        "raspbian" => Brand::RaspberryPi,
+        "centos" => Brand::CentOs,
+        "fedora" => Brand::Fedora,
+        "rhel" => Brand::RedHat,
+        "rocky" => Brand::RockyLinux,
+        "almalinux" => Brand::AlmaLinux,
+        "alpine" => Brand::AlpineLinux,
+        "arch" | "archarm" => Brand::ArchLinux,
+        "sles" | "sled" | "sles_sap" | "sle-micro" | "sl-micro" => Brand::Suse,
+        "linuxmint" => Brand::LinuxMint,
+        "manjaro" | "manjaro-arm" => Brand::Manjaro,
+        "kali" => Brand::KaliLinux,
+        "gentoo" => Brand::Gentoo,
+        "nixos" => Brand::NixOs,
+        "pop" => Brand::PopOs,
+        "elementary" => Brand::Elementary,
+        "zorin" => Brand::Zorin,
+        "deepin" => Brand::Deepin,
+        "endeavouros" => Brand::EndeavourOs,
+        "void" => Brand::VoidLinux,
+        "slackware" => Brand::Slackware,
+        "openwrt" => Brand::OpenWrt,
+        // Alibaba Cloud Linux
+        "alinux" => Brand::AlibabaCloud,
+        // opensuse-leap、opensuse-tumbleweed、opensuse-microos…
+        id if id == "opensuse" || id.starts_with("opensuse-") => Brand::OpenSuse,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -167,30 +227,77 @@ mod tests {
         }
     }
 
-    /// 对比不够的换成正文色：深色下近黑的、浅色下浅黄的；够的用品牌色。所有标志在两种外观下都看得见。
+    /// 对比不够的换成正文色：深色下近黑的、浅色下浅黄的；够的用品牌色。所有标志在两种外观下、画它的每一处都看得见：
+    /// 进程列表（卡片）、侧栏（窗口底，选中项是卡片）、⌘K（卡片，选中行）、设置里的分组树（卡片，悬停行）。
     #[test]
     fn every_logo_stays_visible() {
         assert_eq!(color(Brand::Bun, true), ui::FOREGROUND.resolve(true));
         assert_eq!(color(Brand::Bun, false), Brand::Bun.hex());
         assert_eq!(color(Brand::Vault, false), ui::FOREGROUND.resolve(false));
         assert_eq!(color(Brand::Nginx, false), Brand::Nginx.hex());
+        // 深色下 Debian 的红在侧栏上看得清，在 ⌘K 的深蓝选中行上看不清：那一处整个用正文色，不随选中变色
+        assert_eq!(color_on(Brand::Debian, &[ui::SHELL, ui::CARD], true), Brand::Debian.hex());
+        assert_eq!(color_on(Brand::Debian, &[ui::CARD, ui::ACCENT], true), ui::FOREGROUND.resolve(true));
+        // 浅色下企鹅的黄在浅灰底上看不清：画成黑企鹅
+        assert_eq!(color_on(Brand::Linux, &[ui::SHELL, ui::CARD], false), ui::FOREGROUND.resolve(false));
+        let places: [&[ui::Token]; 4] = [&[ui::CARD], &[ui::SHELL, ui::CARD], &[ui::CARD, ui::ACCENT], &[ui::CARD, ui::MUTED]];
         for dark in [false, true] {
-            let card = luminance(Rgb::hex(ui::CARD.resolve(dark)));
-            for &brand in Brand::ALL {
-                let own = luminance(Rgb::hex(color(brand, dark)));
-                let contrast = (own.max(card) + 0.05) / (own.min(card) + 0.05);
-                assert!(contrast >= MIN_CONTRAST, "{}（深色 {dark}）只有 {contrast:.2}:1", brand.title());
+            for surfaces in places {
+                for &brand in Brand::ALL {
+                    let own = luminance(Rgb::hex(color_on(brand, surfaces, dark)));
+                    for surface in surfaces {
+                        let ratio = contrast(own, luminance(Rgb::hex(surface.resolve(dark))));
+                        assert!(ratio >= MIN_CONTRAST, "{} 在 {surface:?}（深色 {dark}）上只有 {ratio:.2}:1", brand.title());
+                    }
+                }
             }
         }
     }
 
-    /// 每个对应到的标志都打进了二进制（include_bytes 编不过就会漏）。
+    /// 每个标志都打进了二进制、路径对得上（include_bytes 编不过就会漏）。
     #[test]
-    fn every_mapped_logo_is_bundled() {
+    fn every_logo_is_bundled() {
         use gpui::AssetSource;
-        for (_, brand) in NAMES.iter().chain(PREFIXES) {
+        for &brand in Brand::ALL {
             let bytes = crate::assets::Assets.load(&brand.path()).unwrap().expect("在资源里");
             assert!(bytes.starts_with(b"<svg"), "{}", brand.title());
+        }
+    }
+
+    /// 连接记着的系统（core 的 `parse_os`）→ 标志。
+    #[test]
+    fn systems_are_recognised() {
+        let cases = [
+            ("linux/ubuntu", Some(Brand::Ubuntu)),
+            ("linux/debian", Some(Brand::Debian)),
+            ("linux/raspbian", Some(Brand::RaspberryPi)),
+            ("linux/centos", Some(Brand::CentOs)),
+            ("linux/rhel", Some(Brand::RedHat)),
+            ("linux/rocky", Some(Brand::RockyLinux)),
+            ("linux/almalinux", Some(Brand::AlmaLinux)),
+            ("linux/alpine", Some(Brand::AlpineLinux)),
+            ("linux/archarm", Some(Brand::ArchLinux)),
+            ("linux/opensuse", Some(Brand::OpenSuse)),
+            ("linux/opensuse-tumbleweed", Some(Brand::OpenSuse)),
+            ("linux/sles", Some(Brand::Suse)),
+            ("linux/pop", Some(Brand::PopOs)),
+            ("linux/alinux", Some(Brand::AlibabaCloud)),
+            // 没有自己标志的发行版画企鹅，不借 ID_LIKE 的（Oracle Linux 的 ID_LIKE 是 fedora，画 Fedora 就错了）
+            ("linux/ol", Some(Brand::Linux)),
+            ("linux/amzn", Some(Brand::Linux)),
+            ("linux/opensusex", Some(Brand::Linux)),
+            ("linux", Some(Brand::Linux)),
+            ("darwin", Some(Brand::Apple)),
+            ("freebsd/freebsd", Some(Brand::FreeBsd)),
+            ("openbsd", Some(Brand::OpenBsd)),
+            // Debian GNU/Hurd：内核不是 Linux，发行版照样认
+            ("gnu/debian", Some(Brand::Debian)),
+            ("netbsd", None),
+            ("sunos/omnios", None),
+            ("", None),
+        ];
+        for (os, brand) in cases {
+            assert_eq!(of_os(os), brand, "{os}");
         }
     }
 }

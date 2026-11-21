@@ -17,7 +17,7 @@ use crate::groups::{self, Side};
 use crate::keymap::{self, COMMANDS, Command, Group, Recorded};
 use crate::prompts::{self, Options};
 use crate::settings::{self, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Language, Settings};
-use crate::sidebar::DragPreview;
+use crate::sidebar::{DragPreview, connection_icon};
 use crate::terminal::frame::Rgb;
 use crate::theme::term::{self, Theme};
 use crate::theme::Appearance;
@@ -1094,7 +1094,7 @@ impl SettingsDialog {
                                     .map(|l| if side == Side::Before { l.top(px(-2.)) } else { l.bottom(px(-2.)) }),
                             )
                         })
-                        .child(kit::icon_sized(Icon::Server, 14.))
+                        .child(connection_icon(&m.os, 14., &[ui::CARD, ui::MUTED]))
                         // 名字长了折行；地址短，整段一行写，不从中间断开
                         .child(div().min_w_0().child(name.clone()))
                         .child(div().flex_shrink_0().whitespace_nowrap().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(format!("{}@{}", m.username, m.host)))

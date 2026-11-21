@@ -60,6 +60,10 @@ pub struct StoredConnection {
     pub group: String,
     #[serde(default)]
     pub auth: AuthKind,
+    /// 上次连上时认出的系统（`linux/ubuntu`、`darwin`，见 [`crate::server_info::parse_os`]），侧栏画它的标志；
+    /// 空 = 还没认过。改了主机或端口就清掉，下次连上再认。
+    #[serde(default)]
+    pub os: String,
 }
 
 fn default_port() -> u16 {
@@ -68,29 +72,32 @@ fn default_port() -> u16 {
 
 /// 全部保存的连接，按用户排的顺序。
 pub fn connections() -> AppResult<Vec<StoredConnection>> {
-        db::with_db(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id,name,host,port,username,private_key,has_password,has_passphrase,group_name,auth
-                 FROM connections ORDER BY sort_order, rowid",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                let private_key: Option<String> = r.get(5)?;
-                let auth = AuthKind::from_db(&r.get::<_, String>(9)?, private_key.as_deref());
-                Ok(StoredConnection {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    host: r.get(2)?,
-                    port: r.get::<_, i64>(3)? as u16,
-                    username: r.get(4)?,
-                    private_key,
-                    has_password: r.get::<_, i64>(6)? != 0,
-                    has_passphrase: r.get::<_, i64>(7)? != 0,
-                    group: r.get(8)?,
-                    auth,
-                })
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
+    db::with_db(connections_in)
+}
+
+fn connections_in(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<StoredConnection>> {
+    let mut stmt = conn.prepare(
+        "SELECT id,name,host,port,username,private_key,has_password,has_passphrase,group_name,auth,os
+         FROM connections ORDER BY sort_order, rowid",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let private_key: Option<String> = r.get(5)?;
+        let auth = AuthKind::from_db(&r.get::<_, String>(9)?, private_key.as_deref());
+        Ok(StoredConnection {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            host: r.get(2)?,
+            port: r.get::<_, i64>(3)? as u16,
+            username: r.get(4)?,
+            private_key,
+            has_password: r.get::<_, i64>(6)? != 0,
+            has_passphrase: r.get::<_, i64>(7)? != 0,
+            group: r.get(8)?,
+            auth,
+            os: r.get(10)?,
         })
+    })?;
+    rows.collect()
 }
 
 /// 分组名称，按用户排的顺序（空分组也在这里）。
@@ -136,7 +143,7 @@ pub fn save_connection(events: &Events, connection: SaveConnectionInput) -> AppR
         crypto_store::set(&id, "passphrase", pp)?;
     }
 
-    let stored = StoredConnection {
+    let mut stored = StoredConnection {
         id: id.clone(),
         name: connection.name,
         host: connection.host,
@@ -147,58 +154,65 @@ pub fn save_connection(events: &Events, connection: SaveConnectionInput) -> AppR
         has_passphrase,
         group: connection.group.trim().to_string(),
         auth: connection.auth,
+        os: String::new(),
     };
-
-    // upsert：已存在则保留原排序，否则追加到末尾（sort_order = max+1）
-    db::with_db(|conn| {
-        let order: i64 = conn
-            .query_row(
-                "SELECT sort_order FROM connections WHERE id=?1",
-                rusqlite::params![stored.id],
-                |r| r.get(0),
-            )
-            .or_else(|_| {
-                conn.query_row(
-                    "SELECT COALESCE(MAX(sort_order)+1,0) FROM connections",
-                    [],
-                    |r| r.get(0),
-                )
-            })?;
-        conn.execute(
-            "INSERT INTO connections
-                (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order,group_name,auth)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-             ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name, host=excluded.host, port=excluded.port,
-                username=excluded.username, private_key=excluded.private_key,
-                has_password=excluded.has_password, has_passphrase=excluded.has_passphrase,
-                group_name=excluded.group_name, auth=excluded.auth",
-            rusqlite::params![
-                stored.id,
-                stored.name,
-                stored.host,
-                stored.port as i64,
-                stored.username,
-                stored.private_key,
-                stored.has_password as i64,
-                stored.has_passphrase as i64,
-                order,
-                stored.group,
-                stored.auth.as_str(),
-            ],
-        )?;
-        if !stored.group.is_empty() {
-            conn.execute(
-                "INSERT OR IGNORE INTO connection_groups(name, sort_order)
-                 SELECT ?1, COALESCE(MAX(sort_order) + 1, 0) FROM connection_groups",
-                rusqlite::params![stored.group],
-            )?;
-        }
-        Ok(())
-    })?;
+    stored.os = db::with_db(|conn| upsert_connection_in(conn, &stored))?;
 
     events.emit(CoreEvent::ConnectionsUpdated);
     Ok(stored)
+}
+
+/// 新建或改一个连接（`os` 不看）。已存在的保留原排序，否则追加到末尾（sort_order = max+1）；
+/// 认出的系统留着，除非主机或端口改了（可能是另一台机器了）。返回写完之后记的系统。
+fn upsert_connection_in(conn: &rusqlite::Connection, stored: &StoredConnection) -> rusqlite::Result<String> {
+    let order: i64 = conn
+        .query_row("SELECT sort_order FROM connections WHERE id=?1", rusqlite::params![stored.id], |r| r.get(0))
+        .or_else(|_| conn.query_row("SELECT COALESCE(MAX(sort_order)+1,0) FROM connections", [], |r| r.get(0)))?;
+    conn.execute(
+        "INSERT INTO connections
+            (id,name,host,port,username,private_key,has_password,has_passphrase,sort_order,group_name,auth)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, host=excluded.host, port=excluded.port,
+            username=excluded.username, private_key=excluded.private_key,
+            has_password=excluded.has_password, has_passphrase=excluded.has_passphrase,
+            group_name=excluded.group_name, auth=excluded.auth,
+            os=CASE WHEN connections.host=excluded.host AND connections.port=excluded.port THEN connections.os ELSE '' END",
+        rusqlite::params![
+            stored.id,
+            stored.name,
+            stored.host,
+            stored.port as i64,
+            stored.username,
+            stored.private_key,
+            stored.has_password as i64,
+            stored.has_passphrase as i64,
+            order,
+            stored.group,
+            stored.auth.as_str(),
+        ],
+    )?;
+    if !stored.group.is_empty() {
+        conn.execute(
+            "INSERT OR IGNORE INTO connection_groups(name, sort_order)
+             SELECT ?1, COALESCE(MAX(sort_order) + 1, 0) FROM connection_groups",
+            rusqlite::params![stored.group],
+        )?;
+    }
+    conn.query_row("SELECT os FROM connections WHERE id=?1", rusqlite::params![stored.id], |r| r.get(0))
+}
+
+/// 记下连上时认出的系统（[`crate::server_info::parse_os`]），侧栏画它的标志。和记着的一样就不写、不通知。
+pub fn set_connection_os(events: &Events, id: &str, os: &str) -> AppResult<()> {
+    if db::with_db(|conn| set_os_in(conn, id, os))? {
+        events.emit(CoreEvent::ConnectionsUpdated);
+    }
+    Ok(())
+}
+
+/// 返回改没改（连接已经删了、或者本来就是这个都算没改）。
+fn set_os_in(conn: &rusqlite::Connection, id: &str, os: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("UPDATE connections SET os=?2 WHERE id=?1 AND os<>?2", rusqlite::params![id, os])? > 0)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -442,8 +456,50 @@ mod tests {
 
     fn memory_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(db::SCHEMA).unwrap();
+        db::init(&conn).unwrap();
         conn
+    }
+
+    fn stored(id: &str, host: &str, port: u16) -> StoredConnection {
+        StoredConnection {
+            id: id.into(),
+            name: host.into(),
+            host: host.into(),
+            port,
+            username: "root".into(),
+            private_key: None,
+            has_password: false,
+            has_passphrase: false,
+            group: String::new(),
+            auth: AuthKind::Auto,
+            os: String::new(),
+        }
+    }
+
+    fn os_of(conn: &rusqlite::Connection, id: &str) -> String {
+        connections_in(conn).unwrap().into_iter().find(|c| c.id == id).unwrap().os
+    }
+
+    /// 连上时认出的系统一直记着：改名字、用户、分组都不动它；改了主机或端口（可能是另一台机器了）就清掉，等下次连上再认。
+    #[test]
+    fn the_detected_os_stays_until_the_host_or_port_changes() {
+        let conn = memory_db();
+        assert_eq!(upsert_connection_in(&conn, &stored("a", "web.example.com", 22)).unwrap(), "");
+        upsert_connection_in(&conn, &stored("b", "db.example.com", 22)).unwrap();
+        assert!(set_os_in(&conn, "a", "linux/ubuntu").unwrap());
+        assert!(!set_os_in(&conn, "a", "linux/ubuntu").unwrap(), "和记着的一样：不算改了（不发通知）");
+        assert!(!set_os_in(&conn, "gone", "linux/debian").unwrap(), "连接已经删了");
+        assert_eq!(os_of(&conn, "a"), "linux/ubuntu");
+        assert_eq!(os_of(&conn, "b"), "", "别的连接不动");
+
+        let renamed = StoredConnection { name: "网站".into(), username: "deploy".into(), group: "生产".into(), ..stored("a", "web.example.com", 22) };
+        assert_eq!(upsert_connection_in(&conn, &renamed).unwrap(), "linux/ubuntu");
+        assert_eq!(os_of(&conn, "a"), "linux/ubuntu");
+
+        assert_eq!(upsert_connection_in(&conn, &stored("a", "web.example.com", 2222)).unwrap(), "", "换了端口");
+        set_os_in(&conn, "a", "linux/debian").unwrap();
+        assert_eq!(upsert_connection_in(&conn, &stored("a", "other.example.com", 2222)).unwrap(), "", "换了主机");
+        assert_eq!(os_of(&conn, "a"), "");
     }
 
     fn bookmark_paths(conn: &rusqlite::Connection, connection_id: &str) -> Vec<String> {

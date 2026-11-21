@@ -13,7 +13,7 @@ use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, AuthKind, SaveConnectionInput, StoredConnection};
 use sshl_core::crypto_store;
 use sshl_core::events::CoreEvent;
-use sshl_core::server_info::Machine;
+use sshl_core::server_info::{self, Machine};
 use sshl_core::sftp;
 use sshl_core::ssh::{self, ConnectionDetails};
 
@@ -608,6 +608,7 @@ impl Workspace {
                     _subscription: subscription,
                 });
                 self.activate(&pending.connection_id, window, cx);
+                self.detect_os(&pending.connection_id, cx);
             }
             TerminalEvent::Failed(error) if is_pending => {
                 self.pending = None;
@@ -646,10 +647,11 @@ impl Workspace {
             }
             // 原地重连成功：当前标签的话，文件管理和延迟换到新会话
             TerminalEvent::Connected => {
-                if let Some(connection_id) = self.sessions.iter().find(|s| &s.view == view).map(|s| s.connection_id.clone())
-                    && self.active.as_deref() == Some(connection_id.as_str())
-                {
-                    self.activate(&connection_id, window, cx);
+                if let Some(connection_id) = self.sessions.iter().find(|s| &s.view == view).map(|s| s.connection_id.clone()) {
+                    if self.active.as_deref() == Some(connection_id.as_str()) {
+                        self.activate(&connection_id, window, cx);
+                    }
+                    self.detect_os(&connection_id, cx);
                 }
                 cx.notify();
             }
@@ -660,6 +662,35 @@ impl Workspace {
             }
             _ => {}
         }
+    }
+
+    /// 连上之后在后台认一下服务器是什么系统，侧栏的图标换成它的标志（Ubuntu、Debian…）。每次连上都认（重装过系统也跟得上），
+    /// 和记着的一样就不写库；认不出（命令没跑成）就留着原来的。
+    fn detect_os(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session(connection_id).and_then(|s| s.view.read(cx).session_id().map(str::to_string)) else { return };
+        if self.connection(connection_id).is_none() {
+            return;
+        }
+        let detected = backend::spawn(async move { server_info::os(&backend::get().state, &Machine::Remote(session_id)).await });
+        let connection_id = connection_id.to_string();
+        cx.spawn(async move |this, cx| {
+            let os = match detected.await {
+                Some(Ok(Some(os))) => os,
+                Some(Err(error)) => {
+                    tracing::debug!("detect os of {connection_id}: {error}");
+                    return;
+                }
+                _ => return,
+            };
+            let _ = this.update(cx, |this, _| {
+                if this.connection(&connection_id).is_some_and(|c| c.os != os)
+                    && let Err(error) = config_store::set_connection_os(&backend::get().events, &connection_id, &os)
+                {
+                    tracing::warn!("remember os of {connection_id}: {error}");
+                }
+            });
+        })
+        .detach();
     }
 
     /// 量一次当前会话的往返延迟（标签栏右侧显示）。

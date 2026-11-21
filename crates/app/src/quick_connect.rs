@@ -14,6 +14,7 @@ use sshl_core::config_store::StoredConnection;
 use crate::assets::Icon;
 use crate::groups;
 use crate::settings;
+use crate::sidebar::connection_icon;
 use crate::theme::{self, ui};
 use crate::ui as kit;
 
@@ -179,7 +180,7 @@ impl QuickConnect {
                     .relative()
                     .flex_shrink_0()
                     .text_color(theme::color(if connected { ui::FOREGROUND } else { ui::MUTED_FOREGROUND }))
-                    .child(kit::icon(Icon::Server))
+                    .child(connection_icon(&conn.os, 16., &[ui::CARD, ui::ACCENT]))
                     .when(connected, |d| {
                         d.child(
                             div()
@@ -280,6 +281,7 @@ mod tests {
             has_passphrase: false,
             group: group.into(),
             auth: Default::default(),
+            os: String::new(),
         }
     }
 

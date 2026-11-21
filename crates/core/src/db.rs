@@ -38,7 +38,7 @@ fn db_path() -> AppResult<PathBuf> {
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
-/// 建表（已有的表不动；后加的列见 open 里的迁移）。
+/// 建表（已有的表不动；后加的列见 [`init`]）。
 pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connections (
             id             TEXT PRIMARY KEY,
             name           TEXT NOT NULL,
@@ -74,46 +74,33 @@ pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS connections (
             sort_order    INTEGER NOT NULL DEFAULT 0
         );";
 
+/// 建表，再补上后来加的列（已有的表、列、数据不动）。
+pub(crate) fn init(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA)?;
+    add_column(conn, "connections", "group_name", "TEXT NOT NULL DEFAULT ''")?;
+    // 认证方式：空 = 加这一列之前存的，按有没有私钥推断（AuthKind::from_db）
+    add_column(conn, "connections", "auth", "TEXT NOT NULL DEFAULT ''")?;
+    // 连上时认出的系统（`server_info::parse_os`）：空 = 还没认过
+    add_column(conn, "connections", "os", "TEXT NOT NULL DEFAULT ''")?;
+    // 收藏的名字：空 = 没起名，显示目录名
+    add_column(conn, "bookmarks", "name", "TEXT NOT NULL DEFAULT ''")?;
+    Ok(())
+}
+
+fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) -> rusqlite::Result<()> {
+    let exists = conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name=?2")?.exists(rusqlite::params![table, column])?;
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    }
+    Ok(())
+}
+
 fn open() -> AppResult<Connection> {
     private_dir(&dir()?)?;
     let path = db_path()?;
     let conn =
         Connection::open(&path).map_err(|e| AppError::Config(format!("open sshl.db: {e}")))?;
-    conn.execute_batch(SCHEMA).map_err(|e| AppError::Config(format!("init schema: {e}")))?;
-
-    let mut columns = conn
-        .prepare("PRAGMA table_info(connections)")
-        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
-    let column_names = columns
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
-    let has_group_name = column_names.iter().any(|name| name == "group_name");
-    let has_auth = column_names.iter().any(|name| name == "auth");
-    drop(columns);
-    if !has_group_name {
-        conn.execute(
-            "ALTER TABLE connections ADD COLUMN group_name TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
-    }
-    // 认证方式：空 = 加这一列之前存的，按有没有私钥推断（AuthKind::from_db）
-    if !has_auth {
-        conn.execute("ALTER TABLE connections ADD COLUMN auth TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
-    }
-
-    // 收藏的名字：空 = 没起名，显示目录名
-    let bookmark_has_name = conn
-        .prepare("SELECT 1 FROM pragma_table_info('bookmarks') WHERE name='name'")
-        .and_then(|mut stmt| stmt.exists([]))
-        .map_err(|e| AppError::Config(format!("inspect schema: {e}")))?;
-    if !bookmark_has_name {
-        conn.execute("ALTER TABLE bookmarks ADD COLUMN name TEXT NOT NULL DEFAULT ''", [])
-            .map_err(|e| AppError::Config(format!("migrate schema: {e}")))?;
-    }
+    init(&conn).map_err(|e| AppError::Config(format!("init schema: {e}")))?;
 
     #[cfg(unix)]
     {
@@ -211,8 +198,41 @@ fn migrate_from_json(conn: &Connection) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::private_dir;
+    use super::{init, private_dir};
     use std::os::unix::fs::PermissionsExt;
+
+    fn columns(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1)").unwrap();
+        stmt.query_map([table], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    /// 早期版本建的库（连接表还没有分组、认证方式、系统，收藏还没有名字）：补上这些列，原来的数据不动；再开一次什么都不变。
+    #[test]
+    fn an_old_database_gains_the_columns_added_later() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL DEFAULT 22,
+                username TEXT NOT NULL, private_key TEXT, has_password INTEGER NOT NULL DEFAULT 0,
+                has_passphrase INTEGER NOT NULL DEFAULT 0, sort_order INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE bookmarks (connection_id TEXT NOT NULL, path TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (connection_id, path));
+             INSERT INTO connections(id, name, host, username) VALUES ('a', 'web', 'example.com', 'root');
+             INSERT INTO bookmarks(connection_id, path) VALUES ('a', '/var/log');",
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        init(&conn).unwrap();
+        for column in ["group_name", "auth", "os"] {
+            assert!(columns(&conn, "connections").iter().any(|c| c == column), "connections.{column}");
+        }
+        assert!(columns(&conn, "bookmarks").iter().any(|c| c == "name"));
+        let row: (String, String, String, String) = conn
+            .query_row("SELECT host, group_name, auth, os FROM connections WHERE id='a'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        assert_eq!(row, ("example.com".into(), String::new(), String::new(), String::new()));
+        let bookmark: String = conn.query_row("SELECT path FROM bookmarks WHERE connection_id='a'", [], |r| r.get(0)).unwrap();
+        assert_eq!(bookmark, "/var/log");
+    }
 
     #[test]
     fn the_data_directory_is_only_for_its_owner() {

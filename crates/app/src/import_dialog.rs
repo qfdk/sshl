@@ -222,6 +222,7 @@ mod tests {
             has_passphrase: false,
             group: String::new(),
             auth: AuthKind::Password,
+            os: String::new(),
         };
         assert!(already_saved(&candidate(None), std::slice::from_ref(&saved)));
         assert!(!already_saved(&candidate(None), &[StoredConnection { port: 22, ..saved.clone() }]));

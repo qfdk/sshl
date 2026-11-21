@@ -49,6 +49,7 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 - Password or private key authentication (including key passphrases). With the key set to "Auto", SSHL logs in through `~/.ssh/config` and the SSH agent without asking. Hosts can be imported from `~/.ssh/config`
 - Quick connect (⌘K): type a few letters and press Enter; a connection that is already open is switched to instead
 - Groups, with drag-and-drop to reorder and move between groups in the sidebar. The sidebar can be hidden entirely (⌘B) so the terminal takes the full width
+- Each connection shows its server's OS logo (Ubuntu, Debian, CentOS, Alpine, macOS…), detected automatically when you log in
 - A background pool of pre-warmed connections plus `TCP_NODELAY` make the first connection fast, and the first screen of output is never lost or reordered
 
 **File manager**

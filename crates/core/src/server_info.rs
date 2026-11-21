@@ -476,6 +476,56 @@ fn local_pid(pid: u32) -> Option<libc::pid_t> {
     libc::pid_t::try_from(pid).ok().filter(|pid| *pid > 0)
 }
 
+/// 是什么系统：内核名（`uname -s`）和 os-release 里的发行版。os-release 先看 /etc 的，没有再看 /usr/lib 的（同 os-release(5)）；
+/// macOS、OpenBSD 没有 os-release，只有内核名。
+pub const OS_COMMAND: &str =
+    "sh -c 'echo @@uname; uname -s; echo @@os-release; cat /etc/os-release 2>/dev/null || cat /usr/lib/os-release 2>/dev/null; true'";
+
+/// [`OS_COMMAND`] 的输出 → `内核` 或 `内核/发行版`，都是小写：`linux/ubuntu`、`linux`（没有 os-release）、`darwin`、`freebsd/freebsd`。
+/// 认不出（命令没跑起来、输出不是它的：Windows 的 cmd、只许跑固定命令的账号）是 None。
+/// 两段都是服务器给的：只收 os-release 规定 ID 能用的字符（a–z、0–9、`.` `_` `-`，大写的转小写：deepin 20 写的是 `ID=Deepin`），
+/// 不像的、太长的那段不要。
+pub fn parse_os(out: &str) -> Option<String> {
+    #[derive(PartialEq)]
+    enum Section {
+        Uname,
+        Release,
+    }
+    fn word(value: &str) -> Option<String> {
+        let value = value.trim().to_ascii_lowercase();
+        let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-');
+        (!value.is_empty() && value.len() <= 32 && value.chars().all(allowed)).then_some(value)
+    }
+    let (mut section, mut kernel, mut distro) = (None, None, None);
+    for line in out.lines() {
+        match line.trim() {
+            "@@uname" => section = Some(Section::Uname),
+            "@@os-release" => section = Some(Section::Release),
+            _ if section == Some(Section::Uname) && kernel.is_none() => kernel = word(line),
+            _ if section == Some(Section::Release) && distro.is_none() => {
+                // ID=ubuntu / ID="centos" / ID='opensuse-leap'；ID_LIKE=、VERSION_ID= 不是
+                if let Some(value) = line.strip_prefix("ID=") {
+                    let value = value.trim();
+                    let unquoted = ['"', '\''].iter().find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q)).unwrap_or(value);
+                    distro = word(unquoted);
+                }
+            }
+            _ => {}
+        }
+    }
+    let kernel = kernel?;
+    Some(match distro {
+        Some(distro) => format!("{kernel}/{distro}"),
+        None => kernel,
+    })
+}
+
+/// 认一下这台机器是什么系统（见 [`parse_os`]）。认不出是 Ok(None)。
+pub async fn os(state: &AppState, machine: &Machine) -> AppResult<Option<String>> {
+    let (_, out, _) = exec(state, machine, OS_COMMAND).await?;
+    Ok(parse_os(&out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,7 +751,7 @@ Pages stored in compressor:                   128894.\nPages occupied by compres
         assert_eq!(local_pid(i32::MAX as u32 + 1), None);
     }
 
-    /// 真实 sshd（本机 macOS 或 Linux 均可）：三条命令都跑得通、解析得出东西；结束进程真的结束。
+    /// 真实 sshd（本机 macOS 或 Linux 均可）：几条命令都跑得通、解析得出东西；结束进程真的结束；认出的系统和服务器自己说的一样。
     /// `SSHL_AUTO_AUTH_IT=127.0.0.1:2222 SSHL_AUTO_AUTH_IT_USER=me SSHL_AUTO_AUTH_IT_KEY=/path/key cargo test --lib server_info_against_real_sshd -- --ignored`
     #[tokio::test]
     #[ignore = "需要 SSHL_AUTO_AUTH_IT / _USER / _KEY 指向认可该私钥的 sshd"]
@@ -750,6 +800,14 @@ Pages stored in compressor:                   128894.\nPages occupied by compres
         assert!(!parse_processes(&exec(PROCESSES_COMMAND.into()).await.1).iter().any(|p| p.pid == pid), "结束了");
         let (status, _, err) = exec(kill_command(1, false)).await;
         assert_ne!(status, 0, "普通用户结束不了 1 号进程：{err}");
+
+        // 认系统走连上之后的那条路（会话上开 exec 通道）；对照是让服务器自己的 sh 读 os-release（macOS 没有这个文件，只有内核名）
+        let state = AppState::new();
+        state.insert("it".into(), std::sync::Arc::new(crate::ssh::SshSession::for_test(handle.clone(), &user))).await;
+        let detected = os(&state, &Machine::Remote("it".into())).await.unwrap().expect("认得出");
+        let (_, own, _) = exec("sh -c 'uname -s; . /etc/os-release 2>/dev/null && echo \"$ID\"'".into()).await;
+        let own: Vec<String> = own.lines().map(|line| line.trim().to_ascii_lowercase()).collect();
+        assert_eq!(detected, own.join("/"));
     }
 
     /// 本机（macOS 的 ps 不认 `user:64` 这种宽度写法，只警告一句、照样输出缺了用户列的行）：退回普通写法，用户照样读得出来。
@@ -767,5 +825,38 @@ Pages stored in compressor:                   128894.\nPages occupied by compres
     fn kill_is_term_unless_forced() {
         assert_eq!(kill_command(42, false), "kill -TERM 42");
         assert_eq!(kill_command(42, true), "kill -KILL 42");
+    }
+
+    /// 常见系统：内核名 + os-release 的 ID（引号去掉，大写转小写）；没有 os-release 的只有内核名。
+    #[test]
+    fn os_is_the_kernel_and_the_distribution() {
+        let ubuntu = "@@uname\nLinux\n@@os-release\nPRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nID=ubuntu\nID_LIKE=debian\n";
+        assert_eq!(parse_os(ubuntu).as_deref(), Some("linux/ubuntu"));
+        let centos = "@@uname\nLinux\n@@os-release\nNAME=\"CentOS Stream\"\nID_LIKE=\"rhel fedora\"\nVERSION_ID=\"9\"\nID=\"centos\"\n";
+        assert_eq!(parse_os(centos).as_deref(), Some("linux/centos"), "ID_LIKE、VERSION_ID 不是 ID");
+        assert_eq!(parse_os("@@uname\nLinux\n@@os-release\nID='opensuse-leap'\n").as_deref(), Some("linux/opensuse-leap"));
+        assert_eq!(parse_os("@@uname\nLinux\n@@os-release\nNAME=\"Deepin\"\nID=Deepin\n").as_deref(), Some("linux/deepin"));
+        assert_eq!(parse_os("@@uname\nDarwin\n@@os-release\n").as_deref(), Some("darwin"));
+        assert_eq!(parse_os("@@uname\nFreeBSD\n@@os-release\nNAME=FreeBSD\nID=freebsd\n").as_deref(), Some("freebsd/freebsd"));
+        assert_eq!(parse_os("@@uname\nLinux\n@@os-release\n").as_deref(), Some("linux"), "没有 os-release（Termux、很老的系统）");
+    }
+
+    /// 不是这条命令的输出（Windows 的 cmd 不认 sh、只许跑固定命令的账号）不算；服务器给的怪值不收。
+    #[test]
+    fn os_ignores_output_that_is_not_ours() {
+        assert_eq!(parse_os(""), None);
+        assert_eq!(parse_os("'sh' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n"), None);
+        assert_eq!(parse_os("This account is restricted to git.\nLinux\n"), None);
+        assert_eq!(parse_os("@@uname\n@@os-release\nID=ubuntu\n"), None, "uname 没跑成：说不清是什么系统");
+        assert_eq!(parse_os("@@uname\n<b>Linux</b>\n@@os-release\nID=ubuntu\n"), None);
+        assert_eq!(parse_os("@@uname\nLinux\n@@os-release\nID=\"ubuntu; rm -rf /\"\n").as_deref(), Some("linux"));
+        assert_eq!(parse_os(&format!("@@uname\nLinux\n@@os-release\nID={}\n", "x".repeat(33))).as_deref(), Some("linux"));
+    }
+
+    /// 本机真跑一遍：macOS 没有 os-release，只有内核名。
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn os_of_this_mac() {
+        assert_eq!(os(&AppState::new(), &Machine::Local).await.unwrap().as_deref(), Some("darwin"));
     }
 }

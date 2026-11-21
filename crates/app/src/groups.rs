@@ -274,6 +274,7 @@ mod tests {
             has_passphrase: false,
             group: group.into(),
             auth: Default::default(),
+            os: String::new(),
         }
     }
 

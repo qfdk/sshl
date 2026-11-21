@@ -3,11 +3,12 @@
 use gpui::{
     AccessibleAction, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, DragMoveEvent, Focusable, FontWeight, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
-    Styled, Window, anchored, deferred, div, img, prelude::FluentBuilder, px,
+    Styled, Window, anchored, deferred, div, img, prelude::FluentBuilder, px, svg,
 };
 use sshl_core::config_store::StoredConnection;
 
 use crate::assets::{APP_ICON, APP_ICON_SIZE, Icon};
+use crate::brands;
 use crate::groups::{self, Side};
 use crate::keymap;
 use crate::settings;
@@ -29,6 +30,20 @@ impl Render for DragPreview {
             .shadow_lg()
             .text_size(px(14.))
             .child(self.0.clone())
+    }
+}
+
+/// 连接的图标：连上过、认出了系统的画它的标志（Ubuntu、Debian…，品牌色；在 `surfaces` 这几种底色上看不清就用正文色），
+/// 否则画服务器图标（跟着所在位置的文字颜色）。侧栏、⌘K、设置里的分组树共用。
+pub(crate) fn connection_icon(os: &str, size: f32, surfaces: &[ui::Token]) -> AnyElement {
+    match brands::of_os(os) {
+        Some(brand) => svg()
+            .path(brand.path())
+            .size(px(size))
+            .flex_shrink_0()
+            .text_color(theme::color(brands::color_on(brand, surfaces, theme::is_dark())))
+            .into_any_element(),
+        None => kit::icon_sized(Icon::Server, size).into_any_element(),
     }
 }
 
@@ -267,7 +282,7 @@ impl Workspace {
                     .relative()
                     .flex_shrink_0()
                     .text_color(theme::color(if connected { ui::FOREGROUND } else { ui::MUTED_FOREGROUND }))
-                    .child(kit::icon(Icon::Server))
+                    .child(connection_icon(&conn.os, 16., &[ui::SHELL, ui::CARD]))
                     .when(connected, |d| {
                         d.child(
                             div()
