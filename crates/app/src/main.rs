@@ -33,7 +33,7 @@ use std::borrow::Cow;
 
 use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
-use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions, point, px};
+use gpui::{App, AppContext, Bounds, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions, px};
 
 use workspace::Workspace;
 
@@ -152,7 +152,7 @@ fn main() {
             titlebar: Some(TitlebarOptions {
                 title: Some("SSHL".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(16.), px(17.))),
+                traffic_light_position: Some(workspace::traffic_light_position(settings::get(cx).compact_bar())),
             }),
             window_min_size: Some(gpui::size(px(900.), px(600.))),
             // 标题栏是自己画的（标签、按钮都在红绿灯那一条里），拖窗口只走 workspace::drag_region。

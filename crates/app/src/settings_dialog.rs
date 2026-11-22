@@ -801,6 +801,7 @@ impl SettingsDialog {
         let current = settings::get(cx).appearance;
         let language = settings::get(cx).language;
         let connection_icons = settings::get(cx).connection_icons;
+        let compact_title_bar = settings::get(cx).compact_title_bar;
         let entity = cx.entity();
         let language_entity = entity.clone();
         let icons_entity = entity.clone();
@@ -854,6 +855,14 @@ impl SettingsDialog {
                     })))
                     .child(div().text_xs().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("连上时认出服务器的系统（Ubuntu、Debian…），画它的标志"))),
             )
+            .child(div().flex().flex_col().gap_2().child(kit::field_label(tr!("标题栏"))).child(self.toggle_row(
+                "compact-title-bar",
+                tr!("紧凑（同 Ghostty）"),
+                tr!("侧栏收起时，标签和按钮缩成和红绿灯同一行的细条，在终端上时用终端的底色"),
+                compact_title_bar,
+                |s| &mut s.compact_title_bar,
+                cx,
+            )))
             .child(
                 div()
                     .pt_3()
@@ -1516,6 +1525,7 @@ fn unsaved_reverted(snapshot: &Settings, current: &Settings) -> Settings {
         appearance: snapshot.appearance,
         language: snapshot.language,
         connection_icons: snapshot.connection_icons,
+        compact_title_bar: snapshot.compact_title_bar,
         auto_check_updates: snapshot.auto_check_updates,
         key_bindings: snapshot.key_bindings.clone(),
         ..current.clone()
@@ -1556,6 +1566,7 @@ mod tests {
             appearance: Appearance::Dark,
             language: Language::En,
             connection_icons: ConnectionIcons::Generic,
+            compact_title_bar: true,
             auto_check_updates: false,
             sidebar_collapsed: true,
             collapsed_groups: vec!["k3s".into()],

@@ -70,6 +70,8 @@ pub struct Settings {
     pub language: Language,
     /// 连接图标画服务器的系统还是通用的服务器图标。
     pub connection_icons: ConnectionIcons,
+    /// 紧凑标题栏（设置 →「外观」，仿 Ghostty）：侧栏收起时顶栏缩成和红绿灯同一行的细条（`Settings::compact_bar`）。
+    pub compact_title_bar: bool,
     /// 打开 SSHL 时检查更新（设置 →「关于」，`update.rs`）；关了手动检查照样能用。
     pub auto_check_updates: bool,
     /// 新版本提示框里点了「以后再说」的版本（tag，`v0.7.6`）：这个版本不再自动提醒（`update.rs`）。
@@ -93,6 +95,7 @@ impl Default for Settings {
             appearance: Appearance::System,
             language: Language::System,
             connection_icons: ConnectionIcons::System,
+            compact_title_bar: false,
             auto_check_updates: true,
             skipped_update: String::new(),
             key_bindings: Overrides::new(),
@@ -103,6 +106,11 @@ impl Default for Settings {
 impl Settings {
     pub fn terminal_theme(&self) -> &'static term::Theme {
         term::find(&self.terminal_theme)
+    }
+
+    /// 顶栏现在是不是紧凑标题栏：勾了这一项、而且侧栏收起（展开时红绿灯在侧栏那一行，顶栏照旧）。
+    pub fn compact_bar(&self) -> bool {
+        self.compact_title_bar && self.sidebar_collapsed
     }
 }
 
@@ -354,6 +362,20 @@ mod tests {
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().connection_icons, ConnectionIcons::Generic);
         let unknown: Settings = serde_json::from_str(r#"{"connectionIcons":"rainbow"}"#).unwrap();
         assert_eq!(unknown.connection_icons, ConnectionIcons::System, "不认识的值按默认");
+    }
+
+    #[test]
+    fn compact_title_bar_is_off_by_default_and_only_applies_with_the_sidebar_hidden() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert!(!old.compact_title_bar, "旧设置里没有这一项：照原来的顶栏");
+        let s = Settings { compact_title_bar: true, ..Settings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""compactTitleBar":true"#), "{json}");
+        assert!(serde_json::from_str::<Settings>(&json).unwrap().compact_title_bar);
+        // 侧栏展开时红绿灯在侧栏那一行，顶栏照旧
+        assert!(!s.compact_bar());
+        assert!(Settings { sidebar_collapsed: true, ..s }.compact_bar());
+        assert!(!Settings { sidebar_collapsed: true, ..Settings::default() }.compact_bar());
     }
 
     #[test]

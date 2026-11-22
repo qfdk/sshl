@@ -53,6 +53,12 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   侧栏收起（⌘B，`settings.sidebar_collapsed`）= 整个不画，不留图标栏：顶栏和红绿灯同一行，左边让出 `TRAFFIC_LIGHTS_WIDTH`、
   只放展开按钮（新建连接不重复放，标签栏末尾有 +）。收起时焦点在搜索框里就交回内容区——直接问焦点句柄，
   不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。
+  紧凑标题栏（设置 →「外观」→「标题栏」，`settings.compact_title_bar`，默认关；用户 2026-11-22：⌘B 时最上面那栏「跟 Ghostty 的效果一样」，原来的「感觉有些大」）：
+  只在侧栏收起时生效（`Settings::compact_bar`）。顶栏缩成 32pt 高的一行（`COMPACT_BAR_HEIGHT`，同 Ghostty 的标题栏），红绿灯挪到 (9, 9) 在这一行里竖直居中
+  （`workspace::traffic_light_position`：开窗时 `main.rs` 按它定，之后 `Workspace::render` 里变了才调 `set_traffic_light_position`），
+  标签、按钮、分段控件 24pt 高，顶栏和下面的页面之间不留缝（原来隔 10px）。配色是 `topbar::CompactBar`：底下是终端（或没会话的空页面）时底色取终端配色，
+  字和图标同 Ghostty 用中性的白 / 黑（试过终端前景色：Carbonfox 的前景是黄的，标签成了一排黄字），没选中的按每套配色算到对底色 ≥ 4.5:1（`muted_alpha`，有测试）；
+  在文件管理 / 系统页上用界面的颜色。按住 ⌘ 的角标在紧凑时小一号。
   关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock 走 `on_reopen` 显示；⌘Q 退出。
   ⌘Q 开着标签时先确认（`Workspace::request_quit`，用户手滑按到过，所有会话一起没了），没有标签直接退。按住 ⌘Q 会连发：确认框开着时后面几次不叠框、也不算确认。
   这个动作要由工作区的元素接（`.on_action`），不能在全局处理函数里直接 `window.update`：按键分发途中窗口正被占着，拿不到。
@@ -433,7 +439,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   点了过去、悬停的 × 直接删（不用先进那个目录）、↑↓ ↵ 可选，一敲字换成子目录补全。文件管理里不另放收藏按钮 / 菜单（顶栏那个星星是全局入口）。
   地址栏的两个下拉都包在 `deferred` 里画，否则会被后面的表头和文件行盖住。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
-- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观、语言、连接图标、自动检查更新、跳过的版本）。首次启动从旧版 WebView 的
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观、语言、连接图标、紧凑标题栏、自动检查更新、跳过的版本）。首次启动从旧版 WebView 的
   localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
 - **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
   （填充密码由后端解密直接写通道）。

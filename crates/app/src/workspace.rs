@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseMoveEvent, ParentElement, Pixels, PlatformInput, Point, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Window, actions, canvas, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Subscription, Task, Window, actions, canvas, div, point, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sshl_core::config_store::{self, AuthKind, SaveConnectionInput, StoredConnection};
@@ -187,6 +187,8 @@ pub struct Workspace {
     next_local: u64,
     /// 退出的确认框正开着：按住 ⌘Q 会连发，后面几次不能再叠一个框，更不能当成确认。
     quit_asking: bool,
+    /// 红绿灯现在的位置（`traffic_light_position`）：紧凑标题栏开关、侧栏收起展开时跟着挪，没变不重设。
+    traffic_lights: Point<Pixels>,
     _latency_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -299,6 +301,7 @@ impl Workspace {
             focus: cx.focus_handle(),
             latency: None,
             next_local: 1,
+            traffic_lights: traffic_light_position(settings::get(cx).compact_bar()),
             _latency_task: cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(LATENCY_INTERVAL).await;
@@ -1511,8 +1514,20 @@ fn transfer_toast(progress: u32, info: String, running: bool, cx: &mut Context<W
         )
 }
 
-/// 红绿灯（`main.rs` 的 `traffic_light_position`）连同右边留白占的宽度：侧栏收起时顶栏从这里往右排。
+/// 红绿灯（`traffic_light_position`）连同右边留白占的宽度：侧栏收起时顶栏从这里往右排。
 pub(crate) const TRAFFIC_LIGHTS_WIDTH: f32 = 84.;
+/// 紧凑标题栏（设置 →「外观」，仿 Ghostty）的高度：同 Ghostty 的标题栏，标签、按钮 24pt 高，上下各留 4pt。
+pub(crate) const COMPACT_BAR_HEIGHT: f32 = 32.;
+/// 紧凑标题栏时红绿灯（左移到 9pt）连同右边留白占的宽度。
+pub(crate) const COMPACT_TRAFFIC_LIGHTS_WIDTH: f32 = 76.;
+/// 红绿灯按钮的高度（AppKit 的标准按钮）：算它竖直居中用。
+const TRAFFIC_LIGHT_HEIGHT: f32 = 14.;
+
+/// 红绿灯左上角的位置。平常在侧栏顶上那一行（侧栏收起时和 34pt 高的顶栏竖直居中）；
+/// 紧凑标题栏时同 Ghostty：离左、离顶各 9pt，在 32pt 高的细条里竖直居中。开窗时（`main.rs`）和换顶栏时（`render`）用。
+pub(crate) fn traffic_light_position(compact: bool) -> Point<Pixels> {
+    if compact { point(px(9.), px((COMPACT_BAR_HEIGHT - TRAFFIC_LIGHT_HEIGHT) / 2.)) } else { point(px(16.), px(17.)) }
+}
 /// 侧栏收起时右栏的上边距：让 34px 高的顶栏和红绿灯竖直居中对齐。
 pub(crate) const TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS: f32 = 7.;
 /// 顶栏两边的留白；侧栏展开时文件管理 / 系统页到窗口右边、下边也留这么多（左边紧挨侧栏只留 4px）。
@@ -1544,6 +1559,12 @@ impl Render for Workspace {
         let overlay = self.pending.as_ref().filter(|p| p.show_overlay).map(|_| self.connecting_overlay(cx));
         let menu = self.connection_menu_overlay(window, cx);
         let sidebar_collapsed = settings::get(cx).sidebar_collapsed;
+        let compact = settings::get(cx).compact_bar();
+        let lights = traffic_light_position(compact);
+        if self.traffic_lights != lights {
+            self.traffic_lights = lights;
+            window.set_traffic_light_position(lights);
+        }
         // 没会话时的空页面看着像个空终端：底色跟着配色，提示字在浅底上换成深灰
         let palette = settings::get(cx).terminal_theme();
         let empty_hint: u32 = if palette.is_light() { 0x5b6270 } else { 0xcbd5e1 };
@@ -1611,7 +1632,8 @@ impl Render for Workspace {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap(px(10.))
+                            // 紧凑标题栏和下面的页面连成一片（在终端上时底色同终端），不隔开
+                            .when(!compact, |column| column.gap(px(10.)))
                             // 上边距算在顶栏里（顶栏是拖动区，窗口最上面那条也要能拖），见 `top_bar`
                             .child(self.top_bar(window, cx))
                             .child(
@@ -1766,6 +1788,20 @@ mod tests {
     use gpui::{Action, KeyContext, Keymap, Keystroke};
 
     use super::*;
+
+    /// 红绿灯和顶栏竖直居中对齐：平常对 7pt 上边距 + 34pt 高的顶栏，紧凑标题栏对 32pt 高的细条（同 Ghostty 离左、离顶 9pt）。
+    #[test]
+    fn traffic_lights_sit_in_the_middle_of_the_top_bar() {
+        let center = |compact| f32::from(traffic_light_position(compact).y) + TRAFFIC_LIGHT_HEIGHT / 2.;
+        assert_eq!(center(false), TOPBAR_TOP_BESIDE_TRAFFIC_LIGHTS + 34. / 2.);
+        assert_eq!(center(true), COMPACT_BAR_HEIGHT / 2.);
+        assert_eq!(traffic_light_position(true), point(px(9.), px(9.)));
+        assert_eq!(traffic_light_position(false), point(px(16.), px(17.)), "平常的位置不变（侧栏顶上那一行按它排）");
+        // 顶栏从红绿灯右边开始排：留出三个按钮（各 14pt，间隔 9pt）再加一点空
+        let lights_right = |compact| f32::from(traffic_light_position(compact).x) + 3. * TRAFFIC_LIGHT_HEIGHT + 2. * 9.;
+        assert!(COMPACT_TRAFFIC_LIGHTS_WIDTH > lights_right(true));
+        assert!(TRAFFIC_LIGHTS_WIDTH > lights_right(false));
+    }
 
     #[test]
     fn quitting_asks_only_when_tabs_are_open() {
