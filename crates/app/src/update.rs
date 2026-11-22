@@ -162,7 +162,7 @@ pub fn init(cx: &mut App) {
 /// 打开 SSHL 时（启动、从程序坞点开）自动检查一次。设置里关掉了、开发构建、开着测试口（自动化测试一遍遍起进程）时不查，
 /// 手动检查照样能用。查不到（没网、GitHub 限流）不出声，下次打开再查。
 pub fn check_on_open(cx: &mut App) {
-    if cfg!(debug_assertions) || std::env::var_os("SSHL_DEV_SOCKET").is_some() || !cx.has_global::<UpdateState>() {
+    if cfg!(debug_assertions) || crate::test_hook_on() || !cx.has_global::<UpdateState>() {
         return;
     }
     if !settings::get(cx).auto_check_updates {

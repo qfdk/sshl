@@ -82,9 +82,9 @@ macro_rules! command {
 
 /// 设置里能改的快捷键，按设置里列出来的顺序。
 pub static COMMANDS: &[Command] = &[
-    command!("new-connection", Tabs, || tr!("新建连接").into(), ["cmd-t"], [WORKSPACE], NewConnection),
-    // 本机终端是 ⌘N（用户开终端的第一反应是它），新建连接让到 ⌘T
-    command!("new-local-terminal", Tabs, || tr!("本机终端").into(), ["cmd-n"], [WORKSPACE], NewLocalTerminal),
+    command!("new-connection", Tabs, || tr!("新建连接").into(), ["cmd-n"], [WORKSPACE], NewConnection),
+    // ⌘T 新标签 = 本机终端：打开 SSHL 默认就是一个本机终端标签（用户 2026-11-22），同浏览器 / 终端的新标签；新建连接是 ⌘N
+    command!("new-local-terminal", Tabs, || tr!("本机终端").into(), ["cmd-t"], [WORKSPACE], NewLocalTerminal),
     command!("quick-connect", Tabs, || tr!("快速连接").into(), ["cmd-k"], [WORKSPACE], OpenQuickConnect),
     command!("close-tab", Tabs, || tr!("关闭标签").into(), ["cmd-w"], [None], CloseTab),
     // 标签切换同 Ghostty / Terminal / 浏览器
@@ -494,7 +494,7 @@ mod tests {
         let mut overrides = Overrides::new();
         assign(&mut overrides, "new-connection", vec!["cmd-shift-n".into()], &us);
         assert_eq!(overrides.get("new-connection"), Some(&vec!["cmd-shift-n".to_string()]));
-        assign(&mut overrides, "new-connection", vec!["cmd-t".into()], &us);
+        assign(&mut overrides, "new-connection", vec!["cmd-n".into()], &us);
         assert!(overrides.is_empty(), "改回默认：设置里不留这一条");
         assign(&mut overrides, "next-tab", vec!["cmd-}".into()], &us);
         assert_eq!(overrides.get("next-tab"), Some(&vec!["cmd-}".to_string()]), "默认有两个键，只剩一个也算改过");

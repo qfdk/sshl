@@ -35,7 +35,7 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 - Dark mode for the interface: follow the system, light, or dark (Settings › Appearance)
 - Interface in English and Simplified Chinese; follows the system language by default
 - When a sudo / su password prompt appears, fill in a saved password with one click. One host can store several accounts
-- Local terminal (⌘N): a login shell. A new tab starts in the current local tab's directory, files dragged in from Finder insert their path, and `exit` closes the tab
+- Local terminal (⌘T, a new tab): a login shell. SSHL opens with one (can be turned off in Settings › Terminal). A new tab starts in the current local tab's directory, files dragged in from Finder insert their path, and `exit` closes the tab
 - Find (⌘F): searches the screen and the whole scrollback, highlights matches, Enter jumps through them
 - GNU screen output goes into the normal scrollback, so the mouse wheel and ⌘F work inside `screen` without touching `~/.screenrc` on the server
 - ⌘-click a URL to open it in the browser (wrapped long links and program-declared hyperlinks both work); ⌘+ / ⌘- / ⌘0 change the font size

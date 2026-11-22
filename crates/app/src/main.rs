@@ -39,6 +39,16 @@ use workspace::Workspace;
 
 actions!(sshl, [Quit, Hide, HideOthers, ShowAll, CheckForUpdates, About]);
 
+/// 开着测试口（`SSHL_DEV_SOCKET`，见 `devhook.rs`）：自动化测试一遍遍起进程，打开时的自动动作（检查更新、开本机终端）都不做。
+pub fn test_hook_on() -> bool {
+    std::env::var_os("SSHL_DEV_SOCKET").is_some()
+}
+
+/// 主窗口里的工作区。
+fn workspace_of(root: &gpui_base::Root) -> Option<gpui::Entity<Workspace>> {
+    root.view().clone().downcast::<Workspace>().ok()
+}
+
 /// 无障碍树是懒建的：第一次有人来问才开始建，那一次答的是一棵空树（没有焦点元素），下一帧才有真的。
 /// 听写工具每次按住只问一次，不提前建的话每次启动后头几次按住都落空。这里自己先问一次，等于把它提前打开。
 fn warm_accessibility() {
@@ -70,14 +80,13 @@ fn main() {
     });
 
     let app = gpui_platform::application().with_assets(assets::Assets);
-    // 关窗只隐藏、进程常驻；点 Dock 图标直接显示，不再走一遍冷启动
+    // 关窗只隐藏、进程常驻；点 Dock 图标直接显示，不再走一遍冷启动。GPUI 只在没有可见窗口时调这里（窗口最小化了），
+    // 关窗口后藏起来的窗口系统照样算可见、不会调：那种回来当作重新打开，在工作区的窗口激活里处理（`Workspace::close_window`）
     app.on_reopen(|cx| {
         cx.activate(true);
         if let Some(window) = cx.windows().first() {
             let _ = window.update(cx, |_, window, _| window.activate_window());
         }
-        // 从程序坞点开也是打开：检查更新（离上次不满一小时不查）
-        update::check_on_open(cx);
     });
     app.run(move |cx: &mut App| {
         gpui_base::init(cx);
@@ -100,7 +109,7 @@ fn main() {
             let Some(window) = cx.windows().first().and_then(|w| w.downcast::<gpui_base::Root>()) else { return cx.quit() };
             cx.defer(move |cx| {
                 let asked = window.update(cx, |root, window, cx| {
-                    let workspace = root.view().clone().downcast::<Workspace>().ok()?;
+                    let workspace = workspace_of(root)?;
                     // 最小化的窗口拿出来，不然确认框在看不见的窗口里
                     window.activate_window();
                     workspace.update(cx, |workspace, cx| workspace.request_quit(window, cx));
@@ -124,7 +133,7 @@ fn main() {
             cx.defer(move |cx| {
                 let _ = window.update(cx, |root, window, cx| {
                     window.activate_window();
-                    if let Ok(workspace) = root.view().clone().downcast::<Workspace>() {
+                    if let Some(workspace) = workspace_of(root) {
                         workspace.update(cx, |workspace, cx| workspace.open_about(window, cx));
                     }
                 });
@@ -167,6 +176,8 @@ fn main() {
         let window = cx
             .open_window(options, |window, cx| {
                 let workspace = cx.new(|cx| Workspace::new(prompts.clone(), window, cx));
+                // 打开就是一个本机终端标签（设置里能关）：在第一帧之前开好，窗口出来时标签和终端已经在了
+                workspace.update(cx, |workspace, cx| workspace.open_terminal_on_launch(window, cx));
                 cx.new(|cx| gpui_base::Root::new(workspace, window, cx))
             })
             .expect("open main window");
@@ -176,8 +187,11 @@ fn main() {
 
         // 关窗口（红点 / ⌘W 没有标签时）只隐藏应用，会话、预热连接、界面都留着
         let _ = window.update(cx, |_, window, cx| {
-            window.on_window_should_close(cx, |_, cx| {
-                cx.hide();
+            window.on_window_should_close(cx, |window, cx| {
+                match window.root::<gpui_base::Root>().flatten().and_then(|root| workspace_of(root.read(cx))) {
+                    Some(workspace) => workspace.update(cx, |workspace, cx| workspace.close_window(cx)),
+                    None => cx.hide(),
+                }
                 false
             });
         });
@@ -188,7 +202,7 @@ fn main() {
         cx.spawn(async move |cx| {
             while let Some(event) = events_rx.next().await {
                 let _ = window.update(cx, |root, _, cx| {
-                    if let Ok(workspace) = root.view().clone().downcast::<Workspace>() {
+                    if let Some(workspace) = workspace_of(root) {
                         workspace.update(cx, |workspace, cx| workspace.core_event(event, cx));
                     }
                 });

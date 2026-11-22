@@ -288,6 +288,7 @@ impl SettingsDialog {
             s.font_family = DEFAULT_FONT_FAMILY.into();
             s.copy_on_select = defaults.copy_on_select;
             s.right_click_paste = defaults.right_click_paste;
+            s.open_terminal_on_launch = defaults.open_terminal_on_launch;
             s.terminal_theme = defaults.terminal_theme;
         });
         cx.notify();
@@ -717,7 +718,15 @@ impl SettingsDialog {
                     .flex_col()
                     .gap_2()
                     .child(self.toggle_row("copy-on-select", tr!("选中即复制"), tr!("拖选文字后自动复制到剪贴板"), current.copy_on_select, |s| &mut s.copy_on_select, cx))
-                    .child(self.toggle_row("right-click-paste", tr!("右键粘贴"), tr!("在终端里点右键直接粘贴（程序接收鼠标时除外）"), current.right_click_paste, |s| &mut s.right_click_paste, cx)),
+                    .child(self.toggle_row("right-click-paste", tr!("右键粘贴"), tr!("在终端里点右键直接粘贴（程序接收鼠标时除外）"), current.right_click_paste, |s| &mut s.right_click_paste, cx))
+                    .child(self.toggle_row(
+                        "open-terminal-on-launch",
+                        tr!("打开时新建本机终端"),
+                        tr!("打开 SSHL 时没有标签就先开一个本机终端"),
+                        current.open_terminal_on_launch,
+                        |s| &mut s.open_terminal_on_launch,
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -1521,6 +1530,7 @@ fn unsaved_reverted(snapshot: &Settings, current: &Settings) -> Settings {
         font_family: snapshot.font_family.clone(),
         copy_on_select: snapshot.copy_on_select,
         right_click_paste: snapshot.right_click_paste,
+        open_terminal_on_launch: snapshot.open_terminal_on_launch,
         terminal_theme: snapshot.terminal_theme.clone(),
         appearance: snapshot.appearance,
         language: snapshot.language,
@@ -1562,6 +1572,7 @@ mod tests {
             font_family: "Menlo".into(),
             copy_on_select: true,
             right_click_paste: true,
+            open_terminal_on_launch: false,
             terminal_theme: "nord".into(),
             appearance: Appearance::Dark,
             language: Language::En,

@@ -62,7 +62,7 @@ def start():
     subprocess.run(["osascript", "-e", f'tell application "System Events" to set position of window 1 of (first process whose unix id is {pid}) to {{360, 600}}'],
                    capture_output=True)
     time.sleep(0.4)
-    sidebar = set(raw_state()["buttons"]) - {"", "新建连接", "设置", "收起侧边栏", "本机终端  ⌘N"}
+    sidebar = set(raw_state()["buttons"]) - {"", "新建连接", "设置", "收起侧边栏", "本机终端  ⌘T"}
 
 
 def stop():
@@ -125,7 +125,7 @@ def running(tag):
 
 
 def local_tab(busy_tag=None):
-    dh("keys cmd-n")
+    dh("keys cmd-t")
     time.sleep(1.4)
     if busy_tag:
         dh(f"type sleep {busy_tag}", "keys enter")
@@ -311,7 +311,7 @@ def m_prompt_blocks(shortcut, mods, check):
 
 def d_conn_dialog_blocks_cmd_w():
     local_tab(7030)
-    key("t", "cmd", wait=0.8)
+    key("n", "cmd", wait=0.8)
     key("w", "cmd", wait=0.6)
     s = state()
     key("esc")
@@ -321,7 +321,7 @@ def d_conn_dialog_blocks_cmd_w():
 
 def d_conn_dialog_tab_no_leak():
     local_tab(7031)
-    key("t", "cmd", wait=0.8)
+    key("n", "cmd", wait=0.8)
     for _ in range(12):
         key("tab", wait=0.1)
     key("z", wait=0.4)
@@ -419,10 +419,10 @@ CASES = [
     ("⌘M 最小化后 ⌘Q → 窗口拿出来并弹框", q_minimized),
     ("没有标签 ⌘Q → 直接退", q_no_tabs),
     ("关标签确认框开着时 ⌘Q → 不叠退出框", q_while_close_prompt),
-    ("确认框开着 ⌘T → 不开新建连接",
-     m_prompt_blocks("t", "cmd", lambda b, s: s["conn_dialog"])),
-    ("确认框开着 ⌘N → 不开新标签",
-     m_prompt_blocks("n", "cmd", lambda b, s: len(s["tabs"]) != len(b["tabs"]))),
+    ("确认框开着 ⌘N → 不开新建连接",
+     m_prompt_blocks("n", "cmd", lambda b, s: s["conn_dialog"])),
+    ("确认框开着 ⌘T → 不开新标签",
+     m_prompt_blocks("t", "cmd", lambda b, s: len(s["tabs"]) != len(b["tabs"]))),
     ("确认框开着 ⌘K → 不开快速连接",
      m_prompt_blocks("k", "cmd", lambda b, s: s["quick"])),
     ("确认框开着 ⌘, → 不开设置",

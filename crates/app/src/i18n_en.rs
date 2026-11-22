@@ -309,6 +309,8 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("通用图标", "Generic"),
     ("连上时认出服务器的系统（Ubuntu、Debian…），画它的标志", "Shows the logo of the system a server runs (Ubuntu, Debian…), detected when you connect"),
     ("标题栏", "Title bar"),
+    ("打开时新建本机终端", "Open a local terminal on launch"),
+    ("打开 SSHL 时没有标签就先开一个本机终端", "When SSHL opens with no tabs, start with a local terminal"),
     ("紧凑（同 Ghostty）", "Compact, like Ghostty"),
     ("侧栏收起时，标签和按钮缩成和红绿灯同一行的细条，在终端上时用终端的底色", "With the sidebar hidden, tabs and buttons shrink into one thin row beside the window buttons, in the terminal's colours over a terminal"),
     ("未分组", "Ungrouped"),

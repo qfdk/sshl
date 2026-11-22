@@ -189,6 +189,8 @@ pub struct Workspace {
     quit_asking: bool,
     /// 红绿灯现在的位置（`traffic_light_position`）：紧凑标题栏开关、侧栏收起展开时跟着挪，没变不重设。
     traffic_lights: Point<Pixels>,
+    /// 关过窗口（`close_window`）、还没回来：下次窗口被激活就算重新打开 SSHL（`reopened`）。
+    closed: bool,
     _latency_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -208,6 +210,9 @@ impl Workspace {
             cx.observe_window_appearance(window, |_, window, cx| sync_appearance(window, cx)),
             // 窗口退到后台（⌘ 点链接后浏览器抢了前台）：之后松开 ⌘ 我们收不到，角标不能一直挂着
             cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() && std::mem::take(&mut this.closed) {
+                    this.reopened(window, cx);
+                }
                 // 切回 SSHL 的这一刻：自动检查查到的新版本这时候弹（正敲着字时弹框会抢走回车，见 update.rs）
                 if window.is_window_active() {
                     crate::update::show_pending(window, cx);
@@ -302,6 +307,7 @@ impl Workspace {
             latency: None,
             next_local: 1,
             traffic_lights: traffic_light_position(settings::get(cx).compact_bar()),
+            closed: false,
             _latency_task: cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(LATENCY_INTERVAL).await;
@@ -313,7 +319,7 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
         this.reload_connections();
-        // 启动时就有焦点：否则 ⌘T、⌘, 等工作区快捷键要先随便点一下才生效
+        // 启动时就有焦点：否则 ⌘N、⌘, 等工作区快捷键要先随便点一下才生效
         window.focus(&this.focus, cx);
         this
     }
@@ -414,9 +420,30 @@ impl Workspace {
         self.reconnect_in_place(id, window, cx);
     }
 
-    /// ⌘N：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
+    /// 关窗口（红点、没有标签时 ⌘W）：只把应用藏起来，会话、预热连接、界面都留着；记下来，回来时当作重新打开（`reopened`）。
+    pub(crate) fn close_window(&mut self, cx: &mut Context<Self>) {
+        self.closed = true;
+        cx.hide();
+    }
+
+    /// 关过窗口之后又回来了（点程序坞、⌘Tab、再 open 一次）：同打开 SSHL——没有标签就开本机终端，检查更新。
+    /// 不靠 GPUI 的 `on_reopen`：它只在没有可见窗口时才调，藏起来的窗口系统照样算可见，从程序坞点回来时并不会调。
+    fn reopened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_terminal_on_launch(window, cx);
+        crate::update::check_on_open(cx);
+    }
+
+    /// 打开 SSHL 时（启动、关窗口后回来）没有标签就先开一个本机终端（用户 2026-11-22：「每次也会先打开一个本地终端」），
+    /// 设置 →「终端」里能关。开着测试口时不开：自动化测试一遍遍起进程，都从没有标签开始。
+    pub(crate) fn open_terminal_on_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if settings::get(cx).open_terminal_on_launch && self.sessions.is_empty() && self.pending.is_none() && !crate::test_hook_on() {
+            self.new_local_terminal(window, cx);
+        }
+    }
+
+    /// ⌘T：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
     pub(crate) fn new_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 对话框 / 提示框开着时 ⌘N 不在背后开标签
+        // 对话框 / 提示框开着时 ⌘T 不在背后开标签
         if self.modal_open(cx) {
             return;
         }
@@ -1345,7 +1372,7 @@ impl Workspace {
         self.finish_rename(true, window, cx);
         match self.active.clone() {
             Some(id) => self.disconnect(&id, window, cx),
-            None => cx.hide(),
+            None => self.close_window(cx),
         }
     }
 
@@ -1600,7 +1627,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.show_main_tab(MainTab::System, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSnippets, window, cx| this.toggle_top_panel(TopPanel::Snippets, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFavorites, window, cx| this.toggle_top_panel(TopPanel::Favorites, window, cx)))
-            // 框开着时 ⌘T / ⌘, 不再叠一个框上去（⌘T 还会把正在填的新建连接整个换掉）
+            // 框开着时 ⌘N / ⌘, 不再叠一个框上去（⌘N 还会把正在填的新建连接整个换掉）
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
                 if !this.modal_open(cx) {
                     this.open_connection_dialog(None, window, cx);
@@ -1842,8 +1869,8 @@ mod tests {
         assert_eq!(name("cmd-p"), Some("workspace::ShowSystem"));
         assert_eq!(name("cmd-shift-p"), Some("workspace::ShowSnippets"));
         assert_eq!(name("cmd-shift-d"), Some("workspace::ShowFavorites"));
-        assert_eq!(name("cmd-n"), Some("workspace::NewLocalTerminal"), "⌘N 开本机终端（用户开终端的第一反应）");
-        assert_eq!(name("cmd-t"), Some("workspace::NewConnection"), "⌘T 是新建连接");
+        assert_eq!(name("cmd-t"), Some("workspace::NewLocalTerminal"), "⌘T 新标签 = 本机终端（打开 SSHL 默认就是一个本机终端标签）");
+        assert_eq!(name("cmd-n"), Some("workspace::NewConnection"), "⌘N 是新建连接");
         assert_eq!(name("cmd-0"), Some("terminal::ZoomReset"), "⌘0 还是终端的字号复原，不是标签");
     }
 

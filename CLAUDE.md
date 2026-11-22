@@ -59,7 +59,9 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   标签、按钮、分段控件 24pt 高，顶栏和下面的页面之间不留缝（原来隔 10px）。配色是 `topbar::CompactBar`：底下是终端（或没会话的空页面）时底色取终端配色，
   字和图标同 Ghostty 用中性的白 / 黑（试过终端前景色：Carbonfox 的前景是黄的，标签成了一排黄字），没选中的按每套配色算到对底色 ≥ 4.5:1（`muted_alpha`，有测试）；
   在文件管理 / 系统页上用界面的颜色。按住 ⌘ 的角标在紧凑时小一号。
-  关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock 走 `on_reopen` 显示；⌘Q 退出。
+  关窗口（红点 / 没有标签时 ⌘W）只隐藏应用、进程常驻（会话、预热连接都留着），点 Dock / ⌘Tab 回来就显示；⌘Q 退出。
+  关窗口一律走 `Workspace::close_window`（记下 `closed` 再藏起来），之后窗口再被激活就算重新打开 SSHL（`reopened`：没标签就开本机终端、检查更新）。
+  不靠 GPUI 的 `on_reopen`：它只在没有可见窗口时才调，藏起来的窗口系统照样算可见，从程序坞点回来时根本不调（实测：给藏起来的进程发 reopen 事件，回调不跑）。
   ⌘Q 开着标签时先确认（`Workspace::request_quit`，用户手滑按到过，所有会话一起没了），没有标签直接退。按住 ⌘Q 会连发：确认框开着时后面几次不叠框、也不算确认。
   这个动作要由工作区的元素接（`.on_action`），不能在全局处理函数里直接 `window.update`：按键分发途中窗口正被占着，拿不到。
   没有主窗口时（⌘M 最小化了）菜单的 ⌘Q 没人接、落到 `main.rs` 的全局处理：它 `cx.defer` 等这一轮完了再进窗口，把窗口拿出来交给 `request_quit` 问，
@@ -182,7 +184,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   - 浮层面板（⌘K、命令片段、目录收藏）和 ⌘F 搜索条不能套陷阱：鼠标按下带焦点句柄的元素时 GPUI 会把焦点给它，
     点一下面板空白处搜索框就失焦、上下键失灵。它们在自己的 `… > Input` 上下文里把 Tab / ⇧Tab 绑成上下选（搜索条是下一个 / 上一个），
     别绑 `NoAction`：那样 Tab 落进输入框，成了搜索词里的一个制表符（终端里绑 NoAction 是对的，Tab 要发给 shell）。
-  - 对话框 / 提示框开着时（`Workspace::dialog_holds_focus`），工作区快捷键不动（`modal_open`：⌘W、⌘T、⌘,、切标签、切视图、开面板），
+  - 对话框 / 提示框开着时（`Workspace::dialog_holds_focus`），工作区快捷键不动（`modal_open`：⌘W、⌘T、⌘N、⌘,、切标签、切视图、开面板），
     后台挪焦点的地方（`refocus`、`activate`、`session_gone`）也不动——要挪焦点一律走 `refocus`，别直接 `window.focus` 到终端。
     以前按两下 ⌘W（或按住连发）会排几个一样的确认框，回车关掉第一个、关标签时 `session_gone` 又把焦点从第二个框上抢走，之后键盘全落空。
   - 焦点所在的东西没了（关掉的标签的终端）：`on_focus_lost` 交给 `refocus`，焦点回当前内容区。
@@ -197,7 +199,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
 - **检查更新**（`update.rs`，用户 2026-11-21：「直接弹一框让他们去 GitHub 去下载」）：不自动下载、不自动装，只弹框给发布页。
   查 GitHub Releases 的 latest（只有正式版），用系统的 `/usr/bin/curl` 在单独的线程上请求（15 秒超时，照用户的代理环境变量走；
   不为一次请求引入 HTTP / TLS 依赖）。自动：打开 SSHL 时查一次（用户：「不是每天检查一次，打开的时候检查不就好了」）——启动，
-  和关窗口后从程序坞点开（`on_reopen`，进程常驻，这也是打开）；窗口出来两秒后在后台查，不在启动路径上；离上次自动检查不满一小时不再查（`due`）。
+  和关窗口后再回来（点程序坞、⌘Tab，`Workspace::reopened`，进程常驻，这也是打开）；窗口出来两秒后在后台查，不在启动路径上；离上次自动检查不满一小时不再查（`due`）。
   开发构建和开着测试口时不自动查（自动化测试一遍遍起进程）。查到新版时窗口在前台就直接弹；打开后马上切走了就先记着，
   等窗口下次激活再弹（工作区的 `observe_window_activation` 里调 `update::show_pending`）：不在打开那一刻之外抢焦点——
   终端里正敲命令、输 sudo 密码时弹框会抢走焦点，回车按到「前往下载」上。
@@ -393,7 +395,10 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   记下读不了几个，提示 sudo -i 后重扫）。扫描结果按（机器, 分区）留着，切走再回来不重扫；重新扫描时停在深处的话退到新树上最深的祖先再补扫。
   右键目录或文件：远程「在文件管理中打开」（文件打开它所在的目录，`SystemPanelEvent::OpenInFiles`），本机「在访达中显示」。本机也有这页（用户要的）：
   第一次扫描时 macOS 可能问「文稿」「桌面」等文件夹的访问权限，界面上提示了；不允许的算进「读不了」。
-- **本机终端**（⌘N——用户开终端的第一反应是它；新建连接是 ⌘T，`crates/core/src/local_shell.rs` + `TerminalView::local`）：openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
+- **本机终端**（⌘T 新标签，新建连接是 ⌘N——用户 2026-11-22 对调的：打开 SSHL 默认就是一个本机终端标签，新标签自然也是本机的；`crates/core/src/local_shell.rs` + `TerminalView::local`）：
+  打开 SSHL 时（启动、关窗口后回来）没有标签就先开一个（`Workspace::open_terminal_on_launch`，设置 →「终端」的「打开时新建本机终端」，`settings.open_terminal_on_launch`，默认开）：
+  启动时在 `main.rs` 建窗口的闭包里、第一帧之前开好，窗口出来时标签已经在、焦点在终端里。开着测试口时不开（`test_hook_on`，自动化测试都从没有标签开始，同自动检查更新）。
+  openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
   接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
   TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上
@@ -439,7 +444,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   点了过去、悬停的 × 直接删（不用先进那个目录）、↑↓ ↵ 可选，一敲字换成子目录补全。文件管理里不另放收藏按钮 / 菜单（顶栏那个星星是全局入口）。
   地址栏的两个下拉都包在 `deferred` 里画，否则会被后面的表头和文件行盖住。
 - **拖放**：应用内拖动用 GPUI 的 `on_drag` / `on_drop`（连接换组排序、标签排序、文件互拖）；Finder 拖入用 `ExternalPaths`。
-- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、终端配色、界面外观、语言、连接图标、紧凑标题栏、自动检查更新、跳过的版本）。首次启动从旧版 WebView 的
+- **设置**：`~/.sshl/settings.json`（字号、字体、收起的分组、侧栏收起、本地栏宽度、是否显示隐藏文件、选中即复制、右键粘贴、打开时新建本机终端、终端配色、界面外观、语言、连接图标、紧凑标题栏、自动检查更新、跳过的版本）。首次启动从旧版 WebView 的
   localStorage 迁移。设置对话框里的改动先预览（`settings::preview`），点保存才写盘，关掉不保存会还原。
 - **存储**：连接与加密凭据在 `~/.sshl/sshl.db`，密钥在 `~/.sshl/master.key`（0600）；密码明文不经过界面
   （填充密码由后端解密直接写通道）。

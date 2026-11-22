@@ -62,6 +62,8 @@ pub struct Settings {
     pub copy_on_select: bool,
     /// 终端里右键直接粘贴（程序在接收鼠标时除外）。
     pub right_click_paste: bool,
+    /// 打开 SSHL 时（启动、关窗口后从程序坞点开）没有标签就先开一个本机终端（`Workspace::open_terminal_on_launch`）。
+    pub open_terminal_on_launch: bool,
     /// 终端配色的 id（`theme::term::THEMES`）。不认识的按默认显示，存的值不动。
     pub terminal_theme: String,
     /// 界面外观：跟随系统 / 浅色 / 深色（终端里的颜色归 `terminal_theme` 管）。
@@ -91,6 +93,7 @@ impl Default for Settings {
             show_hidden_files: false,
             copy_on_select: false,
             right_click_paste: false,
+            open_terminal_on_launch: true,
             terminal_theme: term::DEFAULT_ID.into(),
             appearance: Appearance::System,
             language: Language::System,
@@ -376,6 +379,16 @@ mod tests {
         assert!(!s.compact_bar());
         assert!(Settings { sidebar_collapsed: true, ..s }.compact_bar());
         assert!(!Settings { sidebar_collapsed: true, ..Settings::default() }.compact_bar());
+    }
+
+    #[test]
+    fn a_local_terminal_opens_on_launch_unless_turned_off() {
+        let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
+        assert!(old.open_terminal_on_launch, "旧设置里没有这一项：打开时开本机终端");
+        let s = Settings { open_terminal_on_launch: false, ..Settings::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""openTerminalOnLaunch":false"#), "{json}");
+        assert!(!serde_json::from_str::<Settings>(&json).unwrap().open_terminal_on_launch);
     }
 
     #[test]
