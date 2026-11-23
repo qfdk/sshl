@@ -53,7 +53,7 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   侧栏收起（⌘B，`settings.sidebar_collapsed`）= 整个不画，不留图标栏：顶栏和红绿灯同一行，左边让出 `TRAFFIC_LIGHTS_WIDTH`、
   只放展开按钮（新建连接不重复放，标签栏末尾有 +）。收起时焦点在搜索框里就交回内容区——直接问焦点句柄，
   不看 `search_focused`：窗口不在前台时 GPUI 不发 Focus / Blur 事件。
-  紧凑标题栏（设置 →「外观」→「标题栏」，`settings.compact_title_bar`，默认关；用户 2026-11-22：⌘B 时最上面那栏「跟 Ghostty 的效果一样」，原来的「感觉有些大」）：
+  紧凑标题栏（设置 →「外观」→「标题栏」，`settings.compact_title_bar`，默认开——2026-11-23 用户「紧凑作为默认吧」，原先默认关；用户 2026-11-22：⌘B 时最上面那栏「跟 Ghostty 的效果一样」，原来的「感觉有些大」）：
   只在侧栏收起时生效（`Settings::compact_bar`）。顶栏缩成 32pt 高的一行（`COMPACT_BAR_HEIGHT`，同 Ghostty 的标题栏），红绿灯挪到 (9, 9) 在这一行里竖直居中
   （`workspace::traffic_light_position`：开窗时 `main.rs` 按它定，之后 `Workspace::render` 里变了才调 `set_traffic_light_position`），
   标签、按钮、分段控件 24pt 高，顶栏和下面的页面之间不留缝（原来隔 10px）。配色是 `topbar::CompactBar`：底下是终端（或没会话的空页面）时底色取终端配色，

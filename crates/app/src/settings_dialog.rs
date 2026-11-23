@@ -635,8 +635,6 @@ impl SettingsDialog {
                 .children(rows)
         });
         let palette = current.terminal_theme();
-        // 第二行是浅灰的 ls 输出，用 7 号白；浅色主题的白在浅底上看不清，改用前景色
-        let dim = if palette.is_light() { palette.foreground } else { palette.ansi[7] };
         let preview_line = |text: SharedString, color: Rgb| div().text_color(term::hsla(color)).child(text);
         div()
             .flex()
@@ -697,16 +695,16 @@ impl SettingsDialog {
             })
             .child(
                 div()
+                    // 预览只留四行、行距收紧：这一页按固定高度排，预览随字号长高，大字号时会把底下的开关挤出去、整页出滚动条
                     .px_4()
-                    .py_3()
+                    .py(px(10.))
                     .rounded(px(12.))
                     .bg(term::hsla(palette.background))
                     .shadow_md()
                     .font_family(current.font_family.clone())
                     .text_size(px(current.font_size))
-                    .line_height(px(current.font_size * 1.5))
+                    .line_height(px(current.font_size * 1.4))
                     .child(preview_line("user@host:~$ ls -la /etc".into(), palette.foreground))
-                    .child(preview_line("drwxr-xr-x  123 root  4096 May 24 10:42 .".into(), dim))
                     .child(preview_line("The quick brown fox 0123456789 → ✓".into(), palette.foreground))
                     .child(preview_line("Emoji: 😀 😃 🚀 🐱 ❤️ 🌈 🍎 ✅ ⚡ 中文".into(), palette.foreground))
                     .child(preview_line(format!("{} \u{e0b0} \u{f07b} \u{f015} \u{f120} \u{e0a0} \u{f09b} \u{f135}", tr!("Nerd Font 图标:")).into(), palette.foreground)),
@@ -1577,7 +1575,7 @@ mod tests {
             appearance: Appearance::Dark,
             language: Language::En,
             connection_icons: ConnectionIcons::Generic,
-            compact_title_bar: true,
+            compact_title_bar: false,
             auto_check_updates: false,
             sidebar_collapsed: true,
             collapsed_groups: vec!["k3s".into()],

@@ -33,6 +33,7 @@ SSHL itself was built entirely by voice: every prompt to the AI coding tool was 
 - Adjustable font and font size; pick a system font or set a custom `fontFamily`
 - Color schemes: Carbonfox by default, plus Tokyo Night, Dracula, Catppuccin, Gruvbox, Nord, One Dark, Solarized, GitHub Light and more. A new scheme applies immediately, including to text already on screen
 - Dark mode for the interface: follow the system, light, or dark (Settings › Appearance)
+- With the sidebar hidden (⌘B), the title bar is one thin row beside the window buttons, in the terminal's colours, like Ghostty (Settings › Appearance › Title bar)
 - Interface in English and Simplified Chinese; follows the system language by default
 - When a sudo / su password prompt appears, fill in a saved password with one click. One host can store several accounts
 - Local terminal (⌘T, a new tab): a login shell. SSHL opens with one (can be turned off in Settings › Terminal). A new tab starts in the current local tab's directory, files dragged in from Finder insert their path, and `exit` closes the tab

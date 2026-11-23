@@ -33,6 +33,7 @@ SSHL 本身全程靠语音完成：发给 AI 编程工具的每一条提示词�
 - 字体、字号可调，可选系统字体或自定义 `fontFamily`
 - 配色可选：默认 Carbonfox，另有 Tokyo Night、Dracula、Catppuccin、Gruvbox、Nord、One Dark、Solarized、GitHub Light 等深浅主题，选了立即生效，屏幕上已有的内容也跟着换色
 - 界面深色模式：设置 › 外观里选跟随系统 / 浅色 / 深色
+- 侧栏收起（⌘B）时标题栏缩成和红绿灯同一行的细条，底色同终端，像 Ghostty（设置 › 外观 › 标题栏）
 - 界面语言：简体中文 / English，默认跟随系统
 - 终端出现 sudo / su 密码提示时一键填入已保存的密码，同一台机器可存多个账号
 - 本机终端（⌘T 新标签）：登录 shell，打开 SSHL 就有一个（设置 › 终端里可关）；新标签沿用当前本机标签的目录；从 Finder 拖文件进来填入路径；`exit` 即关标签

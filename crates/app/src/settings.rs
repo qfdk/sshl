@@ -98,7 +98,7 @@ impl Default for Settings {
             appearance: Appearance::System,
             language: Language::System,
             connection_icons: ConnectionIcons::System,
-            compact_title_bar: false,
+            compact_title_bar: true,
             auto_check_updates: true,
             skipped_update: String::new(),
             key_bindings: Overrides::new(),
@@ -368,17 +368,17 @@ mod tests {
     }
 
     #[test]
-    fn compact_title_bar_is_off_by_default_and_only_applies_with_the_sidebar_hidden() {
+    fn compact_title_bar_is_on_by_default_and_only_applies_with_the_sidebar_hidden() {
         let old: Settings = serde_json::from_str(r#"{"fontSize":14}"#).unwrap();
-        assert!(!old.compact_title_bar, "旧设置里没有这一项：照原来的顶栏");
-        let s = Settings { compact_title_bar: true, ..Settings::default() };
+        assert!(old.compact_title_bar, "旧设置里没有这一项：默认紧凑（用户 2026-11-23）");
+        let s = Settings { compact_title_bar: false, ..Settings::default() };
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains(r#""compactTitleBar":true"#), "{json}");
-        assert!(serde_json::from_str::<Settings>(&json).unwrap().compact_title_bar);
+        assert!(json.contains(r#""compactTitleBar":false"#), "{json}");
+        assert!(!serde_json::from_str::<Settings>(&json).unwrap().compact_title_bar, "关掉的照旧是关的");
         // 侧栏展开时红绿灯在侧栏那一行，顶栏照旧
-        assert!(!s.compact_bar());
-        assert!(Settings { sidebar_collapsed: true, ..s }.compact_bar());
-        assert!(!Settings { sidebar_collapsed: true, ..Settings::default() }.compact_bar());
+        assert!(!Settings::default().compact_bar());
+        assert!(Settings { sidebar_collapsed: true, ..Settings::default() }.compact_bar());
+        assert!(!Settings { sidebar_collapsed: true, ..s }.compact_bar());
     }
 
     #[test]
