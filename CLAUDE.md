@@ -411,17 +411,20 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   「Last login: … on ttys000」，SSHL 第一行是空的——ys 这类主题在提示符前先换一行）：`login -flp 用户 /bin/bash --noprofile --norc -c "exec -l shell"`，
   `-f` 自己登录自己不要密码、`-p` 留着我们给的环境、`-l` 不切到主目录（新标签从当前目录开始），`-l` 也让 login 不给 argv[0] 加「-」，所以套一层 bash `exec -l`，
   shell 照旧是登录 shell（读 .zprofile）；`-l` 时 login 在当前目录找 .hushlogin，所以主目录里有就自己加 `-q`。login 打 Last login、记 utmpx（`who` / `last` 看得到），
-  把 HOME / PATH 设回账户的（PATH 由 .zprofile、/etc/zprofile 再补）。子进程是 login，shell 是它 fork 出来的（`shell_of`，proc_listchildpids）：
+  把 HOME 设回账户的（`-p` 时 PATH 不动，用我们给的，/etc/zprofile 的 path_helper 和 .zprofile 再补）。子进程是 login，shell 是它 fork 出来的（`shell_of`，proc_listchildpids）：
   判断「有程序在跑」、取当前目录都按 shell 算；关标签照旧挂断前台作业和子进程（login 是控制进程，它一退系统就挂断前台，shell 跟着退，有测试）。
   起不了 login（非 macOS、没有 /usr/bin/login、查不到账户）就直接起 shell（argv[0] 带 `-`）。
   接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
-  TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上
+  TERM 同 SSH（xterm-256color），LANG 一律按系统地区设 UTF-8 的。吞吐在 macOS PTY 本身的上限上
   （`seq` 这类逐行 write 的和 `script -q /dev/null` 一样慢，是内核开销，不是终端）。
-  SSHL 自己的环境原样传给 shell，只去掉说的是「启动 SSHL 的那个程序」的变量（`local_shell::from_launcher`）：Ghostty / iTerm 的、开发测试口的、
-  Claude Code 的会话标记（`CLAUDECODE`、`CLAUDE_CODE_*`、`CLAUDE_PID`、`AI_AGENT`…）。在 Claude Code 里 `open -a SSHL`（部署完重开）时
-  整个会话的环境都跟进 SSHL；不去掉的话本机终端里再开的 claude 以为自己是那次会话的子会话，提示「Transcript saving is off」、不存对话记录，
-  而且从这样的终端里再部署又会带进下一个 SSHL（用户反复遇到过）。
+  shell 的环境是白名单（`local_shell::child_env`，`env_clear` 之后只设这些）：SSHL 自己环境里只抄系统给图形应用的几项（`INHERITED`：HOME、USER、
+  LOGNAME、SHELL、TMPDIR、SSH_AUTH_SOCK…），PATH 用系统默认（`DEFAULT_PATH`），再加 TERM / COLORTERM / TERM_PROGRAM / LANG；用户要的变量由登录 shell 的配置文件设。
+  这样不管 SSHL 是怎么打开的，本机终端都同从程序坞打开时一样：在别的程序里 `open` SSHL（部署完重开）时那个程序的整个环境都跟进 SSHL。
+  以前是黑名单（去掉 Ghostty / iTerm / Claude Code 会话标记），每来一家漏一家：Claude Code 的会话标记让终端里再开的 claude 不存对话记录；
+  Codex 给自己的命令设的 `NO_COLOR=1` 让终端里的 Claude Code 一个颜色都不出（全成 Carbonfox 的黄色前景，用户 2026-11-23：「颜色不对了」），
+  还带进 `PAGER=cat`、`LC_ALL=C.UTF-8`、带它临时目录的 PATH、给 git 注入凭据助手的 `GIT_CONFIG_*`。代价是 `launchctl setenv` 设的不再继承。
+  查一个跑着的 SSHL 带了什么：`ps -Eww -o command= -p <pid>`。
   工作区里本机标签 id 是 `local:<n>`（`Session.local`）：没有文件管理和填充密码，顶栏只切 终端 / 系统（`workspace::main_tabs_for`，⌘O 不切），
   shell 退出标签直接关；用户关本机标签（⌘W、×、右键「关闭」）一律先问（用户 2026-11-20：「只要是关闭标签都要有一个确认框」，以前只有 shell 时直接关），有程序在跑（`tcgetpgrp` ≠ shell）时说会结束它；新标签从当前本机标签前台进程的目录开始
   （`proc_pidinfo`）；从 Finder 拖进来是把转义后的路径粘贴到命令行，不是上传。命令片段的「本机」、本机的目录收藏都归属 `local`（`workspace::LOCAL_SCOPE`），所有本机标签共用。

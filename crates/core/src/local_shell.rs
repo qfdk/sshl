@@ -5,7 +5,7 @@
 //! 程序不读输入时写会阻塞，所以单独一个线程）、分派（收 ShellHandle 的消息：确认 / 改尺寸 / 关闭当场处理，
 //! 输入转给写线程，不排在卡住的写后面）、等待（waitpid，shell 退出后叫醒读线程收尾）。
 
-use std::ffi::{CStr, OsStr};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -168,11 +168,7 @@ fn spawn_launch(launch: Launch, options: LocalOptions, mut shell: ShellReceiver,
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let (remove, set) = child_env(std::env::vars_os().map(|(k, _)| k.to_string_lossy().to_string()), default_lang);
-    for key in remove {
-        command.env_remove(key);
-    }
-    command.envs(set);
+    command.env_clear().envs(child_env(std::env::vars_os(), default_lang));
     command
         .stdin(Stdio::from(File::from(slave.try_clone()?)))
         .stdout(Stdio::from(File::from(slave.try_clone()?)))
@@ -411,41 +407,32 @@ fn login_shell() -> PathBuf {
     PathBuf::from("/bin/zsh")
 }
 
-/// 子进程环境要去掉的和要设的。终端类型同 SSH 那边（xterm-256color）；从别的终端里启动 SSHL 时
-/// 带进来的那个终端的变量去掉（[`from_launcher`]）。没设语言时补一个 UTF-8 的 LANG（从 Finder 打开的应用没有），
-/// 否则 zsh 里中文显示成 <ffffffe4> 这类转义。
-fn child_env(keys: impl Iterator<Item = String>, lang: impl FnOnce() -> String) -> (Vec<String>, Vec<(String, String)>) {
-    let mut remove = Vec::new();
-    let mut has_locale = false;
-    for key in keys {
-        if matches!(key.as_str(), "LANG" | "LC_ALL" | "LC_CTYPE") {
-            has_locale = true;
-        }
-        if from_launcher(&key) {
-            remove.push(key);
-        }
-    }
-    let mut set = vec![
-        ("TERM".to_string(), "xterm-256color".to_string()),
-        ("COLORTERM".to_string(), "truecolor".to_string()),
-        ("TERM_PROGRAM".to_string(), "SSHL".to_string()),
-        ("TERM_PROGRAM_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-    ];
-    if !has_locale {
-        set.push(("LANG".to_string(), lang()));
-    }
-    (remove, set)
-}
+/// 从 SSHL 自己的环境里传给 shell 的只有这几项：从访达 / 程序坞打开时系统（launchd）给图形应用的那些。
+const INHERITED: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "SSH_AUTH_SOCK", "__CF_USER_TEXT_ENCODING", "COMMAND_MODE"];
 
-/// 说的是启动 SSHL 的那个程序、不是这个新终端的变量：别的终端（Ghostty、iTerm）的，开发测试口的，
-/// 还有 Claude Code 给它的命令设的会话标记（在 Claude Code 里 `open -a SSHL` 时整个带进来：本机终端里再开的 claude
-/// 会以为自己是那次会话的子会话，不存对话记录）。用户的 Claude 配置（CLAUDE_CONFIG_DIR、settings.json 里的）不在其中。
-fn from_launcher(key: &str) -> bool {
-    key.starts_with("GHOSTTY_")
-        || key.starts_with("ITERM_")
-        || key.starts_with("SSHL_DEV_")
-        || key.starts_with("CLAUDE_CODE_")
-        || matches!(key, "TERMINFO" | "TERM_SESSION_ID" | "CLAUDECODE" | "CLAUDE_PID" | "CLAUDE_EFFORT" | "AI_AGENT")
+/// 系统给图形应用的 PATH；登录 shell 的 /etc/zprofile（path_helper）和用户的配置文件在它上面补。
+const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// 子进程的全部环境（`env_clear` 之后只设这些）：[`INHERITED`] 里的几项照抄，PATH 用系统默认，终端类型同 SSH 那边
+/// （xterm-256color），LANG 按系统地区（从访达打开的应用没有，不设的话 zsh 里中文显示成 <ffffffe4> 这类转义）。
+///
+/// 不管 SSHL 是怎么打开的，本机终端都和从程序坞打开时一样：在别的程序里 `open` SSHL 时（部署完重开），那个程序的整个环境
+/// 都跟进 SSHL。以前按黑名单去掉认得的（Ghostty、Claude Code 的会话标记），Codex 一来又漏：它给自己的命令设的
+/// `NO_COLOR=1` 让本机终端里的 Claude Code 一个颜色都不出（用户 2026-11-23：「颜色不对了」），还有 `PAGER=cat`、`LC_ALL=C.UTF-8`、
+/// 带它临时目录的 PATH、给 git 注入凭据助手的 `GIT_CONFIG_*`。用户自己要的变量由登录 shell 的配置文件设；
+/// 代价是 `launchctl setenv` 设的不再继承。
+fn child_env(inherited: impl Iterator<Item = (OsString, OsString)>, lang: impl FnOnce() -> String) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = inherited.filter(|(key, _)| key.to_str().is_some_and(|key| INHERITED.contains(&key))).collect();
+    let set = [
+        ("PATH", DEFAULT_PATH.to_string()),
+        ("TERM", "xterm-256color".to_string()),
+        ("COLORTERM", "truecolor".to_string()),
+        ("TERM_PROGRAM", "SSHL".to_string()),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION").to_string()),
+        ("LANG", lang()),
+    ];
+    env.extend(set.into_iter().map(|(key, value)| (key.into(), value.into())));
+    env
 }
 
 /// 系统语言地区对应的 UTF-8 locale（同 Terminal / Ghostty），系统里没有这个 locale 就用 en_US.UTF-8。
@@ -676,25 +663,57 @@ mod tests {
         assert_eq!(unsafe { libc::kill(sh, 0) }, -1, "shell 也退出了");
     }
 
+    /// 子进程只看得到白名单里的变量和我们设的：cargo 跑测试时环境里一堆 CARGO_* / RUST_*，一个都不该跟进去。
     #[test]
-    fn child_env_sets_the_terminal_and_a_utf8_locale_only_when_missing() {
-        let keys = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>().into_iter();
-        let (remove, set) = child_env(keys(&["HOME", "GHOSTTY_RESOURCES_DIR", "TERMINFO", "SSHL_DEV_SOCKET"]), || "zh_CN.UTF-8".into());
-        assert_eq!(remove, ["GHOSTTY_RESOURCES_DIR", "TERMINFO", "SSHL_DEV_SOCKET"]);
-        assert!(set.contains(&("TERM".into(), "xterm-256color".into())));
-        assert!(set.contains(&("LANG".into(), "zh_CN.UTF-8".into())));
-        let (_, set) = child_env(keys(&["LC_ALL"]), || unreachable!("已有语言设置就不问系统"));
-        assert!(!set.iter().any(|(k, _)| k == "LANG"));
+    fn the_child_sees_only_the_allowed_environment() {
+        let (_shell, _handle, sink) = start("env", None);
+        sink.wait("退出", |s| s.closed.lock().unwrap().is_some());
+        let text = sink.text();
+        let keys: Vec<&str> = text.lines().filter_map(|line| line.split_once('=').map(|(k, _)| k)).collect();
+        assert!(keys.contains(&"TERM_PROGRAM"), "{text:?}");
+        // sh 自己加的 PWD / SHLVL / _ 不算
+        let stray: Vec<&str> = keys.into_iter().filter(|k| !INHERITED.contains(k) && !matches!(*k, "PATH" | "TERM" | "COLORTERM" | "TERM_PROGRAM" | "TERM_PROGRAM_VERSION" | "LANG" | "PWD" | "OLDPWD" | "SHLVL" | "_")).collect();
+        assert!(stray.is_empty(), "漏进来的变量：{stray:?}");
+        assert!(text.lines().any(|line| line.trim_end() == format!("PATH={DEFAULT_PATH}")), "{text:?}");
     }
 
-    /// SSHL 是在 Claude Code 的会话里打开的（比如部署完 `open -a SSHL`）时，它的环境里带着那次会话的标记；
-    /// 原样传下去的话，本机终端里再开的 claude 以为自己是那次会话的子会话，不存对话记录（「Transcript saving is off」）。
-    /// 用户自己的配置留着。
+    /// SSHL 是在 Codex / Claude Code 里 `open` 的：那边的环境整个跟进来。传下去的只有系统给图形应用的几项和我们设的，
+    /// PATH、语言一律重设（Codex 的 `LC_ALL=C.UTF-8` 会压过用户配置里的 LANG）。
     #[test]
-    fn child_env_drops_the_markers_of_a_claude_code_session_that_launched_sshl() {
-        let keys = ["HOME", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_PID", "CLAUDE_EFFORT", "AI_AGENT", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY"];
-        let (remove, _) = child_env(keys.iter().map(|k| k.to_string()), || "en_US.UTF-8".into());
-        assert_eq!(remove, ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_PID", "CLAUDE_EFFORT", "AI_AGENT"]);
+    fn child_env_keeps_only_what_a_desktop_launch_has() {
+        let inherited = [
+            ("HOME", "/Users/me"),
+            ("SSH_AUTH_SOCK", "/tmp/agent"),
+            ("NO_COLOR", "1"),
+            ("TERM", "dumb"),
+            ("COLORTERM", ""),
+            ("PAGER", "cat"),
+            ("LC_ALL", "C.UTF-8"),
+            ("LANG", "C.UTF-8"),
+            ("PATH", "/Users/me/.codex/tmp/arg0:/usr/bin"),
+            ("CODEX_CI", "1"),
+            ("GIT_CONFIG_COUNT", "10"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_SESSION_ID", "x"),
+            ("GHOSTTY_RESOURCES_DIR", "/x"),
+            ("TERMINFO", "/x"),
+            ("SSHL_DEV_SOCKET", "/tmp/s.sock"),
+        ];
+        let env = child_env(inherited.iter().map(|(k, v)| (k.into(), v.into())), || "zh_CN.UTF-8".into());
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap())).collect();
+        assert_eq!(
+            env,
+            [
+                ("HOME", "/Users/me"),
+                ("SSH_AUTH_SOCK", "/tmp/agent"),
+                ("PATH", DEFAULT_PATH),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor"),
+                ("TERM_PROGRAM", "SSHL"),
+                ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
+                ("LANG", "zh_CN.UTF-8"),
+            ]
+        );
     }
 
     #[test]
