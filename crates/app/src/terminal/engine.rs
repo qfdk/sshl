@@ -250,7 +250,7 @@ struct Engine {
     pty_pending: bool,
     buf: Vec<u8>,
     focused: bool,
-    blink: BlinkPolicy,
+    cursor_style: CursorPolicy,
     gnu_screen: GnuScreen,
 }
 
@@ -279,16 +279,30 @@ struct Painter {
     notify: Rc<dyn Fn(Event) + Send>,
 }
 
-/// 光标闪不闪只听 DECSCUSR（`CSI Ps SP q`）：0 回到默认（闪），1 / 3 / 5 闪，2 / 4 / 6 不闪。
-/// DEC 12 不认：vim / htop / less 退出时发的 cnorm（xterm terminfo 是 `\e[?12l\e[?25h`）会用它关掉闪烁，
-/// 之后光标就一直不闪了。libghostty 里两者是同一个模式位，所以自己记下 DECSCUSR，每片输出之后把模式位设回去。
+/// 光标样式（DECSCUSR，`CSI Ps SP q`）的两条规矩，libghostty 自己不管：
+///
+/// 1. 闪不闪只听 DECSCUSR：0 回到默认（闪），1 / 3 / 5 闪，2 / 4 / 6 不闪。DEC 12 不认：vim / htop / less 退出时发的 cnorm
+///    （xterm terminfo 是 `\e[?12l\e[?25h`）会用它关掉闪烁，之后光标就一直不闪了。libghostty 里两者是同一个模式位，
+///    所以自己记下 DECSCUSR，每片输出之后把模式位设回去。
+/// 2. 在备用屏里设的样式只在备用屏里算，离开备用屏时恢复成主屏上的（[`CursorPolicy::feed`] 报出位置，`write_output` 在那里补一句）：
+///    nvim 退出前按 xterm-256color 的 terminfo（Se=`\e[2 q`）发「不闪的方块」，然后才离开备用屏，不恢复的话之后 shell 里光标一直不闪
+///    （用户 2026-11-23 报过；Ghostty 的 terminfo 里 Se 是 `\e[0 q`，它那里没这个问题。服务器上的 terminfo 我们改不了，所以在这边处理）。
+///
 /// 状态跨输出切片保留，序列被切成两片也认得出。
 #[derive(Default)]
-struct BlinkPolicy {
+struct CursorPolicy {
     scan: Scan,
+    /// 正在收的那个 CSI 参数。
     param: u16,
-    /// 最后一次 DECSCUSR 要的；None = 没设过或 Ps 0，用默认（闪）。
+    /// DEC 私有模式（`CSI ? Pm h/l`）里已经收完的参数中有备用屏（47 / 1047 / 1049）。
+    alt_param: bool,
+    /// 当前的 DECSCUSR 要的闪不闪；None = 没设过或 Ps 0，用默认（闪）。
     requested: Option<bool>,
+    /// 主屏上最后一次 DECSCUSR 的 Ps（0 = 默认）：离开备用屏时恢复成它。
+    main: u16,
+    alternate: bool,
+    /// 这次在备用屏里设过光标样式。
+    changed_on_alternate: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -298,39 +312,99 @@ enum Scan {
     Esc,
     Csi,
     CsiSpace,
+    /// `CSI ?` 之后（DEC 私有模式）。
+    CsiPrivate,
 }
 
-impl BlinkPolicy {
-    fn feed(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+impl CursorPolicy {
+    /// 看一片输出。返回要补的恢复：（在这片里的位置，主屏上的 Ps）——离开备用屏、而备用屏里改过光标样式时，
+    /// 在离开的那个序列后面补一句 `CSI Ps SP q`，形状和闪不闪都回到主屏上的。
+    fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, u16)> {
+        let mut restores = Vec::new();
+        for (at, &byte) in bytes.iter().enumerate() {
             self.scan = match (self.scan, byte) {
                 (_, 0x1b) => Scan::Esc,
                 (Scan::Esc, b'[') => {
                     self.param = 0;
                     Scan::Csi
                 }
-                (Scan::Csi, b'0'..=b'9') => {
+                // RIS（`reset`）：回到默认的光标、回到主屏
+                (Scan::Esc, b'c') => {
+                    *self = Self::default();
+                    Scan::Ground
+                }
+                (Scan::Csi, b'?') => {
+                    self.alt_param = false;
+                    Scan::CsiPrivate
+                }
+                (Scan::Csi | Scan::CsiPrivate, b'0'..=b'9') => {
                     self.param = self.param.saturating_mul(10).saturating_add(u16::from(byte - b'0'));
-                    Scan::Csi
+                    self.scan
+                }
+                (Scan::CsiPrivate, b';') => {
+                    self.alt_param |= is_alternate_screen(self.param);
+                    self.param = 0;
+                    Scan::CsiPrivate
+                }
+                (Scan::CsiPrivate, b'h' | b'l') => {
+                    if self.alt_param || is_alternate_screen(self.param) {
+                        if byte == b'h' {
+                            self.enter_alternate();
+                        } else if let Some(main) = self.leave_alternate() {
+                            restores.push((at + 1, main));
+                        }
+                    }
+                    Scan::Ground
                 }
                 (Scan::Csi, b' ') => Scan::CsiSpace,
                 (Scan::CsiSpace, b'q') => {
-                    match self.param {
-                        0 => self.requested = None,
-                        1 | 3 | 5 => self.requested = Some(true),
-                        2 | 4 | 6 => self.requested = Some(false),
-                        _ => {}
-                    }
+                    self.set_style(self.param);
                     Scan::Ground
                 }
                 _ => Scan::Ground,
             };
         }
+        restores
+    }
+
+    fn set_style(&mut self, ps: u16) {
+        let requested = match ps {
+            0 => None,
+            1 | 3 | 5 => Some(true),
+            2 | 4 | 6 => Some(false),
+            _ => return,
+        };
+        self.requested = requested;
+        if self.alternate {
+            self.changed_on_alternate = true;
+        } else {
+            self.main = ps;
+        }
+    }
+
+    fn enter_alternate(&mut self) {
+        if !self.alternate {
+            self.alternate = true;
+            self.changed_on_alternate = false;
+        }
+    }
+
+    /// 离开备用屏；备用屏里改过光标样式的话返回主屏上的 Ps（要补发它）。
+    fn leave_alternate(&mut self) -> Option<u16> {
+        if !std::mem::take(&mut self.alternate) || !std::mem::take(&mut self.changed_on_alternate) {
+            return None;
+        }
+        self.set_style(self.main);
+        Some(self.main)
     }
 
     fn blinking(&self) -> bool {
         self.requested.unwrap_or(true)
     }
+}
+
+fn is_alternate_screen(mode: u16) -> bool {
+    matches!(mode, 47 | 1047 | 1049)
 }
 
 impl Engine {
@@ -400,17 +474,23 @@ impl Engine {
             pty_pending: false,
             buf: Vec::with_capacity(64),
             focused: true,
-            blink: BlinkPolicy::default(),
+            cursor_style: CursorPolicy::default(),
             gnu_screen: GnuScreen::default(),
         })
     }
 
-    /// 远端输出交给 libghostty 解析：GNU screen 的进出备用屏先去掉（[`GnuScreen`]）；光标闪烁按 `BlinkPolicy` 改回来（不认 DEC 12）。
+    /// 远端输出交给 libghostty 解析：GNU screen 的进出备用屏先去掉（[`GnuScreen`]）；光标样式按 [`CursorPolicy`] 改回来
+    /// （不认 DEC 12；离开备用屏时恢复成主屏上的）。
     fn write_output(&mut self, bytes: &[u8]) {
         let bytes = self.gnu_screen.filter(bytes);
-        self.term.vt_write(&bytes[..]);
-        self.blink.feed(&bytes[..]);
-        let _ = self.term.set_mode(Mode::CURSOR_BLINKING, self.blink.blinking());
+        let mut start = 0;
+        for (end, main) in self.cursor_style.feed(&bytes[..]) {
+            self.term.vt_write(&bytes[start..end]);
+            self.term.vt_write(format!("\x1b[{main} q").as_bytes());
+            start = end;
+        }
+        self.term.vt_write(&bytes[start..]);
+        let _ = self.term.set_mode(Mode::CURSOR_BLINKING, self.cursor_style.blinking());
     }
 
     fn run(&mut self, rx: Receiver<Input>) {
@@ -1274,6 +1354,38 @@ mod tests {
         assert!(blinking(&mut engine, &shared, b"\x1b[4"), "还没收完，不变");
         assert!(!blinking(&mut engine, &shared, b" q"), "DECSCUSR 4（分两片到）：不闪的下划线");
         assert!(!blinking(&mut engine, &shared, b"\x1b[?12h\x1b[?12l"), "DEC 12 不认，仍按 DECSCUSR 不闪");
+    }
+
+    fn cursor(engine: &mut Engine, shared: &Shared, bytes: &[u8]) -> (CursorShape, bool) {
+        engine.write_output(bytes);
+        engine.paint().unwrap();
+        let cursor = shared.frame.lock().unwrap().cursor.unwrap();
+        (cursor.shape, cursor.blinking)
+    }
+
+    /// nvim 退出前按 xterm-256color 的 terminfo（Se=`\e[2 q`）发「不闪的方块」，然后才离开备用屏：之后 zsh 下光标一直不闪
+    /// （用户 2026-11-23：「光标还是要闪烁的」；Ghostty 的 terminfo 里 Se 是 `\e[0 q`，所以它那里退出 nvim 照样闪）。
+    /// 在备用屏里设的光标样式只在备用屏里算，回到主屏恢复进去之前的；主屏上自己设的（zsh 的 vi 模式）照旧。
+    #[test]
+    fn a_cursor_style_set_on_the_alternate_screen_does_not_outlive_it() {
+        let (mut engine, shared) = engine();
+        assert_eq!(cursor(&mut engine, &shared, b"$ "), (CursorShape::Bar, true), "默认：闪烁竖线");
+        // nvim：进备用屏、普通模式是方块，退出时先发 Se 再离开备用屏（录下来的真实顺序）
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[?1049h\x1b[1 q\x1b[2 q"), (CursorShape::Block, false), "nvim 里：不闪的方块");
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[2 q\x1b[?1002l\x1b[?1049l\x1b[23;0;0t"), (CursorShape::Bar, true), "退出 nvim：回到闪烁竖线");
+        // 主屏上程序自己设的照办，进出一次备用屏之后还是它
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[2 q"), (CursorShape::Block, false), "主屏上设的不闪方块");
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[?1049h\x1b[5 q"), (CursorShape::Bar, true), "less 之类在备用屏里设闪烁竖线");
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[?1049l"), (CursorShape::Block, false), "回到主屏上设的不闪方块");
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[0 q"), (CursorShape::Bar, true));
+        // 序列被切在两片输出之间；1047 也是备用屏
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[?1047h\x1b[4 q\x1b[?10"), (CursorShape::Underline, false), "还在备用屏里");
+        assert_eq!(cursor(&mut engine, &shared, b"47l$ "), (CursorShape::Bar, true), "离开备用屏（分两片到）");
+        // 备用屏里没改过光标的，离开时不动主屏上的
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[6 q\x1b[?1049h\x1b[?1049l"), (CursorShape::Bar, false), "主屏上设的不闪竖线留着");
+        // reset（RIS）回到默认、回到主屏：之后在主屏上设的不当成备用屏里的
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[?1049h\x1bc"), (CursorShape::Bar, true), "RIS 回到默认");
+        assert_eq!(cursor(&mut engine, &shared, b"\x1b[2 q\x1b[?1049h\x1b[5 q\x1b[?1049l"), (CursorShape::Block, false), "RIS 之后主屏上设的照旧算主屏");
     }
 
     /// GNU screen 连上时先发 is2（DECSTR 打头）再发 smcup：不进备用屏，它滚出去的行进回滚历史（滚轮、⌘F 都能用），

@@ -121,7 +121,10 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   只在 vim 这类全屏程序里不留（按备用屏判断）也试过，用户看了还是觉得贴得太紧——所以任何时候都留 4px，别再改。左右余量平分。
   边缘整行的底色左右铺到边，上边只铺 4px（再往上是余量，用内边距色）；其余内边距取边缘格子的主色
   并把整行有底色的边缘行（除了最后一行往下）延伸进去（`frame::pick_edge_bg` / `edge_extension`）。默认光标闪烁竖线，DECSCUSR 0 回到它。光标闪不闪只听 DECSCUSR，
-  不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `BlinkPolicy` 每片输出后把模式位设回去。
+  不认 DEC 12（vim / htop / less 退出时的 cnorm 带 `\e[?12l`，认了之后光标就一直不闪）：`engine.rs` 的 `CursorPolicy` 每片输出后把模式位设回去。
+  在备用屏里设的光标样式只在备用屏里算，离开时恢复成主屏上的（`CursorPolicy::feed` 报出离开的位置，`write_output` 在那儿补一句 `CSI Ps SP q`）：
+  nvim 退出前按 xterm-256color 的 terminfo（Se=`\e[2 q`，服务器上的也一样）发「不闪的方块」再离开备用屏，不恢复的话之后 shell 里光标一直不闪
+  （用户 2026-11-23：「光标还是要闪烁的」「iTerm2 也是一样」；Ghostty 的 terminfo 里 Se 是 `\e[0 q`）。主屏上程序自己设的（zsh 的 vi 模式）照旧，RIS 全部归零。
   粗体 + 基本 8 色画成亮色（同旧版 xterm）。PTY 尺寸变化节流到 ~30 次/秒。
   方块字符（U+2580–U+259F：▀ ▄ █ ▌ ▐ ▛ ▜ ░ ▒ ▓…）不用字体画，按格子自己涂矩形（`terminal/blocks.rs`，同 Ghostty 的 sprite font）：
   字体里 █ 的宽是字体自己的字宽，比按设备像素取整的格子窄一点，相邻两格之间漏一条缝——Claude Code 标志（▐▛███▜▌）上的竖线，用户报过，
