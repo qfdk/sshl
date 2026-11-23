@@ -20,8 +20,8 @@ VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/C
 ZIP="$ROOT/target/release/SSHL-v${VERSION}-macos.zip"
 
 # 公证要求 Hardened Runtime 和带时间戳的签名
-codesign --force --options runtime --timestamp -s "$SIGN_ID" "$APP"
-codesign --verify --strict "$APP"
+source "$ROOT/scripts/sign.sh"
+sign_app "$APP" "$SIGN_ID" --options runtime --timestamp
 
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"

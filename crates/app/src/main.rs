@@ -14,6 +14,8 @@ mod groups;
 mod i18n_en;
 mod import_dialog;
 mod keymap;
+mod launchers;
+mod open_request;
 mod prompts;
 mod quick_connect;
 mod screen;
@@ -87,6 +89,13 @@ fn main() {
         if let Some(window) = cx.windows().first() {
             let _ = window.update(cx, |_, window, _| window.activate_window());
         }
+    });
+    // 「用 SSHL 打开这个文件夹」（open -a、拖到程序坞图标上、访达工具栏按钮）：先同步记下来，再叫工作区去开（见 open_request.rs）。
+    // 冷启动时它在窗口建好之前就到了：那时只记着，建窗口时 open_terminal_on_launch 取走
+    let (open_tx, mut open_rx) = unbounded::<()>();
+    app.on_open_urls(move |urls| {
+        open_request::push(&urls);
+        let _ = open_tx.unbounded_send(());
     });
     app.run(move |cx: &mut App| {
         gpui_base::init(cx);
@@ -199,6 +208,16 @@ fn main() {
         #[cfg(any(debug_assertions, feature = "devhook"))]
         devhook::start(window.into(), cx);
 
+        cx.spawn(async move |cx| {
+            while open_rx.next().await.is_some() {
+                let _ = window.update(cx, |root, window, cx| {
+                    if let Some(workspace) = workspace_of(root) {
+                        workspace.update(cx, |workspace, cx| workspace.open_requested(window, cx));
+                    }
+                });
+            }
+        })
+        .detach();
         cx.spawn(async move |cx| {
             while let Some(event) = events_rx.next().await {
                 let _ = window.update(cx, |root, _, cx| {

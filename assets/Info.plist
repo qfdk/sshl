@@ -10,6 +10,23 @@
 		<string>zh_CN</string>
 		<string>en</string>
 	</array>
+	<!-- 能用 SSHL 打开文件夹（在那个目录开本机终端，见 crates/app/src/open_request.rs）：open -a SSHL 目录、拖到程序坞图标上、
+	     访达工具栏按钮都靠它。Alternate：不抢访达打开文件夹的默认（同 Ghostty）。 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folders</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.directory</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleDisplayName</key>
 	<string>SSHL</string>
 	<key>CFBundleExecutable</key>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 访达工具栏按钮「在 SSHL 中打开」（crates/finder-button）的 Info.plist 模板：scripts/bundle.sh 把它放进
+     SSHL.app/Contents/Helpers/Open in SSHL.app，__VERSION__ / __MIN_MACOS__ 同 SSHL 的。 -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>en</string>
+	</array>
+	<key>CFBundleDisplayName</key>
+	<string>Open in SSHL</string>
+	<key>LSHasLocalizedDisplayName</key>
+	<true/>
+	<key>CFBundleExecutable</key>
+	<string>open-in-sshl</string>
+	<key>CFBundleIconFile</key>
+	<string>icon</string>
+	<key>CFBundleIdentifier</key>
+	<string>me.qfdk.sshl.finder-button</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Open in SSHL</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>__MIN_MACOS__</string>
+	<!-- 点一下就退出的小程序：不在程序坞里出现 -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Reads the folder shown in the front Finder window to open a terminal there in SSHL.</string>
+</dict>
+</plist>

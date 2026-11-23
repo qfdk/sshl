@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "在 SSHL 中打开";
+"CFBundleName" = "在 SSHL 中打开";
+"NSAppleEventsUsageDescription" = "读取访达最前面窗口里的目录，在 SSHL 里从那儿开终端。";

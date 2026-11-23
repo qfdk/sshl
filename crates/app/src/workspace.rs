@@ -435,10 +435,32 @@ impl Workspace {
 
     /// 打开 SSHL 时（启动、关窗口后回来）没有标签就先开一个本机终端（用户 2026-11-22：「每次也会先打开一个本地终端」），
     /// 设置 →「终端」里能关。开着测试口时不开：自动化测试一遍遍起进程，都从没有标签开始。
+    /// 是被叫来打开文件夹的（`open_request`）就只开那几个目录，不再多开一个主目录的。
     pub(crate) fn open_terminal_on_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_requested(window, cx) {
+            return;
+        }
         if settings::get(cx).open_terminal_on_launch && self.sessions.is_empty() && self.pending.is_none() && !crate::test_hook_on() {
             self.new_local_terminal(window, cx);
         }
+    }
+
+    /// 系统叫 SSHL 打开文件夹（访达工具栏按钮、`open -a SSHL 目录`、拖到程序坞图标上）：每个目录开一个本机终端标签，
+    /// 切到终端页、窗口拿到前面。返回有没有要开的。对话框开着时也开（标签在框后面，焦点不动，见 `activate`）。
+    pub(crate) fn open_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let dirs = crate::open_request::take();
+        if dirs.is_empty() {
+            return false;
+        }
+        // 先回终端页：本机标签停在系统页时，新标签也会停在那（用户要的是「打开终端」）
+        self.set_main_tab(MainTab::Terminal, window, cx);
+        for dir in dirs {
+            self.open_local_terminal(Some(dir), window, cx);
+        }
+        // 关窗口后藏起来、最小化了的窗口都拿出来（`closed` 留着：之后的窗口激活照样算重新打开，查一次更新；已经有标签，不会再开主目录的）
+        cx.activate(true);
+        window.activate_window();
+        true
     }
 
     /// ⌘T：开一个本机终端标签。当前是本机标签时从它的目录开始（同 Ghostty）。
@@ -448,6 +470,11 @@ impl Workspace {
             return;
         }
         let cwd = self.active_session().filter(|s| s.local).and_then(|s| s.view.read(cx).local_cwd());
+        self.open_local_terminal(cwd, window, cx);
+    }
+
+    /// 开一个本机终端标签，从 `cwd` 开始（None = 主目录），切过去。
+    fn open_local_terminal(&mut self, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let metrics = Metrics::measure(window, cx);
         let area = self.terminal_area.map(|b| b.size).unwrap_or_else(|| window.viewport_size());
         let view = cx.new(|cx| TerminalView::local(cwd, metrics.grid(area), window, cx));

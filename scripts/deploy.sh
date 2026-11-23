@@ -32,7 +32,8 @@ ditto "$SRC" "$DST"
 SIGN_ID=$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')
 if [ -n "$SIGN_ID" ]; then
   xattr -cr "$DST"
-  codesign --force --deep --options runtime -s "$SIGN_ID" "$DST"
+  source "$ROOT/scripts/sign.sh"
+  sign_app "$DST" "$SIGN_ID" --options runtime
 else
   echo "⚠ 钥匙串无 Developer ID，保持 ad-hoc 签名（重装后需重新授予本地网络权限）"
 fi

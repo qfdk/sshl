@@ -1,0 +1,32 @@
+#!/bin/sh
+# sshl [目录]：在 SSHL 里从这个目录开一个本机终端标签，切到 SSHL（不写目录就是当前目录；给的是文件就用它所在的目录）。
+# SSHL 设置 →「终端」→「命令行」把它链接到 /usr/local/bin/sshl。SSHL 收到的是「打开文件夹」，见 crates/app/src/open_request.rs。
+case $1 in
+  -h|--help) echo "usage: sshl [directory]"; exit 0 ;;
+esac
+if [ $# -gt 1 ]; then
+  echo "usage: sshl [directory]" >&2
+  exit 2
+fi
+target=${1:-.}
+if [ ! -e "$target" ]; then
+  echo "sshl: $target: No such file or directory" >&2
+  exit 1
+fi
+[ -d "$target" ] || target=$(dirname -- "$target")
+dir=$(CDPATH= cd -- "$target" && pwd -P) || exit 1
+
+# PATH 里的是指向 SSHL.app 里这个文件的链接：顺着找回那个 SSHL.app（开发时打的包也对得上自己）
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink -- "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname -- "$self")/$link ;;
+  esac
+done
+app=${self%/Contents/Resources/bin/sshl}
+if [ "$app" != "$self" ] && [ -x "$app/Contents/MacOS/sshl" ]; then
+  exec open -a "$app" "$dir"
+fi
+exec open -b me.qfdk.sshl "$dir"

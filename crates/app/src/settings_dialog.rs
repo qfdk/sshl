@@ -16,6 +16,7 @@ use crate::assets::{ABOUT_ICON, ABOUT_ICON_DARK, ABOUT_ICON_SIZE, Icon, VOILA_BA
 use crate::backend;
 use crate::groups::{self, Side};
 use crate::keymap::{self, COMMANDS, Command, Group, Recorded};
+use crate::launchers;
 use crate::prompts::{self, Options};
 use crate::settings::{self, ConnectionIcons, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE, Language, Settings};
 use crate::sidebar::{DragPreview, connection_icon};
@@ -87,6 +88,7 @@ enum Tab {
     Font,
     Appearance,
     Shortcuts,
+    Integration,
     Groups,
     About,
 }
@@ -139,6 +141,8 @@ pub struct SettingsDialog {
     recorder: Option<Subscription>,
     /// 「关于」页刚点了「复制版本信息」：按钮写「已复制」，一会儿变回来。
     version_copied: bool,
+    /// 「终端」页正在装命令行 sshl（可能在等管理员授权框）。
+    cli_installing: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -188,6 +192,7 @@ impl SettingsDialog {
             record_hint: false,
             recorder: None,
             version_copied: false,
+            cli_installing: false,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -500,6 +505,7 @@ impl Render for SettingsDialog {
             Tab::Font => self.font_panel(window, cx),
             Tab::Appearance => self.appearance_panel(cx),
             Tab::Shortcuts => self.shortcuts_panel(window, cx),
+            Tab::Integration => self.integration_panel(cx),
             Tab::Groups => self.groups_panel(window, cx),
             Tab::About => self.about_panel(cx),
         };
@@ -547,6 +553,7 @@ impl Render for SettingsDialog {
                             .child(tab_button("settings-tab-font", Tab::Font, Icon::Type, tr!("终端"), self.tab == Tab::Font, cx))
                             .child(tab_button("settings-tab-appearance", Tab::Appearance, Icon::Moon, tr!("外观"), self.tab == Tab::Appearance, cx))
                             .child(tab_button("settings-tab-shortcuts", Tab::Shortcuts, Icon::Keyboard, tr!("快捷键"), self.tab == Tab::Shortcuts, cx))
+                            .child(tab_button("settings-tab-integration", Tab::Integration, Icon::SquareTerminal, tr!("集成"), self.tab == Tab::Integration, cx))
                             .child(tab_button("settings-tab-groups", Tab::Groups, Icon::Folder, tr!("分组管理"), self.tab == Tab::Groups, cx))
                             .child(tab_button("settings-tab-about", Tab::About, Icon::Info, tr!("关于"), self.tab == Tab::About, cx)),
                     )
@@ -778,6 +785,59 @@ impl SettingsDialog {
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_theme(id, cx)))
         });
         div().id("terminal-themes").role(Role::RadioGroup).aria_label(tr!("配色")).grid().grid_cols(4).gap(px(6.)).children(cards)
+    }
+
+    /// 「集成」页：从 SSHL 外面开终端的两个入口（`launchers`），访达工具栏按钮和命令行 sshl。按钮点了马上生效，不用保存。
+    /// 开发版（`cargo run`，没打包）没有这两样，只说一句。
+    fn integration_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let section = |title: SharedString, hint: SharedString, action: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(kit::field_label(title))
+                .child(div().flex().items_center().gap_4().child(div().flex_1().min_w_0().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint)).child(action))
+        };
+        let finder = launchers::finder_button().map(|path| {
+            section(
+                tr!("访达工具栏按钮").into(),
+                tr!("按住 ⌘ 把「在 SSHL 中打开」拖到访达窗口的工具栏上。点它就在访达当前的目录开一个本机终端；选中了一个文件夹时从那个文件夹开。").into(),
+                kit::labeled_button("finder-button-reveal", Variant::Outline, None, tr!("在访达中显示")).on_click(move |_, _, _| launchers::reveal(&path)).into_any_element(),
+            )
+        });
+        let cli = launchers::cli_script().map(|script| {
+            let action = if launchers::cli_installed(&script) {
+                div().flex_shrink_0().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已安装到 {}", launchers::CLI_LINK)).into_any_element()
+            } else {
+                let label = if self.cli_installing { tr!("安装中…") } else { tr!("安装") };
+                kit::labeled_button("cli-install", Variant::Outline, None, label)
+                    .on_click(cx.listener(move |this, _, window, cx| this.install_cli(script.clone(), window, cx)))
+                    .into_any_element()
+            };
+            section(tr!("命令行").into(), tr!("在终端里敲 sshl 目录（不写就是当前目录），就在 SSHL 里从那个目录开一个本机终端。").into(), action)
+        });
+        let empty = (finder.is_none() && cli.is_none()).then(|| div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("开发版没有打包，这两样只在装好的 SSHL 里有")));
+        div().flex().flex_col().gap_6().flex_grow(1.).flex_shrink_0().children(finder).children(cli).children(empty).into_any_element()
+    }
+
+    /// 装命令行 sshl：可能弹系统的管理员授权框，在后台线程上等，装完重画（按钮换成「已安装」）。
+    fn install_cli(&mut self, script: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cli_installing {
+            return;
+        }
+        self.cli_installing = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_spawn(async move { launchers::install_cli(&script) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.cli_installing = false;
+                if let Err(error) = result {
+                    prompts::alert_later(window, cx, Options::new(tr!("安装命令行失败")).message(error));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 一行开关：勾选框 + 名称 + 灰色说明。和字体一样先预览，保存才写盘。

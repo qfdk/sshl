@@ -16,9 +16,10 @@ crates/core/          sshl-core：SSH / SFTP / 存储后端，不依赖界面框
 crates/app/           sshl：GPUI 应用（工作区、侧栏、终端、文件管理、对话框）
   src/terminal/       终端：engine.rs（终端线程）、frame.rs（帧快照）、view.rs（绘制 + 输入法）、keys.rs
   src/files/          文件管理（本地 / 远程两栏、传输、跟随终端用户）：view.rs 只放状态和整体布局，做法按功能分在 view/ 下
-assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件、AI 工具和系统的标志（icons/brands，Simple Icons 16.36.0，Redis 用 12.0.0 的经典标志，OpenAI 来自 gilbarbara/logos；大多 CC0，个别另有许可，逐个记在 icons/brands/LICENSE；几个系统的官方彩色版在 icons/brands/color/，许可另见那里的 LICENSE）、应用图标、Info.plist 模板
+crates/finder-button/ open-in-sshl：访达工具栏按钮「在 SSHL 中打开」（只依赖 objc2，不链接 GPUI）
+assets/               内置字体、Lucide 图标（线宽 2.5）、服务端软件、AI 工具和系统的标志（icons/brands，Simple Icons 16.36.0，Redis 用 12.0.0 的经典标志，OpenAI 来自 gilbarbara/logos；大多 CC0，个别另有许可，逐个记在 icons/brands/LICENSE；几个系统的官方彩色版在 icons/brands/color/，许可另见那里的 LICENSE）、应用图标、Info.plist 模板；bin/sshl（命令行）、finder-button/（访达按钮的 Info.plist、授权、中文名）
 vendor/russh/         russh 0.45 + 手动接收窗口补丁（见 vendor/README.md）
-scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）
+scripts/              bundle.sh（构建 SSHL.app）、deploy.sh（本地安装）、release.sh（签名 + 公证的发布包）、sign.sh（三处共用的签名）
 tests/                fixtures-sudo.Dockerfile：sshl-core 集成测试用的 sshd 容器
 ```
 
@@ -404,6 +405,21 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   记下读不了几个，提示 sudo -i 后重扫）。扫描结果按（机器, 分区）留着，切走再回来不重扫；重新扫描时停在深处的话退到新树上最深的祖先再补扫。
   右键目录或文件：远程「在文件管理中打开」（文件打开它所在的目录，`SystemPanelEvent::OpenInFiles`），本机「在访达中显示」。本机也有这页（用户要的）：
   第一次扫描时 macOS 可能问「文稿」「桌面」等文件夹的访问权限，界面上提示了；不允许的算进「读不了」。
+- **从访达 / 命令行打开**（用户 2026-11-23：同 OpenInTerminal-Lite，「放到访达栏上就可以自动打开当前目录并切换到终端」；还有 `sshl 目录`）：
+  三个入口最后都是系统的「用 SSHL 打开文件夹」事件（`open -a SSHL 目录`），SSHL 收到后每个目录开一个本机终端标签、切到终端页、窗口拿到前面
+  （`open_request.rs` + `Workspace::open_requested`）。Info.plist 声明能打开 `public.directory`（排位 Alternate，同 Ghostty，不抢访达的默认），
+  拖文件夹到程序坞图标上也行。事件冷启动时在窗口建好之前就到、关窗口后回来时和窗口激活前后脚到：GPUI 的 `on_open_urls` 回调里先同步记进
+  `open_request` 的队列再叫工作区，`open_terminal_on_launch` 也先看队列——有请求就只开请求的目录，不再多开一个主目录的（冷启动、藏起来再叫出来都实测过）。
+  访达按钮是 `SSHL.app/Contents/Helpers/Open in SSHL.app`（`crates/finder-button`，LSUIElement，中文名「在 SSHL 中打开」）：用 NSAppleScript 问访达
+  （选中了一个文件夹就用它，否则最前面窗口的目录，没有目录的窗口是桌面），再 `open -a` 它外面那个 SSHL.app（被拷出去了按 bundle id 找）。
+  第一次点系统问要不要让它控制访达；拒绝过（-1743）弹框给「打开系统设置」直达自动化那页。开了 hardened runtime 的签名要带
+  `com.apple.security.automation.apple-events`（`assets/finder-button/entitlements.plist`，里面不能写 XML 注释，签名器不认），
+  所以签名一律走 `scripts/sign.sh` 的 `sign_app`：先签里面那层带授权，再签外面，不用 `--deep`（会把里面重签、冲掉授权）。
+  命令行是 `Contents/Resources/bin/sshl`（sh 脚本，顺着链接找回自己所在的 SSHL.app），设置 →「集成」点「安装」链接到 `/usr/local/bin/sshl`
+  （`launchers.rs`；写不进去就用系统授权框要管理员密码，那儿是别的程序的文件不覆盖）。「集成」页也有「在访达中显示」按钮，从那儿 ⌘ 拖到工具栏上。
+  `cargo run` 的开发版没有打包，这一页只说一句。测打开文件夹别用 /Applications 那个：把 bundle 拷一份、改 bundle id、换上 debug 二进制，
+  `HOME=隔离目录 SSHL_DEV_DISPLAY=secondary open -a 测试包 目录`，按进程数 shell、`lsof -d cwd` 看目录；测完 `lsregister -u` 注销
+  （不然访达「打开方式」里多一个）。测试口套接字路径别放 scratchpad（超过 104 字节起不来），用 /tmp/claude-501/ 下的短路径。
 - **本机终端**（⌘T 新标签，新建连接是 ⌘N——用户 2026-11-22 对调的：打开 SSHL 默认就是一个本机终端标签，新标签自然也是本机的；`crates/core/src/local_shell.rs` + `TerminalView::local`）：
   打开 SSHL 时（启动、关窗口后回来）没有标签就先开一个（`Workspace::open_terminal_on_launch`，设置 →「终端」的「打开时新建本机终端」，`settings.open_terminal_on_launch`，默认开）：
   启动时在 `main.rs` 建窗口的闭包里、第一帧之前开好，窗口出来时标签已经在、焦点在终端里。开着测试口时不开（`test_hook_on`，自动化测试都从没有标签开始，同自动检查更新）。

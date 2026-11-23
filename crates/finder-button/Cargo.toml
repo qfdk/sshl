@@ -1,0 +1,15 @@
+[package]
+name = "sshl-finder-button"
+description = "访达工具栏上的「在 SSHL 中打开」按钮：问访达当前目录，交给 SSHL 开本机终端"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition = "2024"
+
+[[bin]]
+name = "open-in-sshl"
+path = "src/main.rs"
+
+[dependencies]
+# 和 sshl 同一版（不多编一份）：NSAppleScript 问访达、NSLocale 挑提示语言
+objc2 = "0.6"
