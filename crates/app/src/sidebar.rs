@@ -1,7 +1,7 @@
 //! 侧栏：应用标识、搜索、按分组的连接列表（拖动换组 / 排序）、新建连接与设置（旧 Sidebar.tsx + ConnectionList.tsx）。
 
 use gpui::{
-    AccessibleAction, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, DragMoveEvent, Focusable, FontWeight, InteractiveElement,
+    AccessibleAction, AnyElement, AppContext, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent, Focusable, FontWeight, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString, StatefulInteractiveElement,
     Styled, Window, anchored, deferred, div, img, prelude::FluentBuilder, px, svg,
 };
@@ -20,17 +20,24 @@ pub(crate) struct DragPreview(pub(crate) SharedString);
 
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_3()
-            .py_2()
-            .rounded(px(10.))
-            .bg(theme::color(ui::CARD))
-            .border_1()
-            .border_color(theme::color(ui::BORDER))
-            .shadow_lg()
-            .text_size(px(14.))
-            .child(self.0.clone())
+        drag_preview(self.0.clone())
     }
+}
+
+/// 拖动时跟着鼠标的卡片（侧栏的连接、顶栏的标签、设置里的分组和机器）。字色自己设：GPUI 把它当窗口的根来画，
+/// 继承不到界面的字色，默认是黑字，深色外观下压在深色卡片上看不见。
+fn drag_preview(content: impl IntoElement) -> Div {
+    div()
+        .px_3()
+        .py_2()
+        .rounded(px(10.))
+        .bg(theme::color(ui::CARD))
+        .border_1()
+        .border_color(theme::color(ui::BORDER))
+        .shadow_lg()
+        .text_size(px(14.))
+        .text_color(theme::color(ui::FOREGROUND))
+        .child(content)
 }
 
 /// 连接的图标：连上过、认出了系统的画它的标志（[`brands::os_logo`]：浅色外观下 Ubuntu、Tux 这类多色的画官方彩色版，
@@ -504,5 +511,19 @@ impl Workspace {
                 .child(deferred(anchored().position(position).snap_to_window().child(div().occlude().child(panel))))
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    /// GPUI 把拖动预览当窗口的根来画，继承不到界面的字色（默认是黑字）：以前深色外观下名字压在深色卡片上看不见。
+    #[gpui::test]
+    fn the_drag_preview_uses_the_ui_text_color(cx: &mut TestAppContext) {
+        let seen = kit::inherited_text_color(cx, |probe| drag_preview(probe).into_any_element());
+        assert_eq!(seen, [Some(theme::color(ui::FOREGROUND)); 2]);
     }
 }

@@ -472,6 +472,34 @@ pub fn menu_panel(entries: Vec<MenuEntry>, dismiss: impl Fn(&mut Window, &mut Ap
         .into_any_element()
 }
 
+/// 测试用：把 `build` 包好的探针当窗口的根画出来，返回探针所在位置在 prepaint、paint 时继承到的文字颜色。
+/// 两个时刻都要看：文字排版时取色，不传颜色的图标（[`Glyph`]）paint 时才取，而 `deferred` 的内容 paint 时不带挂载处的文字样式。
+#[cfg(test)]
+pub(crate) fn inherited_text_color(cx: &mut gpui::TestAppContext, build: impl Fn(AnyElement) -> AnyElement + 'static) -> [Option<Hsla>; 2] {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct Probe<F> {
+        build: F,
+        seen: Rc<Cell<[Option<Hsla>; 2]>>,
+    }
+    impl<F: Fn(AnyElement) -> AnyElement + 'static> gpui::Render for Probe<F> {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let (prepaint, paint) = (self.seen.clone(), self.seen.clone());
+            let probe = gpui::canvas(
+                move |_, window, _| prepaint.set([Some(window.text_style().color), prepaint.get()[1]]),
+                move |_, _, window, _| paint.set([paint.get()[0], Some(window.text_style().color)]),
+            )
+            .size(px(10.));
+            (self.build)(probe.into_any_element())
+        }
+    }
+    let seen = Rc::new(Cell::new([None; 2]));
+    cx.add_window_view(|_, _| Probe { build, seen: seen.clone() });
+    cx.run_until_parked();
+    seen.get()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

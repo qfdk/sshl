@@ -414,30 +414,7 @@ impl ConnectionDialog {
                     .child(div().flex_1().min_w_0().child(label)),
             );
         }
-        let list = (!rows.is_empty()).then(|| {
-            div()
-                .id("connection-group-list")
-                .role(Role::ListBox)
-                .aria_label(tr!("分组"))
-                .absolute()
-                .left_0()
-                .right_0()
-                .top_full()
-                .mt_1()
-                .max_h(px(200.))
-                .overflow_y_scroll()
-                .p_1()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme::color(ui::BORDER))
-                .bg(theme::color(ui::CARD))
-                .shadow_md()
-                .text_sm()
-                .occlude()
-                // 按在下拉上不让对话框把焦点从分组框拿走：一失焦下拉就收了，松开时点击落空
-                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                .children(rows)
-        });
+        let list = (!rows.is_empty()).then(|| Self::group_list(rows));
         let control = div()
             .id("connection-group")
             .key_context(GROUP_CONTEXT)
@@ -461,6 +438,34 @@ impl ConnectionDialog {
             // 延后到最上层画：不然被下面几行输入框压住
             .when_some(list, |d, list| d.child(deferred(list).with_priority(1)));
         self.labeled(tr!("分组"), Some(tr!("（可选）")), control)
+    }
+
+    /// 分组下拉列表的卡片，在分组框下面展开。字色自己设：列表经 `deferred` 画，paint 时不带对话框的字色，
+    /// 当前分组后面的 ✓ 不传颜色、paint 时才取，会画成默认的黑色（高亮行自己设了颜色，盖过这个）。
+    fn group_list(rows: impl IntoIterator<Item = impl IntoElement>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("connection-group-list")
+            .role(Role::ListBox)
+            .aria_label(tr!("分组"))
+            .absolute()
+            .left_0()
+            .right_0()
+            .top_full()
+            .mt_1()
+            .max_h(px(200.))
+            .overflow_y_scroll()
+            .p_1()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme::color(ui::BORDER))
+            .bg(theme::color(ui::CARD))
+            .shadow_md()
+            .text_sm()
+            .text_color(theme::color(ui::FOREGROUND))
+            .occlude()
+            // 按在下拉上不让对话框把焦点从分组框拿走：一失焦下拉就收了，松开时点击落空
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .children(rows)
     }
 }
 
@@ -605,6 +610,17 @@ impl Render for ConnectionDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 分组下拉延后到最上层画（deferred），paint 时不带挂载处的文字样式；当前分组后面的 ✓ 不传颜色、paint 时才取色，
+    /// 以前深色外观下画成默认的黑色，刚打开（还没有高亮行）时压在深色卡片上看不见。
+    #[gpui::test]
+    fn the_group_list_uses_the_ui_text_color(cx: &mut gpui::TestAppContext) {
+        let seen = kit::inherited_text_color(cx, |probe| {
+            let list = deferred(ConnectionDialog::group_list([probe])).with_priority(1);
+            div().size_full().text_color(theme::color(ui::FOREGROUND)).child(div().relative().child(list)).into_any_element()
+        });
+        assert_eq!(seen, [Some(theme::color(ui::FOREGROUND)); 2]);
+    }
 
     #[test]
     fn arrows_and_escape_reach_the_group_dropdown_before_the_input_box() {

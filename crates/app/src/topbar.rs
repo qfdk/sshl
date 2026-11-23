@@ -3,7 +3,7 @@
 use gpui::{
     AnyElement, AnyView, App, AppContext, ClickEvent, Context, Div, DragMoveEvent, ElementId, Entity, Focusable, Font, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Role, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription,
-    TextRun, Window, actions, anchored, deferred, div, point, prelude::FluentBuilder, px,
+    TextRun, Window, actions, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 
@@ -172,6 +172,41 @@ fn hint(key: impl Into<SharedString>, visible: bool, compact: bool) -> AnyElemen
         .when(!visible, |h| h.opacity(0.))
         .child(key.into())
         .into_any_element()
+}
+
+/// 挂在顶栏按钮下面、右边对齐按钮的弹层（命令片段 / 目录收藏面板、填充密码菜单）。
+/// 弹层是界面配色的卡片，字色换回界面的：紧凑标题栏铺在终端上时整条顶栏的字跟着终端配色走（深色配色上是白的），
+/// 字排版时又跟着挂载处的颜色，不换回来的话卡片里没单独设颜色的字（收藏的名字、命令片段、账号）白字白底看不见。
+/// 要设在 `deferred` 里面：它的内容 paint 时不带挂载处的文字样式，不传颜色的图标那时才取色，设在外面会画成默认的黑色。
+fn dropdown(compact: bool, priority: usize, content: impl IntoElement) -> Div {
+    div()
+        .absolute()
+        .right_0()
+        .top(px(if compact { COMPACT_CONTROL + 6. } else { 40. }))
+        .child(deferred(anchored().anchor(gpui::Anchor::TopRight).child(div().text_color(theme::color(ui::FOREGROUND)).child(content))).with_priority(priority))
+}
+
+/// 改名中的标签里那个输入框的外壳（`size` 是字号）。它是界面配色的卡片，字色换回界面的：紧凑标题栏铺在深色终端上时
+/// 整条顶栏的字是白的，输入框的字跟着继承，浅色外观下白字白底，看不见在敲什么。
+fn rename_box(width: f32, size: f32, compact: bool) -> Stateful<Div> {
+    div()
+        .id("tab-rename")
+        .key_context(RENAME_CONTEXT)
+        .role(Role::TextInput)
+        .aria_label(tr!("重命名标签"))
+        .w(px(width))
+        .h(px(if compact { 20. } else { 26. }))
+        .px(px(6.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme::color(ui::RING))
+        .bg(theme::color(ui::CARD))
+        .text_color(theme::color(ui::FOREGROUND))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(size))
+        .line_height(px(if compact { 18. } else { 20. }))
 }
 
 impl Workspace {
@@ -373,22 +408,19 @@ impl Workspace {
             .on_click(cx.listener(move |this, _, window, cx| this.toggle_top_panel(kind, window, cx)));
         let panel = open.then(|| {
             let this = cx.entity().downgrade();
-            div().absolute().right_0().top(px(if bar.is_some() { COMPACT_CONTROL + 6. } else { 40. })).child(
-                deferred(
-                    anchored().anchor(gpui::Anchor::TopRight).child(
-                        div()
-                            .on_mouse_down_out(move |_, window, cx| {
-                                let _ = this.update(cx, |this, cx| {
-                                    // 点的是这个面板自己的按钮：交给按钮的点击去关，不然这里先关、按钮又打开
-                                    if this.top_panel_hovered != Some(kind) {
-                                        this.close_top_panel(window, cx);
-                                    }
-                                });
-                            })
-                            .child(content),
-                    ),
-                )
-                .with_priority(2),
+            dropdown(
+                bar.is_some(),
+                2,
+                div()
+                    .on_mouse_down_out(move |_, window, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            // 点的是这个面板自己的按钮：交给按钮的点击去关，不然这里先关、按钮又打开
+                            if this.top_panel_hovered != Some(kind) {
+                                this.close_top_panel(window, cx);
+                            }
+                        });
+                    })
+                    .child(content),
             )
         });
         div().relative().child(button).when_some(panel, |d, panel| d.child(panel)).into_any_element()
@@ -502,14 +534,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, window, cx| this.save_fill_account(window, cx))),
                     ),
             );
-        Some(
-            div()
-                .absolute()
-                .right_0()
-                .top(px(if compact { COMPACT_CONTROL + 6. } else { 40. }))
-                .child(deferred(anchored().anchor(gpui::Anchor::TopRight).offset(point(px(0.), px(0.))).child(panel)))
-                .into_any_element(),
-        )
+        Some(dropdown(compact, 0, panel).into_any_element())
     }
 
     fn session_tabs(&mut self, bar: Option<CompactBar>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -726,23 +751,7 @@ impl Workspace {
         // 左右内边距 12 + 边框 2 + 光标留一点
         let width = (text_width + 20.).clamp(RENAME_MIN_WIDTH, RENAME_MAX_WIDTH);
         let input = rename.input.clone();
-        div()
-            .id("tab-rename")
-            .key_context(RENAME_CONTEXT)
-            .role(Role::TextInput)
-            .aria_label(tr!("重命名标签"))
-            .w(px(width))
-            .h(px(if compact { 20. } else { 26. }))
-            .px(px(6.))
-            .flex()
-            .items_center()
-            .rounded(px(6.))
-            .border_1()
-            .border_color(theme::color(ui::RING))
-            .bg(theme::color(ui::CARD))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_size(px(size))
-            .line_height(px(if compact { 18. } else { 20. }))
+        rename_box(width, size, compact)
             .on_action(cx.listener(|this, _: &ConfirmTabRename, window, cx| this.finish_rename(true, window, cx)))
             .on_action(cx.listener(|this, _: &CancelTabRename, window, cx| this.finish_rename(false, window, cx)))
             // 点到输入框外面就确认，拖动区、侧栏这类不拿焦点的地方也算。等这次点击把焦点挪完再收尾：
@@ -858,6 +867,8 @@ pub(crate) fn latency_text(rtt: Option<std::time::Duration>) -> (String, ui::Tok
 mod tests {
     use std::time::Duration;
 
+    use gpui::TestAppContext;
+
     use super::*;
 
     #[test]
@@ -916,5 +927,25 @@ mod tests {
         assert_eq!(latency_text(Some(Duration::from_millis(201))).1, ui::DESTRUCTIVE);
         assert_eq!(latency_text(None), ("超时".into(), ui::DESTRUCTIVE));
         assert_eq!(latency_text(Some(Duration::from_micros(300))).0, "<1 ms");
+    }
+
+    /// 紧凑标题栏铺在深色终端上时整条顶栏的字是白的；顶栏下面的弹层是界面配色的卡片，里面没单独设颜色的字和图标
+    /// （收藏的名字、命令片段、填充菜单的账号）要用界面的字色。以前继承了白字，在浅色卡片上看不见（用户报过）。
+    /// 图标 paint 时才取色，deferred 的内容那时不带挂载处的字色，所以字色要设在弹层里面。
+    #[gpui::test]
+    fn dropdowns_under_the_compact_bar_use_the_ui_text_color(cx: &mut TestAppContext) {
+        let ink = CompactBar::over_terminal(term::find(term::DEFAULT_ID)).fg;
+        assert_ne!(ink, theme::color(ui::FOREGROUND), "默认配色上顶栏的字和界面的不同，这个测试才有意义");
+        let seen = kit::inherited_text_color(cx, move |probe| div().size_full().text_color(ink).child(div().relative().child(dropdown(true, 2, probe))).into_any_element());
+        assert_eq!(seen, [Some(theme::color(ui::FOREGROUND)); 2]);
+    }
+
+    /// 改名时标签里换上的输入框是界面配色的卡片：紧凑标题栏铺在深色终端上时整条顶栏的字是白的，
+    /// 以前输入框的字跟着继承，浅色外观下白字白底，看不见在敲什么。
+    #[gpui::test]
+    fn the_rename_box_in_the_compact_bar_uses_the_ui_text_color(cx: &mut TestAppContext) {
+        let ink = CompactBar::over_terminal(term::find(term::DEFAULT_ID)).fg;
+        let seen = kit::inherited_text_color(cx, move |probe| div().size_full().text_color(ink).child(rename_box(120., 13., true).child(probe)).into_any_element());
+        assert_eq!(seen, [Some(theme::color(ui::FOREGROUND)); 2]);
     }
 }

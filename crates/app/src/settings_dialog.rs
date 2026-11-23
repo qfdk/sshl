@@ -616,23 +616,7 @@ impl SettingsDialog {
                     .on_click(cx.listener(|this, _, window, cx| this.pick_family(None, window, cx)))
                     .into_any_element(),
             );
-            div()
-                .id("font-list")
-                .absolute()
-                .top(px(64.))
-                .left_0()
-                .right_0()
-                .max_h(px(260.))
-                .overflow_y_scroll()
-                .p_1()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(theme::color(ui::BORDER))
-                .bg(theme::color(ui::CARD))
-                .shadow_lg()
-                .text_sm()
-                .occlude()
-                .children(rows)
+            Self::font_list(rows)
         });
         let palette = current.terminal_theme();
         let preview_line = |text: SharedString, color: Rgb| div().text_color(term::hsla(color)).child(text);
@@ -738,6 +722,29 @@ impl SettingsDialog {
                     .child(kit::labeled_button("settings-save", Variant::Primary, None, tr!("保存")).on_click(cx.listener(|this, _, _, cx| this.save_font(cx)))),
             )
             .into_any_element()
+    }
+
+    /// 字体下拉列表的卡片，在字号、字体两栏下面展开。字色自己设：列表经 `deferred` 画，paint 时不带对话框的字色，
+    /// 当前字体前的 ✓ 不传颜色、paint 时才取，会画成默认的黑色。
+    fn font_list(rows: impl IntoIterator<Item = impl IntoElement>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("font-list")
+            .absolute()
+            .top(px(64.))
+            .left_0()
+            .right_0()
+            .max_h(px(260.))
+            .overflow_y_scroll()
+            .p_1()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme::color(ui::BORDER))
+            .bg(theme::color(ui::CARD))
+            .shadow_lg()
+            .text_sm()
+            .text_color(theme::color(ui::FOREGROUND))
+            .occlude()
+            .children(rows)
     }
 
     /// 配色：每套一张小卡片，主题的底色上用它的前景和两个 ANSI 色写一行提示符 + 命令，下面是名字；
@@ -1559,6 +1566,17 @@ fn saved_with(snapshot: &mut Settings, current: &Settings, change: impl FnOnce(&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 字体下拉延后到最上层画（deferred），paint 时不带挂载处的文字样式；当前字体前的 ✓ 不传颜色、paint 时才取色，
+    /// 以前深色外观下画成默认的黑色，压在深色卡片上看不见。
+    #[gpui::test]
+    fn the_font_list_uses_the_ui_text_color(cx: &mut gpui::TestAppContext) {
+        let seen = kit::inherited_text_color(cx, |probe| {
+            let list = deferred(SettingsDialog::font_list([probe])).with_priority(1);
+            div().size_full().text_color(theme::color(ui::FOREGROUND)).child(div().relative().child(list)).into_any_element()
+        });
+        assert_eq!(seen, [Some(theme::color(ui::FOREGROUND)); 2]);
+    }
 
     /// 关掉不保存：几页里预览过的都换回打开时的（语言以前漏了：点了 English 再关掉，界面还是英文，下次存设置时写进磁盘）；
     /// 不归这几页管的（侧栏收起、收起的分组）照当前的。
