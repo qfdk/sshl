@@ -1,5 +1,5 @@
-//! 本机终端：openpty + 用户的登录 shell。对界面的接口同 SSH 终端：键盘输入、改尺寸、流控确认、关闭
-//! 都经 [`ShellHandle`] 进来，输出交给 [`TerminalSink`]。
+//! 本机终端：openpty + 用户的登录 shell（macOS 上同 Ghostty 经 /usr/bin/login 起，见 [`login_launch`]）。
+//! 对界面的接口同 SSH 终端：键盘输入、改尺寸、流控确认、关闭都经 [`ShellHandle`] 进来，输出交给 [`TerminalSink`]。
 //!
 //! 每个会话四个线程：读（poll 主端 → sink，积压到 [`BACKLOG_LIMIT`] 就停下等确认）、写（键盘输入写主端，
 //! 程序不读输入时写会阻塞，所以单独一个线程）、分派（收 ShellHandle 的消息：确认 / 改尺寸 / 关闭当场处理，
@@ -32,7 +32,9 @@ pub struct LocalOptions {
 
 /// 运行中的本机 shell。drop 不结束进程：关闭走 [`crate::ssh::ShellHandle::close`]。
 pub struct LocalShell {
+    /// 子进程：经 login 起的是 login，否则就是 shell。
     pid: libc::pid_t,
+    via_login: bool,
     master: Arc<OwnedFd>,
     exit: Arc<Mutex<Option<Option<u32>>>>,
 }
@@ -42,13 +44,19 @@ impl LocalShell {
         self.pid as u32
     }
 
+    /// shell 本身的进程号（[`shell_of`]）。
+    fn shell_pid(&self) -> Option<libc::pid_t> {
+        shell_of(self.pid, self.via_login)
+    }
+
     /// 前台在跑的不是 shell 自己（vim、ssh、npm run dev…）时返回那个程序名：关标签前要问一声。
+    /// shell 刚起来、还没把自己设成前台进程组时，前台是 login 那一组，也不算在忙。
     pub fn foreground_program(&self) -> Option<String> {
         if self.exit.lock().unwrap().is_some() {
             return None;
         }
         let fg = foreground_group(self.master.as_raw_fd())?;
-        if fg == self.pid {
+        if fg == self.pid || Some(fg) == self.shell_pid() {
             return None;
         }
         Some(process_name(fg).unwrap_or_else(|| crate::tr!("程序").into()))
@@ -57,27 +65,105 @@ impl LocalShell {
     /// 前台进程（在提示符下就是 shell 自己）的当前目录：新开的本机标签从这里开始。
     pub fn cwd(&self) -> Option<PathBuf> {
         let fg = foreground_group(self.master.as_raw_fd());
-        fg.and_then(process_cwd).or_else(|| process_cwd(self.pid))
+        fg.and_then(process_cwd).or_else(|| self.shell_pid().and_then(process_cwd))
     }
 }
 
+/// 起什么：程序、参数、argv[0]，以及是不是经 login 起的（那样 shell 是子进程下面的那个）。
+struct Launch {
+    program: PathBuf,
+    args: Vec<String>,
+    arg0: Option<String>,
+    via_login: bool,
+}
+
+/// 用户的登录 shell。macOS 上同 Ghostty / 系统终端经 /usr/bin/login 起（[`login_launch`]），起不了才直接起
+/// （argv[0] 带 `-`，算登录 shell，读 .zprofile 等）。
+fn shell_launch() -> Launch {
+    let shell = login_shell();
+    #[cfg(target_os = "macos")]
+    if let Some(launch) = login_launch(&shell) {
+        return launch;
+    }
+    let name = shell.file_name().unwrap_or(OsStr::new("sh")).to_string_lossy().to_string();
+    Launch { program: shell, args: Vec::new(), arg0: Some(format!("-{name}")), via_login: false }
+}
+
+/// 经 /usr/bin/login 起 shell（同 Ghostty、系统终端、iTerm）：login 先打一行「Last login: … on ttys000」，在 utmpx 里记下这次登录
+/// （`who` / `last` 看得到），再起 shell（用户 2026-11-23：Ghostty 第一行是 Last login，SSHL 第一行是空的——ys 这类主题在提示符前先换一行）。
+#[cfg(target_os = "macos")]
+fn login_launch(shell: &Path) -> Option<Launch> {
+    let login = Path::new("/usr/bin/login");
+    if !login.exists() {
+        return None;
+    }
+    let (user, home) = current_user()?;
+    let hush = home.join(".hushlogin").exists();
+    Some(Launch { program: login.into(), args: login_args(&user, shell, hush), arg0: None, via_login: true })
+}
+
+/// login 的参数，同 Ghostty：`-f` 自己登录自己不要密码，`-p` 留着我们给的环境，`-l` 不切到主目录（新标签从当前目录开始）。
+/// `-l` 同时让 login 不给 argv[0] 加「-」，所以中间套一层 bash 的 `exec -l`，shell 照旧是登录 shell。
+/// `-l` 时 login 在当前目录里找 .hushlogin，所以主目录里有 .hushlogin 时自己加 `-q`。
+fn login_args(user: &str, shell: &Path, hush: bool) -> Vec<String> {
+    let quoted = format!("'{}'", shell.to_string_lossy().replace('\'', r"'\''"));
+    [if hush { "-qflp" } else { "-flp" }, user, "/bin/bash", "--noprofile", "--norc", "-c"]
+        .into_iter()
+        .map(String::from)
+        .chain([format!("exec -l {quoted}")])
+        .collect()
+}
+
+/// 当前用户的账户名和主目录（getpwuid，不信环境变量）。
+#[cfg(target_os = "macos")]
+fn current_user() -> Option<(String, PathBuf)> {
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_name.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let name = CStr::from_ptr((*pw).pw_name).to_string_lossy().to_string();
+        let home = PathBuf::from(CStr::from_ptr((*pw).pw_dir).to_string_lossy().to_string());
+        Some((name, home))
+    }
+}
+
+/// shell 本身的进程号：直接起的就是子进程；经 login 起的是 login 下面那个（login fork 出 shell，自己留着等它退出、收尾 utmpx）。
+fn shell_of(pid: libc::pid_t, via_login: bool) -> Option<libc::pid_t> {
+    if via_login { children(pid).first().copied() } else { Some(pid) }
+}
+
+#[cfg(target_os = "macos")]
+fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut buf = [0 as libc::pid_t; 64];
+    let n = unsafe { libc::proc_listchildpids(pid, buf.as_mut_ptr().cast(), std::mem::size_of_val(&buf) as libc::c_int) };
+    // 有的系统版本返回个数，有的返回字节数：都按上限截，空位是 0
+    let n = usize::try_from(n).unwrap_or(0).min(buf.len());
+    buf[..n].iter().copied().filter(|p| *p > 0).collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn children(_: libc::pid_t) -> Vec<libc::pid_t> {
+    Vec::new()
+}
+
 /// 起本机 shell。`shell` 是 [`crate::ssh::shell_channel`] 的接收端，写端交给终端线程。
-pub fn spawn(options: LocalOptions, mut shell: ShellReceiver, sink: Arc<dyn TerminalSink>) -> io::Result<LocalShell> {
-    let (master, slave) = open_pty(options.cols, options.rows)?;
-    let mut command = match options.program {
-        Some((program, args)) => {
-            let mut command = Command::new(program);
-            command.args(args);
-            command
-        }
-        None => {
-            let shell = login_shell();
-            let name = shell.file_name().unwrap_or(OsStr::new("sh")).to_string_lossy().to_string();
-            let mut command = Command::new(&shell);
-            command.arg0(format!("-{name}"));
-            command
-        }
+pub fn spawn(mut options: LocalOptions, shell: ShellReceiver, sink: Arc<dyn TerminalSink>) -> io::Result<LocalShell> {
+    let launch = match options.program.take() {
+        Some((program, args)) => Launch { program, args, arg0: None, via_login: false },
+        None => shell_launch(),
     };
+    spawn_launch(launch, options, shell, sink)
+}
+
+fn spawn_launch(launch: Launch, options: LocalOptions, mut shell: ShellReceiver, sink: Arc<dyn TerminalSink>) -> io::Result<LocalShell> {
+    let (master, slave) = open_pty(options.cols, options.rows)?;
+    let mut command = Command::new(&launch.program);
+    command.args(&launch.args);
+    if let Some(arg0) = &launch.arg0 {
+        command.arg0(arg0);
+    }
+    let via_login = launch.via_login;
     let cwd = options.cwd.filter(|dir| dir.is_dir()).or_else(dirs::home_dir);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
@@ -161,7 +247,7 @@ pub fn spawn(options: LocalOptions, mut shell: ShellReceiver, sink: Arc<dyn Term
         flow.close();
     })?;
 
-    Ok(LocalShell { pid, master, exit })
+    Ok(LocalShell { pid, via_login, master, exit })
 }
 
 /// 输出积压记账：读线程交出去的字节，终端线程解析完确认回来。
@@ -245,7 +331,8 @@ fn wait_readable(fd: RawFd, timeout_ms: i32) -> bool {
     }
 }
 
-/// 关标签：前台作业和 shell 都发 SIGHUP（同关掉终端窗口）。
+/// 关标签：前台作业和子进程都发 SIGHUP（同关掉终端窗口）。经 login 起的子进程是 login：它是这个终端的控制进程，
+/// 退出时系统挂断前台作业，shell 也跟着退（有测试）。
 fn hang_up(master: RawFd, pid: libc::pid_t) {
     if let Some(fg) = foreground_group(master).filter(|fg| *fg != pid) {
         unsafe { libc::kill(-fg, libc::SIGHUP) };
@@ -544,6 +631,49 @@ mod tests {
         assert_eq!(shell.foreground_program().as_deref(), Some("sleep"));
         handle.close();
         sink.wait("关闭", |s| s.closed.lock().unwrap().is_some());
+    }
+
+    /// 同 Ghostty：`login -flp 用户 /bin/bash --noprofile --norc -c "exec -l shell"`，主目录里有 .hushlogin 时加 -q。
+    #[test]
+    fn the_shell_is_started_through_login_with_the_same_arguments_as_ghostty() {
+        assert_eq!(
+            login_args("qfdk", Path::new("/bin/zsh"), false),
+            ["-flp", "qfdk", "/bin/bash", "--noprofile", "--norc", "-c", "exec -l '/bin/zsh'"]
+        );
+        assert_eq!(login_args("qfdk", Path::new("/bin/zsh"), true)[0], "-qflp");
+        assert_eq!(login_args("a", Path::new("/opt/it's/zsh"), false)[6], r"exec -l '/opt/it'\''s/zsh'", "路径里的单引号转义");
+    }
+
+    /// 经 login 起：login 打「Last login」，shell 在 login 下面（login 自己 fork 出 shell、在一边等它退出）。
+    /// 提示符下不算在忙、跑着 sleep 算；-l 不切到主目录，起始目录照旧；关闭能把整个会话挂断。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_session_through_login_keeps_its_directory_and_knows_its_shell() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let launch = login_launch(Path::new("/bin/sh")).expect("/usr/bin/login");
+        let (handle, rx) = shell_channel();
+        let sink = Arc::new(Collect::default());
+        let options = LocalOptions { cwd: Some(dir.clone()), cols: 80, rows: 24, program: None };
+        let shell = spawn_launch(launch, options, rx, sink.clone()).expect("spawn");
+        handle.write(b"echo ready-$((40+2))\r".to_vec());
+        sink.wait("提示符", |s| s.text().contains("ready-42"));
+        if !dirs::home_dir().unwrap().join(".hushlogin").exists() {
+            assert!(sink.text().contains("Last login"), "{:?}", sink.text());
+        }
+        let sh = shell.shell_pid().expect("login 下面的 shell");
+        assert_ne!(sh, shell.pid, "子进程是 login，shell 是它下面的");
+        assert_eq!(shell.foreground_program(), None, "提示符下不算在忙");
+        assert_eq!(shell.cwd().as_deref(), Some(dir.as_path()), "没被切到主目录");
+        handle.write(b"sleep 30\r".to_vec());
+        let start = Instant::now();
+        while shell.foreground_program().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5), "sleep 没进前台");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(shell.foreground_program().as_deref(), Some("sleep"));
+        handle.close();
+        sink.wait("挂断后退出", |s| s.closed.lock().unwrap().is_some());
+        assert_eq!(unsafe { libc::kill(sh, 0) }, -1, "shell 也退出了");
     }
 
     #[test]

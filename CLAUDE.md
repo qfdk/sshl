@@ -398,7 +398,13 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
 - **本机终端**（⌘T 新标签，新建连接是 ⌘N——用户 2026-11-22 对调的：打开 SSHL 默认就是一个本机终端标签，新标签自然也是本机的；`crates/core/src/local_shell.rs` + `TerminalView::local`）：
   打开 SSHL 时（启动、关窗口后回来）没有标签就先开一个（`Workspace::open_terminal_on_launch`，设置 →「终端」的「打开时新建本机终端」，`settings.open_terminal_on_launch`，默认开）：
   启动时在 `main.rs` 建窗口的闭包里、第一帧之前开好，窗口出来时标签已经在、焦点在终端里。开着测试口时不开（`test_hook_on`，自动化测试都从没有标签开始，同自动检查更新）。
-  openpty + 用户的登录 shell（argv[0] 带 `-`，读 .zprofile），
+  openpty + 用户的登录 shell，同 Ghostty / 系统终端 / iTerm 经 `/usr/bin/login` 起（`local_shell::login_launch`，用户 2026-11-23：Ghostty 第一行是
+  「Last login: … on ttys000」，SSHL 第一行是空的——ys 这类主题在提示符前先换一行）：`login -flp 用户 /bin/bash --noprofile --norc -c "exec -l shell"`，
+  `-f` 自己登录自己不要密码、`-p` 留着我们给的环境、`-l` 不切到主目录（新标签从当前目录开始），`-l` 也让 login 不给 argv[0] 加「-」，所以套一层 bash `exec -l`，
+  shell 照旧是登录 shell（读 .zprofile）；`-l` 时 login 在当前目录找 .hushlogin，所以主目录里有就自己加 `-q`。login 打 Last login、记 utmpx（`who` / `last` 看得到），
+  把 HOME / PATH 设回账户的（PATH 由 .zprofile、/etc/zprofile 再补）。子进程是 login，shell 是它 fork 出来的（`shell_of`，proc_listchildpids）：
+  判断「有程序在跑」、取当前目录都按 shell 算；关标签照旧挂断前台作业和子进程（login 是控制进程，它一退系统就挂断前台，shell 跟着退，有测试）。
+  起不了 login（非 macOS、没有 /usr/bin/login、查不到账户）就直接起 shell（argv[0] 带 `-`）。
   接口同 SSH 终端（`ShellHandle` 进、`TerminalSink` 出）。读线程按 ack 记账，积压 2MB 就停（同 SSH 终端窗口，刷屏中 ^C 约 40ms 回到提示符）；
   键盘输入单独一个写线程，程序不读输入时卡住的写不挡确认 / 改尺寸 / 关闭。`setsid` + `TIOCSCTTY` 做控制终端，开 IUTF8；
   TERM 同 SSH（xterm-256color），没有 LANG / LC_* 时按系统地区补 UTF-8 的 LANG。吞吐在 macOS PTY 本身的上限上
