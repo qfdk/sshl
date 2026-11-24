@@ -86,15 +86,20 @@ pub fn follow_system_appearance(dark: bool) {
     });
 }
 
-/// 给按钮设访达自定义图标（深色 / 浅色那一套），再告诉访达它变了：访达不用重启，工具栏上的图标当场换掉（实测）。
-/// 设自定义图标还为了去掉系统给不是圆角方形的应用图标套的底框（同 OpenInTerminal-Lite 的做法）。
+/// 给按钮设访达自定义图标（深色 / 浅色那一套），访达不用重启，工具栏上的图标当场换掉。
+/// 先清掉旧的、告诉访达，停一下再设新的、再告诉它：直接从一套换成另一套访达不刷新（实测取样：换了十秒工具栏上还是旧的），
+/// 从「没有」到「有」它才认。设自定义图标还为了去掉系统给不是圆角方形的应用图标套的底框（同 OpenInTerminal-Lite 的做法）。
 fn set_button_icon(button: &Path, dark: bool) -> Result<(), String> {
     const SET_ICON: &str = "ObjC.import('AppKit');
 function run(argv) {
   const image = $.NSImage.alloc.initWithContentsOfFile(argv[1]);
   if (image.isNil()) throw new Error('no icon ' + argv[1]);
-  const done = $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[0], 0);
-  $.NSWorkspace.sharedWorkspace.noteFileSystemChanged(argv[0]);
+  const workspace = $.NSWorkspace.sharedWorkspace;
+  workspace.setIconForFileOptions($(), argv[0], 0);
+  workspace.noteFileSystemChanged(argv[0]);
+  delay(0.3);
+  const done = workspace.setIconForFileOptions(image, argv[0], 0);
+  workspace.noteFileSystemChanged(argv[0]);
   return done ? 'ok' : 'failed';
 }";
     let icns = button.join(if dark { "Contents/Resources/icon-dark.icns" } else { "Contents/Resources/icon.icns" });

@@ -423,7 +423,8 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   OpenInTerminal-Lite 没被套也是因为它有自定义图标。**深色模式**（用户：「有没有暗色模式的？」）：自定义图标不会自己跟着深浅色变，
   所以有两套（`icon.icns` 深灰、`icon-dark.icns` 浅灰，同一个脚本加 `dark` 生成），SSHL 跟着**系统**外观换（`launchers::follow_system_appearance`，
   挂在 `workspace::sync_appearance` 上：启动时、系统切深浅色时；访达跟系统走，不跟 SSHL 设置里的外观，SSHL 不改窗口外观所以 `window.appearance()` 就是系统的），
-  按钮在工具栏上才换，换完 `noteFileSystemChanged`，访达不用重启当场换掉（实测）。每个进程第一次也换一次：SSHL 被整个换掉后包里的自定义图标就没了，启动时补回来。
+  按钮在工具栏上才换，访达不用重启当场换掉——但要先清掉旧图标、`noteFileSystemChanged`、停 0.3 秒再设新的、再通知：
+  直接从一套换成另一套访达不刷新（截图取样实测：十秒后工具栏上还是旧的），从「没有」到「有」它才认。每个进程第一次也换一次：SSHL 被整个换掉后包里的自定义图标就没了，启动时补回来。
   **权限**：它在 SSHL.app 里面，系统把它算成 SSHL 的——tccd 查的是 `me.qfdk.sshl`，开了 hardened runtime 时 SSHL 自己也得带
   `com.apple.security.automation.apple-events`（`assets/entitlements.plist`，里面不能写 XML 注释，签名器不认）和 Info.plist 的 `NSAppleEventsUsageDescription`，
   不然直接拒绝（-1743），连询问框都不弹——就算「自动化」里给「在 SSHL 中打开」开了开关也没用（用户 2026-11-24 遇到过）。第一次点时系统问「SSHL」能不能控制访达。
