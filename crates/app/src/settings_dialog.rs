@@ -141,8 +141,10 @@ pub struct SettingsDialog {
     recorder: Option<Subscription>,
     /// 「关于」页刚点了「复制版本信息」：按钮写「已复制」，一会儿变回来。
     version_copied: bool,
-    /// 「终端」页正在装命令行 sshl（可能在等管理员授权框）。
-    cli_installing: bool,
+    /// 「集成」页两个入口装上了没有（后台读，读到之前是 None）。
+    launchers: Option<launchers::Status>,
+    /// 「集成」页正在装 / 去掉（可能在等管理员授权框、在重启访达）：这时按钮不响应。
+    launcher_busy: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -192,12 +194,14 @@ impl SettingsDialog {
             record_hint: false,
             recorder: None,
             version_copied: false,
-            cli_installing: false,
+            launchers: None,
+            launcher_busy: false,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
         this.custom_mode = !this.presets.iter().any(|p| p.family == this.snapshot.font_family);
         this.load_groups(window, cx);
+        this.refresh_launchers(cx);
         // 枚举系统字体约 100ms，放后台
         let fonts = backend::spawn(async { sshl_core::system_fonts::list_system_fonts().await.unwrap_or_default() });
         cx.spawn(async move |this, cx| {
@@ -787,52 +791,130 @@ impl SettingsDialog {
         div().id("terminal-themes").role(Role::RadioGroup).aria_label(tr!("配色")).grid().grid_cols(4).gap(px(6.)).children(cards)
     }
 
-    /// 「集成」页：从 SSHL 外面开终端的两个入口（`launchers`），访达工具栏按钮和命令行 sshl。按钮点了马上生效，不用保存。
-    /// 开发版（`cargo run`，没打包）没有这两样，只说一句。
+    /// 「集成」页：从 SSHL 外面开终端的两个入口（`launchers`），访达工具栏按钮和命令行 sshl，都是一键装上、一键去掉，不用保存。
+    /// 每项一行：名字 + ⓘ（说明在悬停提示里，用户：「不要写这么多字」）、右边是按钮。开发版（`cargo run`，没打包）没有这两样，只说一句。
     fn integration_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let section = |title: SharedString, hint: SharedString, action: AnyElement| {
+        let button = launchers::finder_button();
+        let script = launchers::cli_script();
+        if button.is_none() && script.is_none() {
+            return div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("开发版没有打包，这两样只在装好的 SSHL 里有")).into_any_element();
+        }
+        let status = self.launchers;
+        let row = |id: &'static str, title: &'static str, tip: &'static str, installed: Option<bool>, done: &'static str, install: AnyElement, remove: AnyElement| {
+            let tip = SharedString::from(tip);
+            let action = match installed {
+                Some(true) => div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(done))
+                    .child(remove)
+                    .into_any_element(),
+                Some(false) => install,
+                None => div().into_any_element(),
+            };
             div()
+                .min_h(px(36.))
                 .flex()
-                .flex_col()
-                .gap_2()
-                .child(kit::field_label(title))
-                .child(div().flex().items_center().gap_4().child(div().flex_1().min_w_0().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(hint)).child(action))
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(kit::field_label(title))
+                        .child(
+                            div()
+                                .id((id, 0usize))
+                                .text_color(theme::color(ui::MUTED_FOREGROUND))
+                                .child(kit::icon_sized(Icon::Info, 14.))
+                                .tooltip(move |window, cx| kit::tooltip(tip.clone(), window, cx)),
+                        ),
+                )
+                .child(action)
         };
-        let finder = launchers::finder_button().map(|path| {
-            section(
-                tr!("访达工具栏按钮").into(),
-                tr!("按住 ⌘ 把「在 SSHL 中打开」拖到访达窗口的工具栏上。点它就在访达当前的目录开一个本机终端；选中了一个文件夹时从那个文件夹开。").into(),
-                kit::labeled_button("finder-button-reveal", Variant::Outline, None, tr!("在访达中显示")).on_click(move |_, _, _| launchers::reveal(&path)).into_any_element(),
+        let busy = self.launcher_busy;
+        let finder = button.map(|button| {
+            let add = button.clone();
+            row(
+                "finder-toolbar",
+                tr!("访达工具栏按钮"),
+                tr!("点工具栏上的「$ |」按钮，就在访达当前的目录开一个本机终端。添加、移除时访达会重新打开一次。"),
+                status.and_then(|s| s.finder),
+                tr!("已添加"),
+                kit::labeled_button("finder-toolbar-add", Variant::Outline, None, tr!("添加"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let button = add.clone();
+                        this.launcher_job(move || launchers::add_to_finder(&button).map(|_| true), tr!("添加到访达工具栏失败"), window, cx)
+                    }))
+                    .into_any_element(),
+                kit::labeled_button("finder-toolbar-remove", Variant::Ghost, None, tr!("移除"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let button = button.clone();
+                        this.launcher_job(move || launchers::remove_from_finder(&button).map(|_| true), tr!("从访达工具栏移除失败"), window, cx)
+                    }))
+                    .into_any_element(),
             )
         });
-        let cli = launchers::cli_script().map(|script| {
-            let action = if launchers::cli_installed(&script) {
-                div().flex_shrink_0().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("已安装到 {}", launchers::CLI_LINK)).into_any_element()
-            } else {
-                let label = if self.cli_installing { tr!("安装中…") } else { tr!("安装") };
-                kit::labeled_button("cli-install", Variant::Outline, None, label)
-                    .on_click(cx.listener(move |this, _, window, cx| this.install_cli(script.clone(), window, cx)))
-                    .into_any_element()
-            };
-            section(tr!("命令行").into(), tr!("在终端里敲 sshl 目录（不写就是当前目录），就在 SSHL 里从那个目录开一个本机终端。").into(), action)
+        let cli = script.map(|script| {
+            row(
+                "cli",
+                tr!("命令行"),
+                tr!("在终端里敲 sshl 目录，就在 SSHL 里从那个目录开一个本机终端；不写目录就是当前目录。装在 /usr/local/bin/sshl。"),
+                status.and_then(|s| s.cli),
+                tr!("已安装"),
+                kit::labeled_button("cli-install", Variant::Outline, None, tr!("安装"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let script = script.clone();
+                        this.launcher_job(move || launchers::install_cli(&script), tr!("安装命令行失败"), window, cx)
+                    }))
+                    .into_any_element(),
+                kit::labeled_button("cli-remove", Variant::Ghost, None, tr!("移除"))
+                    .on_click(cx.listener(|this, _, window, cx| this.launcher_job(launchers::remove_cli, tr!("移除命令行失败"), window, cx)))
+                    .into_any_element(),
+            )
         });
-        let empty = (finder.is_none() && cli.is_none()).then(|| div().text_sm().text_color(theme::color(ui::MUTED_FOREGROUND)).child(tr!("开发版没有打包，这两样只在装好的 SSHL 里有")));
-        div().flex().flex_col().gap_6().flex_grow(1.).flex_shrink_0().children(finder).children(cli).children(empty).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .flex_grow(1.)
+            .flex_shrink_0()
+            .when(busy, |d| d.opacity(0.6))
+            .children(finder)
+            .children(cli)
+            .into_any_element()
     }
 
-    /// 装命令行 sshl：可能弹系统的管理员授权框，在后台线程上等，装完重画（按钮换成「已安装」）。
-    fn install_cli(&mut self, script: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cli_installing {
+    /// 读一次「集成」页两个入口的状态（起 osascript 读访达配置，放在后台）。
+    fn refresh_launchers(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let status = cx.background_spawn(async { launchers::Status::read() }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.launchers = Some(status);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 「集成」页的装上 / 去掉：可能弹系统的管理员授权框、要重启访达，在后台线程上做，做完重读状态（按钮跟着换）。
+    /// `job` 返回 Ok(false) = 授权框点了取消，不算失败。
+    fn launcher_job(&mut self, job: impl FnOnce() -> Result<bool, String> + Send + 'static, failure: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.launcher_busy {
             return;
         }
-        self.cli_installing = true;
+        self.launcher_busy = true;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_spawn(async move { launchers::install_cli(&script) }).await;
+            let (result, status) = cx.background_spawn(async move { (job(), launchers::Status::read()) }).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.cli_installing = false;
+                this.launcher_busy = false;
+                this.launchers = Some(status);
                 if let Err(error) = result {
-                    prompts::alert_later(window, cx, Options::new(tr!("安装命令行失败")).message(error));
+                    prompts::alert_later(window, cx, Options::new(failure).message(error));
                 }
                 cx.notify();
             });

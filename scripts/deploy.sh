@@ -41,6 +41,8 @@ fi
 # 套自定义图标：先清残留再用规范 icon.png 设置
 fileicon rm "$DST" 2>/dev/null || true
 fileicon set "$DST" "$ICON"
+# 访达工具栏按钮也套自定义图标：不然系统把它的线条图标套进一个圆角底框里，和工具栏上别的图标不一样（设置里「添加」时也会套）
+fileicon set "$DST/Contents/Helpers/Open in SSHL.app" "$ROOT/assets/finder-button/icon.icns" >/dev/null 2>&1 || true
 
 # 刷新 LaunchServices + Dock/Finder
 touch "$DST"

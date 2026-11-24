@@ -51,6 +51,9 @@
 	<string>__MIN_MACOS__</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- 访达工具栏按钮（Contents/Helpers/Open in SSHL.app）问访达当前目录：它算 SSHL 的，系统问的是 SSHL 能不能控制访达 -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SSHL reads the folder shown in Finder to open a terminal there.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SSHL needs local network access to connect to SSH servers on your LAN.</string>
 </dict>

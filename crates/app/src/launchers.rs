@@ -1,12 +1,35 @@
 //! 从 SSHL 外面打开终端的两个入口，都是让 SSHL「打开文件夹」（见 `open_request.rs`）：
-//! 访达工具栏按钮「在 SSHL 中打开」（`crates/finder-button`）和命令行 `sshl 目录`（`assets/bin/sshl`）。
-//! 两个都在 SSHL.app 里（scripts/bundle.sh 放进去），设置 →「终端」里显示 / 安装；`cargo run` 的开发版没有，那两行不显示。
+//! 访达工具栏按钮（`crates/finder-button`，图标是灰色线框里的「$ |」）和命令行 `sshl 目录`（`assets/bin/sshl`）。
+//! 两个都打包在 SSHL.app 里（scripts/bundle.sh），设置 →「集成」里一键装上、一键去掉；`cargo run` 的开发版没有，那一页只说一句。
+//!
+//! 访达按钮在 SSHL.app 包里面，按住 ⌘ 拖不上工具栏（用户 2026-11-24 试过），所以由我们直接改访达的工具栏配置（`finder_toolbar.js`），
+//! 再重启访达。它问访达当前目录时系统把它算成 SSHL 的：查的是 SSHL 有没有控制访达的权限（见 scripts/sign.sh）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// 命令行装到这里（链接到 SSHL.app 里的脚本）：macOS 默认的 PATH 里就有它。
 pub const CLI_LINK: &str = "/usr/local/bin/sshl";
+
+const FINDER_DOMAIN: &str = "com.apple.finder";
+const TOOLBAR_JS: &str = include_str!("finder_toolbar.js");
+
+/// 两个入口装上了没有；None = 这个 SSHL 没打包它们（开发版）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Status {
+    pub finder: Option<bool>,
+    pub cli: Option<bool>,
+}
+
+impl Status {
+    /// 要起一次 osascript 读访达的配置（一百多毫秒）：在后台取，对话框打开时和每次操作后各一次。
+    pub fn read() -> Self {
+        Status {
+            finder: finder_button().map(|button| toolbar("has", &button, FINDER_DOMAIN).as_deref() == Ok("yes")),
+            cli: cli_script().map(|script| links_to(Path::new(CLI_LINK), &script)),
+        }
+    }
+}
 
 /// 自己所在的 SSHL.app（`…/SSHL.app/Contents/MacOS/sshl`）。
 fn bundle() -> Option<PathBuf> {
@@ -15,7 +38,7 @@ fn bundle() -> Option<PathBuf> {
     (app.extension()? == "app").then(|| app.to_path_buf())
 }
 
-/// 访达工具栏按钮。
+/// SSHL.app 里的访达按钮。
 pub fn finder_button() -> Option<PathBuf> {
     bundle().map(|app| app.join("Contents/Helpers/Open in SSHL.app")).filter(|path| path.is_dir())
 }
@@ -25,44 +48,61 @@ pub fn cli_script() -> Option<PathBuf> {
     bundle().map(|app| app.join("Contents/Resources/bin/sshl")).filter(|path| path.is_file())
 }
 
-/// 在访达里选中它（按住 ⌘ 从那儿拖到工具栏上）。
-pub fn reveal(path: &Path) {
-    if let Err(error) = Command::new("/usr/bin/open").arg("-R").arg(path).spawn() {
-        tracing::warn!("reveal {}: {error}", path.display());
+/// 按钮加到访达工具栏上（已经有了就不重复加），重启访达。会阻塞，别在界面线程上调。
+pub fn add_to_finder(button: &Path) -> Result<(), String> {
+    toolbar("add", button, FINDER_DOMAIN)?;
+    restart_finder()
+}
+
+/// 从访达工具栏上去掉按钮，重启访达。
+pub fn remove_from_finder(button: &Path) -> Result<(), String> {
+    toolbar("remove", button, FINDER_DOMAIN)?;
+    restart_finder()
+}
+
+fn toolbar(action: &str, button: &Path, domain: &str) -> Result<String, String> {
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", TOOLBAR_JS, action])
+        .arg(button)
+        .arg(domain)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
-/// `link` 指向的就是 `script`（装过了，而且是这一个 SSHL 的）。
-pub fn cli_installed(script: &Path) -> bool {
-    links_to(Path::new(CLI_LINK), script)
-}
-
-fn links_to(link: &Path, script: &Path) -> bool {
-    matches!((std::fs::canonicalize(link), std::fs::canonicalize(script)), (Ok(a), Ok(b)) if a == b)
+/// 访达只在启动时读工具栏配置。窗口会关掉再按原样打开。
+fn restart_finder() -> Result<(), String> {
+    Command::new("/usr/bin/killall").arg("Finder").status().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 装命令行：/usr/local/bin/sshl 链接到 SSHL.app 里的脚本（以前装的链接换掉；那儿是别的程序的文件就不动）。
 /// 自己写不进去（/usr/local/bin 归 root）就用系统的授权框要管理员密码，同 VS Code 的「安装 code 命令」。
-/// 返回 Ok(false) = 用户在授权框里取消了。会阻塞（授权框），别在界面线程上调。
+/// Ok(false) = 授权框点了取消。会阻塞，别在界面线程上调。
 pub fn install_cli(script: &Path) -> Result<bool, String> {
     let link = Path::new(CLI_LINK);
     match link_in_place(link, script) {
-        Ok(()) => return Ok(true),
-        Err(LinkError::Taken) => return Err(tr!("{} 已经有别的文件，没有覆盖", CLI_LINK).to_string()),
-        Err(LinkError::Denied) => {}
+        Ok(()) => Ok(true),
+        Err(LinkError::Taken) => Err(tr!("{} 已经有别的文件，没有覆盖", CLI_LINK).to_string()),
+        Err(LinkError::Denied) => as_admin(&format!("mkdir -p /usr/local/bin && ln -sfn {} {}", shell_quote(script), shell_quote(link))),
     }
-    let command = format!("mkdir -p /usr/local/bin && ln -sfn {} {}", shell_quote(script), shell_quote(link));
-    let source = format!("do shell script \"{}\" with administrator privileges", command.replace('\\', "\\\\").replace('"', "\\\""));
-    let output = Command::new("/usr/bin/osascript").arg("-e").arg(source).output().map_err(|e| e.to_string())?;
-    if output.status.success() {
-        return Ok(true);
+}
+
+/// 去掉命令行：只删链接，那儿是别的程序的文件不动。
+pub fn remove_cli() -> Result<bool, String> {
+    let link = Path::new(CLI_LINK);
+    match std::fs::symlink_metadata(link) {
+        Err(_) => Ok(true),
+        Ok(meta) if !meta.file_type().is_symlink() => Err(tr!("{} 已经有别的文件，没有覆盖", CLI_LINK).to_string()),
+        Ok(_) => match std::fs::remove_file(link) {
+            Ok(()) => Ok(true),
+            Err(_) => as_admin(&format!("rm -f {}", shell_quote(link))),
+        },
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // 授权框点了取消：errUserCanceled
-    if stderr.contains("(-128)") {
-        return Ok(false);
-    }
-    Err(stderr.trim().to_string())
 }
 
 enum LinkError {
@@ -85,6 +125,25 @@ fn link_in_place(link: &Path, script: &Path) -> Result<(), LinkError> {
     std::os::unix::fs::symlink(script, link).map_err(|_| LinkError::Denied)
 }
 
+fn links_to(link: &Path, script: &Path) -> bool {
+    matches!((std::fs::canonicalize(link), std::fs::canonicalize(script)), (Ok(a), Ok(b)) if a == b)
+}
+
+/// 用系统的授权框以管理员身份跑一条命令。Ok(false) = 用户点了取消。
+fn as_admin(command: &str) -> Result<bool, String> {
+    let source = format!("do shell script \"{}\" with administrator privileges", command.replace('\\', "\\\\").replace('"', "\\\""));
+    let output = Command::new("/usr/bin/osascript").arg("-e").arg(source).output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 授权框点了取消：errUserCanceled
+    if stderr.contains("(-128)") {
+        return Ok(false);
+    }
+    Err(stderr.trim().to_string())
+}
+
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
 }
@@ -97,7 +156,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sshl-launchers-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        std::fs::canonicalize(dir).unwrap()
     }
 
     /// 没装过就建链接；装过别的版本（旧路径）的链接换成这一个；那儿是别人的文件不动。
@@ -122,6 +181,86 @@ mod tests {
         std::fs::write(&link, "someone else's").unwrap();
         assert!(matches!(link_in_place(&link, &script), Err(LinkError::Taken)));
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "someone else's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Dump {
+        ids: Vec<String>,
+        paths: std::collections::BTreeMap<String, Option<String>>,
+    }
+
+    /// 在一个临时的偏好设置域里演一遍：已有一个自定义按钮（别的程序的）时，加在它后面、不重复加；
+    /// 去掉只去掉我们的，别的按钮和它的位置还原；查得到 / 查不到。不碰真的访达配置。
+    #[test]
+    fn the_finder_toolbar_button_is_added_next_to_other_buttons_and_removed_cleanly() {
+        let dir = scratch("toolbar");
+        let other = dir.join("Other.app");
+        let ours = dir.join("SSHL.app/Contents/Helpers/Open in SSHL.app");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&ours).unwrap();
+        let domain = format!("me.qfdk.sshl.toolbar-test-{}", std::process::id());
+        let seed = dir.join("seed.plist");
+        let other_url = format!("file://{}/", other.display());
+        std::fs::write(
+            &seed,
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>NSToolbar Configuration Browser</key><dict>
+<key>TB Item Identifiers</key><array><string>com.apple.finder.BACK</string><string>com.apple.finder.loc </string><string>com.apple.finder.SWCH</string><string>com.apple.finder.SRCH</string></array>
+<key>TB Item Plists</key><dict><key>1</key><dict><key>_CFURLString</key><string>{other_url}</string><key>_CFURLStringType</key><integer>15</integer></dict></dict>
+<key>TB Is Shown</key><true/>
+</dict></dict></plist>"#
+            ),
+        )
+        .unwrap();
+        assert!(Command::new("/usr/bin/defaults").args(["import", &domain]).arg(&seed).status().unwrap().success());
+        let dump = || serde_json::from_str::<Dump>(&toolbar("dump", &ours, &domain).unwrap()).unwrap();
+        let path = |p: &Path| Some(p.to_string_lossy().to_string());
+
+        assert_eq!(toolbar("has", &ours, &domain).unwrap(), "no");
+        assert_eq!(toolbar("add", &ours, &domain).unwrap(), "ok");
+        assert_eq!(toolbar("add", &ours, &domain).unwrap(), "ok", "第二次不重复加");
+        let after = dump();
+        assert_eq!(after.ids, ["com.apple.finder.BACK", "com.apple.finder.loc ", "com.apple.finder.loc ", "com.apple.finder.SWCH", "com.apple.finder.SRCH"]);
+        assert_eq!(after.paths.get("1").cloned().flatten(), path(&other), "别的按钮不动");
+        assert_eq!(after.paths.get("2").cloned().flatten(), path(&ours), "加在它后面");
+        assert_eq!(toolbar("has", &ours, &domain).unwrap(), "yes");
+
+        assert_eq!(toolbar("remove", &ours, &domain).unwrap(), "ok");
+        let back = dump();
+        assert_eq!(back.ids, ["com.apple.finder.BACK", "com.apple.finder.loc ", "com.apple.finder.SWCH", "com.apple.finder.SRCH"]);
+        assert_eq!(back.paths.len(), 1);
+        assert_eq!(back.paths.get("1").cloned().flatten(), path(&other));
+        assert_eq!(toolbar("has", &ours, &domain).unwrap(), "no");
+
+        // 我们的夹在两个别的中间（用户自己拖过位置）：去掉后后面那个往前挪一格，指向不变
+        let third = dir.join("Third.app");
+        std::fs::create_dir_all(&third).unwrap();
+        let item = |p: &Path| format!("<dict><key>_CFURLString</key><string>file://{}/</string><key>_CFURLStringType</key><integer>15</integer></dict>", p.display().to_string().replace(' ', "%20"));
+        std::fs::write(
+            &seed,
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>NSToolbar Configuration Browser</key><dict>
+<key>TB Item Identifiers</key><array><string>com.apple.finder.BACK</string><string>com.apple.finder.loc </string><string>com.apple.finder.loc </string><string>com.apple.finder.loc </string><string>com.apple.finder.SRCH</string></array>
+<key>TB Item Plists</key><dict><key>1</key>{}<key>2</key>{}<key>3</key>{}</dict>
+</dict></dict></plist>"#,
+                item(&other),
+                item(&ours),
+                item(&third)
+            ),
+        )
+        .unwrap();
+        assert!(Command::new("/usr/bin/defaults").args(["import", &domain]).arg(&seed).status().unwrap().success());
+        assert_eq!(toolbar("has", &ours, &domain).unwrap(), "yes");
+        assert_eq!(toolbar("remove", &ours, &domain).unwrap(), "ok");
+        let middle = dump();
+        assert_eq!(middle.ids, ["com.apple.finder.BACK", "com.apple.finder.loc ", "com.apple.finder.loc ", "com.apple.finder.SRCH"]);
+        assert_eq!(middle.paths.get("1").cloned().flatten(), path(&other));
+        assert_eq!(middle.paths.get("2").cloned().flatten(), path(&third), "后面那个往前挪了一格");
+
+        let _ = Command::new("/usr/bin/defaults").args(["delete", &domain]).status();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

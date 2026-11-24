@@ -1,7 +1,9 @@
-//! 访达工具栏上的「在 SSHL 中打开」按钮（同 OpenInTerminal-Lite）：按住 ⌘ 把 `SSHL.app/Contents/Helpers/Open in SSHL.app`
-//! 拖到访达窗口的工具栏上。点它时问访达在哪个目录（选中了一个文件夹就用那个文件夹，否则最前面窗口的目录），
+//! 访达工具栏上的「在 SSHL 中打开」按钮（同 OpenInTerminal-Lite）：设置 →「集成」把 `SSHL.app/Contents/Helpers/Open in SSHL.app`
+//! 加到访达的工具栏上（它在 SSHL.app 包里面，按住 ⌘ 拖不上去）。点它时问访达最前面的窗口在哪个目录，
 //! `open -a SSHL 目录` 交给 SSHL（在那儿开一个本机终端标签、切到前台，见 crates/app/src/open_request.rs），然后退出。
-//! 第一次点时系统问要不要允许它控制访达；拒绝过的话弹框说去哪儿打开。
+//! 只看当前目录、不看选中的东西（用户 2026-11-24：选中了子文件夹时开到了子文件夹里，「没有在当前目录」）。
+//! 它在 SSHL.app 里面，系统把它算成 SSHL 的：第一次点时问的是「SSHL」能不能控制访达（SSHL 签名时带着 Apple Events 授权，
+//! 见 scripts/sign.sh）。拒绝过、或者出了别的错，都弹框说清楚，不悄悄开到别处。
 //!
 //! 单独一个小程序、不链接 GPUI：点一下就要出结果，起得越快越好。
 
@@ -16,22 +18,15 @@ use objc2::{class, msg_send};
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {}
 
-/// 选中的一个文件夹（或磁盘），否则最前面窗口的目录；窗口没有目录（「最近使用」、搜索结果）或者没有窗口时是桌面。
+/// 最前面窗口的目录；窗口没有目录（「最近使用」、搜索结果）或者没有窗口时是桌面（同访达新建文件夹的位置）。
 const FINDER_FOLDER: &str = r#"
 tell application "Finder"
-	set chosen to missing value
-	set picked to selection as list
-	if (count of picked) is 1 then
-		if class of (item 1 of picked) is in {folder, disk} then set chosen to item 1 of picked
-	end if
-	if chosen is missing value then
-		try
-			set chosen to target of front Finder window
-		on error
-			set chosen to desktop
-		end try
-	end if
-	return POSIX path of (chosen as alias)
+	try
+		set here to target of front Finder window
+	on error
+		set here to desktop
+	end try
+	return POSIX path of (here as alias)
 end tell
 "#;
 
@@ -45,13 +40,7 @@ fn main() {
     objc2::rc::autoreleasepool(|_| match run_script(FINDER_FOLDER) {
         Ok(path) => open_in_sshl(Path::new(&path)),
         Err(NOT_PERMITTED) => explain_permission(),
-        // 访达没在跑这类意外：照样开一个终端，从主目录开始
-        Err(code) => {
-            eprintln!("open-in-sshl: Finder error {code}");
-            if let Some(home) = std::env::var_os("HOME") {
-                open_in_sshl(Path::new(&home));
-            }
-        }
+        Err(code) => explain_error(code),
     });
 }
 
@@ -77,21 +66,37 @@ fn sshl_app() -> Option<PathBuf> {
 /// 不让控制访达：说去哪儿打开，给一个直达那一页的按钮。
 fn explain_permission() {
     let (title, message, open_settings, cancel) = if prefers_chinese() {
-        ("无法读取访达的当前目录", "请在「系统设置 → 隐私与安全性 → 自动化」里允许「在 SSHL 中打开」控制「访达」。", "打开系统设置", "取消")
+        ("无法读取访达的当前目录", "请在「系统设置 → 隐私与安全性 → 自动化」里允许「SSHL」控制「访达」。", "打开系统设置", "取消")
     } else {
-        ("Can't read Finder's current folder", "Allow “Open in SSHL” to control Finder in System Settings → Privacy & Security → Automation.", "Open System Settings", "Cancel")
+        ("Can't read Finder's current folder", "Allow SSHL to control Finder in System Settings → Privacy & Security → Automation.", "Open System Settings", "Cancel")
     };
+    if alert(title, message, &[cancel, open_settings]).as_deref() == Some(open_settings) {
+        let _ = Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation").status();
+    }
+}
+
+/// 问访达出了别的错：照实说（带错误号），不开到别的目录去。
+fn explain_error(code: i64) {
+    let (title, message, ok) = if prefers_chinese() {
+        ("无法读取访达的当前目录", format!("访达返回了错误 {code}。"), "好")
+    } else {
+        ("Can't read Finder's current folder", format!("Finder returned error {code}."), "OK")
+    };
+    alert(title, &message, &[ok]);
+}
+
+/// 弹一个框，返回点的按钮（最后一个是默认按钮）。
+fn alert(title: &str, message: &str, buttons: &[&str]) -> Option<String> {
     // 没有 NSApplication 时弹不出框：自己建一个，不进程序坞（Info.plist 里也是 LSUIElement）
     unsafe {
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let _: bool = msg_send![app, setActivationPolicy: 1isize];
     }
-    let script = format!(
-        "activate\nreturn button returned of (display alert \"{title}\" message \"{message}\" as critical buttons {{\"{cancel}\", \"{open_settings}\"}} default button \"{open_settings}\" cancel button \"{cancel}\")"
-    );
-    if run_script(&script).as_deref() == Ok(open_settings) {
-        let _ = Command::new("/usr/bin/open").arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation").status();
-    }
+    let quote = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+    let list = buttons.iter().map(|b| quote(b)).collect::<Vec<_>>().join(", ");
+    let default = quote(buttons.last()?);
+    let script = format!("activate\nreturn button returned of (display alert {} message {} as critical buttons {{{list}}} default button {default})", quote(title), quote(message));
+    run_script(&script).ok()
 }
 
 /// 系统首选语言是中文（同 SSHL 的「跟随系统」）。

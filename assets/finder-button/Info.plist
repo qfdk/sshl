@@ -36,7 +36,5 @@
 	<!-- 点一下就退出的小程序：不在程序坞里出现 -->
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Reads the folder shown in the front Finder window to open a terminal there in SSHL.</string>
 </dict>
 </plist>
