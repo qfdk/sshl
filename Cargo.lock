@@ -5918,7 +5918,7 @@ dependencies = [
 
 [[package]]
 name = "sshl"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -5941,7 +5941,7 @@ dependencies = [
 
 [[package]]
 name = "sshl-core"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5971,7 +5971,7 @@ dependencies = [
 
 [[package]]
 name = "sshl-finder-button"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "objc2 0.6.5",
 ]
