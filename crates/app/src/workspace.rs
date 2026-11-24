@@ -1830,6 +1830,8 @@ fn quit_question(tabs: usize) -> Option<String> {
 
 /// 按设置和系统外观定界面是浅色还是深色。变了才动：换掉 gpui-base 的颜色（输入框的字、光标）并重画。
 fn sync_appearance(window: &Window, cx: &mut App) {
+    // 访达工具栏按钮的图标跟系统外观（访达跟的是系统，不是 SSHL 设置里的外观；SSHL 不改窗口外观，这里拿到的就是系统的）
+    crate::launchers::follow_system_appearance(matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark));
     let dark = settings::get(cx).appearance.is_dark(window.appearance());
     if theme::set_dark(dark) {
         gpui_base::Theme::global_mut(cx).tokens = theme::base_tokens(dark);

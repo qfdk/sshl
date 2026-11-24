@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// 命令行装到这里（链接到 SSHL.app 里的脚本）：macOS 默认的 PATH 里就有它。
 pub const CLI_LINK: &str = "/usr/local/bin/sshl";
@@ -48,10 +50,57 @@ pub fn cli_script() -> Option<PathBuf> {
     bundle().map(|app| app.join("Contents/Resources/bin/sshl")).filter(|path| path.is_file())
 }
 
-/// 按钮加到访达工具栏上（已经有了就不重复加），重启访达。会阻塞，别在界面线程上调。
+/// 按钮加到访达工具栏上（已经有了就不重复加），按系统外观设好图标，重启访达。会阻塞，别在界面线程上调。
 pub fn add_to_finder(button: &Path) -> Result<(), String> {
     toolbar("add", button, FINDER_DOMAIN)?;
+    if let Err(error) = set_button_icon(button, SYSTEM_DARK.load(Ordering::SeqCst) == DARK) {
+        tracing::warn!("finder button icon: {error}");
+    }
     restart_finder()
+}
+
+const LIGHT: u8 = 1;
+const DARK: u8 = 2;
+/// 系统现在是浅色还是深色（0 = 还不知道，当浅色）：访达跟的是系统外观，不是 SSHL 设置里的外观。
+static SYSTEM_DARK: AtomicU8 = AtomicU8::new(0);
+static ICON_LOCK: Mutex<()> = Mutex::new(());
+
+/// 系统外观（启动时、系统切换深浅色时，`workspace::sync_appearance`）：按钮在工具栏上的话换成对应的图标。
+/// 自定义图标不会自己跟着深浅色变，只能换掉：浅色工具栏上用深灰的，深色工具栏上用浅灰的（深灰在深色工具栏上看不清）。
+/// 每个进程第一次也换一次：SSHL 被整个换掉（更新）后包里的自定义图标就没了，启动时补回来。在后台线程里做（要起 osascript）。
+pub fn follow_system_appearance(dark: bool) {
+    let want = if dark { DARK } else { LIGHT };
+    if SYSTEM_DARK.swap(want, Ordering::SeqCst) == want {
+        return;
+    }
+    let Some(button) = finder_button() else { return };
+    std::thread::spawn(move || {
+        // 连着切了两次：后跑的那个按最新的来，不会把旧的盖回去
+        let _guard = ICON_LOCK.lock();
+        if toolbar("has", &button, FINDER_DOMAIN).as_deref() != Ok("yes") {
+            return;
+        }
+        if let Err(error) = set_button_icon(&button, SYSTEM_DARK.load(Ordering::SeqCst) == DARK) {
+            tracing::warn!("finder button icon: {error}");
+        }
+    });
+}
+
+/// 给按钮设访达自定义图标（深色 / 浅色那一套），再告诉访达它变了：访达不用重启，工具栏上的图标当场换掉（实测）。
+/// 设自定义图标还为了去掉系统给不是圆角方形的应用图标套的底框（同 OpenInTerminal-Lite 的做法）。
+fn set_button_icon(button: &Path, dark: bool) -> Result<(), String> {
+    const SET_ICON: &str = "ObjC.import('AppKit');
+function run(argv) {
+  const image = $.NSImage.alloc.initWithContentsOfFile(argv[1]);
+  if (image.isNil()) throw new Error('no icon ' + argv[1]);
+  const done = $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[0], 0);
+  $.NSWorkspace.sharedWorkspace.noteFileSystemChanged(argv[0]);
+  return done ? 'ok' : 'failed';
+}";
+    let icns = button.join(if dark { "Contents/Resources/icon-dark.icns" } else { "Contents/Resources/icon.icns" });
+    let output = Command::new("/usr/bin/osascript").args(["-l", "JavaScript", "-e", SET_ICON]).arg(button).arg(&icns).output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout == "ok" { Ok(()) } else { Err(format!("{stdout} {}", String::from_utf8_lossy(&output.stderr).trim())) }
 }
 
 /// 从访达工具栏上去掉按钮，重启访达。
@@ -261,6 +310,28 @@ mod tests {
         assert_eq!(middle.paths.get("2").cloned().flatten(), path(&third), "后面那个往前挪了一格");
 
         let _ = Command::new("/usr/bin/defaults").args(["delete", &domain]).status();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 设访达自定义图标：浅色、深色各设一次，都设上了（包里多一个带资源分支的 Icon\r），两次的图标不一样。
+    #[test]
+    fn the_button_gets_the_custom_icon_for_each_appearance() {
+        let dir = scratch("icon");
+        let button = dir.join("Open in SSHL.app");
+        let resources = button.join("Contents/Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/finder-button");
+        std::fs::copy(assets.join("icon.icns"), resources.join("icon.icns")).unwrap();
+        std::fs::copy(assets.join("icon-dark.icns"), resources.join("icon-dark.icns")).unwrap();
+        let fork = || Command::new("/usr/bin/xattr").args(["-px", "com.apple.ResourceFork"]).arg(button.join("Icon\r")).output().unwrap().stdout;
+
+        set_button_icon(&button, false).unwrap();
+        let light = fork();
+        assert!(!light.is_empty(), "浅色图标设上了");
+        set_button_icon(&button, true).unwrap();
+        let dark = fork();
+        assert!(!dark.is_empty(), "深色图标设上了");
+        assert_ne!(light, dark, "换成了另一套");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

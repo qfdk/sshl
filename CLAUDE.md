@@ -420,7 +420,10 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   自定义按钮是 `com.apple.finder.loc `、指向记在 `TB Item Plists` 里、键是它在那一排里的位置；只动我们那一项，加在已有的自定义按钮后面），再 `killall Finder`。
   有测试在临时偏好设置域里演一遍，不碰真的访达配置。访达会把它存成文件引用（`file:///.file/id=…`），查「已添加」时换成路径再比。
   添加时还给它设访达自定义图标（deploy.sh 也设）：macOS 26 起不是圆角方形的应用图标会被系统套进一个浅色底框（和编译用的 SDK 版本无关，实测过），
-  OpenInTerminal-Lite 没被套也是因为它有自定义图标。
+  OpenInTerminal-Lite 没被套也是因为它有自定义图标。**深色模式**（用户：「有没有暗色模式的？」）：自定义图标不会自己跟着深浅色变，
+  所以有两套（`icon.icns` 深灰、`icon-dark.icns` 浅灰，同一个脚本加 `dark` 生成），SSHL 跟着**系统**外观换（`launchers::follow_system_appearance`，
+  挂在 `workspace::sync_appearance` 上：启动时、系统切深浅色时；访达跟系统走，不跟 SSHL 设置里的外观，SSHL 不改窗口外观所以 `window.appearance()` 就是系统的），
+  按钮在工具栏上才换，换完 `noteFileSystemChanged`，访达不用重启当场换掉（实测）。每个进程第一次也换一次：SSHL 被整个换掉后包里的自定义图标就没了，启动时补回来。
   **权限**：它在 SSHL.app 里面，系统把它算成 SSHL 的——tccd 查的是 `me.qfdk.sshl`，开了 hardened runtime 时 SSHL 自己也得带
   `com.apple.security.automation.apple-events`（`assets/entitlements.plist`，里面不能写 XML 注释，签名器不认）和 Info.plist 的 `NSAppleEventsUsageDescription`，
   不然直接拒绝（-1743），连询问框都不弹——就算「自动化」里给「在 SSHL 中打开」开了开关也没用（用户 2026-11-24 遇到过）。第一次点时系统问「SSHL」能不能控制访达。

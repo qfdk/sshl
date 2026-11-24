@@ -2,10 +2,14 @@
 // 用户 2026-11-24 一路试过：SSHL 的彩色图标放工具栏上「颜色不好看」；框里写字体的「$」不如线条好看；线条画的「$ |」「# |」
 // 都挤在框的左边、右半边空着（「$ 过于占地方」）；「> |」像播放器的「跳到末尾」。「>_」的尖角在上、下划线往右下铺开，正好撑满横向的框；
 // 和 OpenInTerminal 撞了也没关系（用户：「撞了应该问题也不大」）。
+// 深色版（访达在深色模式下工具栏是深色的，深灰线条看不清）：同样的形状，浅灰色。SSHL 跟着系统外观换按钮的自定义图标（launchers.rs）。
 // 重新生成：swift scripts/finder-button-icon.swift /tmp/x.iconset && iconutil -c icns /tmp/x.iconset -o assets/finder-button/icon.icns
+//          swift scripts/finder-button-icon.swift /tmp/d.iconset dark && iconutil -c icns /tmp/d.iconset -o assets/finder-button/icon-dark.icns
 import AppKit
 
-let gray = NSColor(srgbRed: 0x66 / 255.0, green: 0x66 / 255.0, blue: 0x66 / 255.0, alpha: 1)
+// 浅色同 OpenInTerminal-Lite 的灰；深色和它对深色工具栏的对比度差不多
+let level: CGFloat = CommandLine.arguments.dropFirst(2).first == "dark" ? 0xB4 : 0x66
+let gray = NSColor(srgbRed: level / 255.0, green: level / 255.0, blue: level / 255.0, alpha: 1)
 let stroke: CGFloat = 10
 
 func render(_ pixels: Int) -> NSBitmapImageRep {

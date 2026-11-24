@@ -120,7 +120,8 @@ pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
         Variant::Ghost => base
             .text_color(theme::color(ui::FOREGROUND))
             .hover(|s| s.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND))),
-        Variant::DestructiveGhost => base.text_color(theme::color(ui::DESTRUCTIVE)).hover(|s| s.bg(theme::alpha(ui::DESTRUCTIVE, 0.1))),
+        // 字用文字那一号的红（深浅两种外观在卡片上都 ≥ 4.5:1，有测试），按钮那一号的红做字太淡
+        Variant::DestructiveGhost => base.text_color(theme::color(ui::DESTRUCTIVE_FOREGROUND)).hover(|s| s.bg(theme::alpha(ui::DESTRUCTIVE, 0.1))),
     }
 }
 

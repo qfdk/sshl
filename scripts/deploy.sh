@@ -41,8 +41,11 @@ fi
 # 套自定义图标：先清残留再用规范 icon.png 设置
 fileicon rm "$DST" 2>/dev/null || true
 fileicon set "$DST" "$ICON"
-# 访达工具栏按钮也套自定义图标：不然系统把它的线条图标套进一个圆角底框里，和工具栏上别的图标不一样（设置里「添加」时也会套）
-fileicon set "$DST/Contents/Helpers/Open in SSHL.app" "$ROOT/assets/finder-button/icon.icns" >/dev/null 2>&1 || true
+# 访达工具栏按钮也套自定义图标：不然系统把它的线条图标套进一个圆角底框里，和工具栏上别的图标不一样。
+# 按系统外观挑深色 / 浅色那一套（SSHL 启动后、系统切换深浅色时也会自己换，见 launchers.rs）
+BUTTON_ICON=icon.icns
+[ "$(defaults read -g AppleInterfaceStyle 2>/dev/null)" = Dark ] && BUTTON_ICON=icon-dark.icns
+fileicon set "$DST/Contents/Helpers/Open in SSHL.app" "$ROOT/assets/finder-button/$BUTTON_ICON" >/dev/null 2>&1 || true
 
 # 刷新 LaunchServices + Dock/Finder
 touch "$DST"

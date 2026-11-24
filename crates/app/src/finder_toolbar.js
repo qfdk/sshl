@@ -3,7 +3,6 @@
 // 自定义按钮的标识是 "com.apple.finder.loc "（带一个空格），它指向哪个文件记在 TB Item Plists 里，键是它在那一排里的位置。
 // 只动我们那一项，别的按钮（包括它们的 alias 数据）原样留着。改完要重启访达才生效（launchers.rs 做）。
 ObjC.import('Foundation');
-ObjC.import('AppKit');
 
 const KEY = 'NSToolbar Configuration Browser';
 const LOC = 'com.apple.finder.loc ';
@@ -97,11 +96,6 @@ function run(argv) {
     item.setObjectForKey($(15), '_CFURLStringType');
     next[at] = item;
     changed = next;
-    // 访达自定义图标：系统会把不是圆角方形的应用图标套进一个底框，工具栏上就不像别的线条图标了（同 OpenInTerminal-Lite 的做法）
-    const icns = target + '/Contents/Resources/icon.icns';
-    if ($.NSFileManager.defaultManager.fileExistsAtPath(icns)) {
-      $.NSWorkspace.sharedWorkspace.setIconForFileOptions($.NSImage.alloc.initWithContentsOfFile(icns), target, 0);
-    }
   } else {
     throw new Error('unknown action ' + action);
   }
