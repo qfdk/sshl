@@ -1,6 +1,6 @@
 #!/bin/sh
 # sshl [目录]：在 SSHL 里从这个目录开一个本机终端标签，切到 SSHL（不写目录就是当前目录；给的是文件就用它所在的目录）。
-# SSHL 设置 →「终端」→「命令行」把它链接到 /usr/local/bin/sshl。SSHL 收到的是「打开文件夹」，见 crates/app/src/open_request.rs。
+# SSHL 设置 →「集成」→「命令行」把它链接到 /usr/local/bin/sshl。SSHL 收到的是「打开文件夹」，见 crates/app/src/open_request.rs。
 case $1 in
   -h|--help) echo "usage: sshl [directory]"; exit 0 ;;
 esac
