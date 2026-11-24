@@ -1,7 +1,7 @@
-// 访达工具栏按钮的图标：同 OpenInTerminal-Lite 的灰色线框风格（访达工具栏上别的图标也是灰色线条），框里是「$ |」：
-// 提示符加 SSHL 终端默认的竖线光标。用户 2026-11-24：SSHL 的彩色图标放在工具栏上「颜色并不是特别好看」，「不要用方块」，
-// 竖线「不要太居中，要靠左」；用字体里的「$」时「不如 OpenInTerminal 的好看」——它的「>_」是和外框同粗、圆头的线条，
-// 所以「$」也照 Lucide 的 dollar-sign 用同粗的圆头线条画（几版并排比过，这一版的「$」够大、中间不糊）。
+// 访达工具栏按钮的图标：灰色线框里一个「>_」，同 Lucide 的 terminal 和 OpenInTerminal-Lite 的风格（访达工具栏上别的图标也是灰色线条）。
+// 用户 2026-11-24 一路试过：SSHL 的彩色图标放工具栏上「颜色不好看」；框里写字体的「$」不如线条好看；线条画的「$ |」「# |」
+// 都挤在框的左边、右半边空着（「$ 过于占地方」）；「> |」像播放器的「跳到末尾」。「>_」的尖角在上、下划线往右下铺开，正好撑满横向的框；
+// 和 OpenInTerminal 撞了也没关系（用户：「撞了应该问题也不大」）。
 // 重新生成：swift scripts/finder-button-icon.swift /tmp/x.iconset && iconutil -c icns /tmp/x.iconset -o assets/finder-button/icon.icns
 import AppKit
 
@@ -21,31 +21,17 @@ func render(_ pixels: Int) -> NSBitmapImageRep {
     frame.lineWidth = stroke * s
     frame.stroke()
 
-    // 「$」：Lucide dollar-sign 的形状（24 格坐标），放大 3.6 倍，竖笔只伸出 S 上下各 1.6 格
-    let scale: CGFloat = 3.6, ox: CGFloat = 66, oy: CGFloat = 102
-    func lucide(_ x: CGFloat, _ y: CGFloat) -> NSPoint { pt(ox + (x - 6) * scale, oy + (y - 5) * scale) }
-    let dollar = NSBezierPath()
-    dollar.move(to: lucide(12, 5 - 1.6))
-    dollar.line(to: lucide(12, 19 + 1.6))
-    dollar.move(to: lucide(17, 5))
-    dollar.line(to: lucide(9.5, 5))
-    for i in 1...48 {
-        let t = -CGFloat.pi / 2 - CGFloat.pi * CGFloat(i) / 48
-        dollar.line(to: lucide(9.5 + 3.5 * cos(t), 8.5 + 3.5 * sin(t)))
-    }
-    dollar.line(to: lucide(14.5, 12))
-    for i in 1...48 {
-        let t = -CGFloat.pi / 2 + CGFloat.pi * CGFloat(i) / 48
-        dollar.line(to: lucide(14.5 + 3.5 * cos(t), 15.5 + 3.5 * sin(t)))
-    }
-    dollar.line(to: lucide(6, 19))
-    // 竖线光标：一整行高，跟在「$」后面隔一小段
-    dollar.move(to: pt(136, 96))
-    dollar.line(to: pt(136, 158))
-    dollar.lineWidth = stroke * s
-    dollar.lineCapStyle = .round
-    dollar.lineJoinStyle = .round
-    dollar.stroke()
+    // 「>」和「_」：和外框同粗的圆头线条
+    let glyph = NSBezierPath()
+    glyph.move(to: pt(76, 100))
+    glyph.line(to: pt(100, 122))
+    glyph.line(to: pt(76, 144))
+    glyph.move(to: pt(112, 160))
+    glyph.line(to: pt(150, 160))
+    glyph.lineWidth = stroke * s
+    glyph.lineCapStyle = .round
+    glyph.lineJoinStyle = .round
+    glyph.stroke()
     NSGraphicsContext.restoreGraphicsState()
     return rep
 }

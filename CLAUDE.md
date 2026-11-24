@@ -411,8 +411,9 @@ NOTARY_PROFILE=<配置名> scripts/release.sh   # 发布包：Developer ID 签�
   拖文件夹到程序坞图标上也行。事件冷启动时在窗口建好之前就到、关窗口后回来时和窗口激活前后脚到：GPUI 的 `on_open_urls` 回调里先同步记进
   `open_request` 的队列再叫工作区，`open_terminal_on_launch` 也先看队列——有请求就只开请求的目录，不再多开一个主目录的（冷启动、藏起来再叫出来都实测过）。
   设置 →「集成」两项都是一键装上、一键去掉（`launchers.rs`），每项一行：名字 + ⓘ（说明在悬停提示里，用户：「不要写这么多字」）+ 按钮。
-  **访达工具栏按钮**是 `SSHL.app/Contents/Helpers/Open in SSHL.app`（`crates/finder-button`，LSUIElement，图标是灰色线框里的「$ |」，
-  `scripts/finder-button-icon.swift` 生成，同 OpenInTerminal-Lite 的 `>_` 风格；用户：「不要用方块」「竖线靠左」，SSHL 的彩色图标放工具栏上「颜色不好看」）。
+  **访达工具栏按钮**是 `SSHL.app/Contents/Helpers/Open in SSHL.app`（`crates/finder-button`，LSUIElement，图标是灰色线框里的「>_」，
+  `scripts/finder-button-icon.swift` 生成，和外框同粗的圆头线条，同 Lucide terminal / OpenInTerminal-Lite；试过的「$ |」「# |」「> |」、
+  字体画的「$」、SSHL 的彩色图标都被否了，原因写在那个脚本开头）。
   点它：用 NSAppleScript 问访达最前面窗口的目录（只看当前目录，不看选中的东西——选中子文件夹时开到子文件夹里，用户说「没有在当前目录」），
   `open -a` 它外面那个 SSHL.app。不用户自己拖：它在应用包里面，按住 ⌘ 拖不上工具栏（SSHL.app 本身拖得上去，但点它只是打开 SSHL、不带目录）；
   「添加」直接改访达的工具栏配置（`finder_toolbar.js`，osascript 跑的 JXA：com.apple.finder 的 `NSToolbar Configuration Browser`，

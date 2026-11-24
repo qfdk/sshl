@@ -841,7 +841,7 @@ impl SettingsDialog {
             row(
                 "finder-toolbar",
                 tr!("访达工具栏按钮"),
-                tr!("点工具栏上的「$ |」按钮，就在访达当前的目录开一个本机终端。添加、移除时访达会重新打开一次。"),
+                tr!("点工具栏上的「>_」按钮，就在访达当前的目录开一个本机终端。添加、移除时访达会重新打开一次。"),
                 status.and_then(|s| s.finder),
                 tr!("已添加"),
                 kit::labeled_button("finder-toolbar-add", Variant::Outline, None, tr!("添加"))

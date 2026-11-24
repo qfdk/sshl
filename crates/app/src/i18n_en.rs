@@ -314,7 +314,7 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("访达工具栏按钮", "Finder toolbar button"),
     ("命令行", "Command line"),
     ("集成", "Integration"),
-    ("点工具栏上的「$ |」按钮，就在访达当前的目录开一个本机终端。添加、移除时访达会重新打开一次。", "Click the “$ |” button in Finder's toolbar to open a local terminal in the folder Finder shows. Finder relaunches once when you add or remove it."),
+    ("点工具栏上的「>_」按钮，就在访达当前的目录开一个本机终端。添加、移除时访达会重新打开一次。", "Click the “>_” button in Finder's toolbar to open a local terminal in the folder Finder shows. Finder relaunches once when you add or remove it."),
     ("在终端里敲 sshl 目录，就在 SSHL 里从那个目录开一个本机终端；不写目录就是当前目录。装在 /usr/local/bin/sshl。", "Type sshl <folder> in a terminal to open a local terminal there in SSHL; without a folder it uses the current one. Installed at /usr/local/bin/sshl."),
     ("已添加", "Added"),
     ("已安装", "Installed"),

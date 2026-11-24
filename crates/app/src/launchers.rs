@@ -1,5 +1,5 @@
 //! 从 SSHL 外面打开终端的两个入口，都是让 SSHL「打开文件夹」（见 `open_request.rs`）：
-//! 访达工具栏按钮（`crates/finder-button`，图标是灰色线框里的「$ |」）和命令行 `sshl 目录`（`assets/bin/sshl`）。
+//! 访达工具栏按钮（`crates/finder-button`，图标是灰色线框里的「>_」）和命令行 `sshl 目录`（`assets/bin/sshl`）。
 //! 两个都打包在 SSHL.app 里（scripts/bundle.sh），设置 →「集成」里一键装上、一键去掉；`cargo run` 的开发版没有，那一页只说一句。
 //!
 //! 访达按钮在 SSHL.app 包里面，按住 ⌘ 拖不上工具栏（用户 2026-11-24 试过），所以由我们直接改访达的工具栏配置（`finder_toolbar.js`），
