@@ -850,7 +850,7 @@ impl SettingsDialog {
                         this.launcher_job(move || launchers::add_to_finder(&button).map(|_| true), tr!("添加到访达工具栏失败"), window, cx)
                     }))
                     .into_any_element(),
-                kit::labeled_button("finder-toolbar-remove", Variant::Ghost, None, tr!("移除"))
+                kit::labeled_button("finder-toolbar-remove", Variant::DestructiveGhost, None, tr!("移除"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let button = button.clone();
                         this.launcher_job(move || launchers::remove_from_finder(&button).map(|_| true), tr!("从访达工具栏移除失败"), window, cx)
@@ -871,7 +871,7 @@ impl SettingsDialog {
                         this.launcher_job(move || launchers::install_cli(&script), tr!("安装命令行失败"), window, cx)
                     }))
                     .into_any_element(),
-                kit::labeled_button("cli-remove", Variant::Ghost, None, tr!("移除"))
+                kit::labeled_button("cli-remove", Variant::DestructiveGhost, None, tr!("移除"))
                     .on_click(cx.listener(|this, _, window, cx| this.launcher_job(launchers::remove_cli, tr!("移除命令行失败"), window, cx)))
                     .into_any_element(),
             )

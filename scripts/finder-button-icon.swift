@@ -1,9 +1,12 @@
-// 访达工具栏按钮「在 SSHL 中打开」的图标：同 OpenInTerminal-Lite 的灰色线框风格（访达工具栏上别的图标也是灰色线条），
-// 框里是「$ |」：提示符加 SSHL 终端默认的竖线光标（用户 2026-11-24：「不要用方块」「$ |」）。用户 2026-11-24：用 SSHL 的彩色应用图标放在工具栏上「颜色并不是特别好看」。
+// 访达工具栏按钮的图标：同 OpenInTerminal-Lite 的灰色线框风格（访达工具栏上别的图标也是灰色线条），框里是「$ |」：
+// 提示符加 SSHL 终端默认的竖线光标。用户 2026-11-24：SSHL 的彩色图标放在工具栏上「颜色并不是特别好看」，「不要用方块」，
+// 竖线「不要太居中，要靠左」；用字体里的「$」时「不如 OpenInTerminal 的好看」——它的「>_」是和外框同粗、圆头的线条，
+// 所以「$」也照 Lucide 的 dollar-sign 用同粗的圆头线条画（几版并排比过，这一版的「$」够大、中间不糊）。
 // 重新生成：swift scripts/finder-button-icon.swift /tmp/x.iconset && iconutil -c icns /tmp/x.iconset -o assets/finder-button/icon.icns
 import AppKit
 
 let gray = NSColor(srgbRed: 0x66 / 255.0, green: 0x66 / 255.0, blue: 0x66 / 255.0, alpha: 1)
+let stroke: CGFloat = 10
 
 func render(_ pixels: Int) -> NSBitmapImageRep {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels, bitsPerSample: 8, samplesPerPixel: 4,
@@ -11,20 +14,38 @@ func render(_ pixels: Int) -> NSBitmapImageRep {
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let s = CGFloat(pixels) / 256
-    // 按 256 的画布、左上角为原点来写，换成 AppKit 的左下角原点
-    func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> NSRect { NSRect(x: x * s, y: (256 - y - h) * s, width: w * s, height: h * s) }
+    // 按 256 的画布、左上角为原点来写
+    func pt(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: x * s, y: (256 - y) * s) }
     gray.setStroke()
-    gray.setFill()
-    let frame = NSBezierPath(roundedRect: rect(35.5, 53.5, 185, 147), xRadius: 22 * s, yRadius: 22 * s)
-    frame.lineWidth = 10 * s
+    let frame = NSBezierPath(roundedRect: NSRect(x: 35.5 * s, y: (256 - 53.5 - 147) * s, width: 185 * s, height: 147 * s), xRadius: 22 * s, yRadius: 22 * s)
+    frame.lineWidth = stroke * s
     frame.stroke()
-    // 「$」：等宽半粗，和框的线差不多粗（几版对比过：粗体太重，竖线离远了显得散）
-    let font = NSFont.monospacedSystemFont(ofSize: 70 * s, weight: .semibold)
-    let dollar = NSAttributedString(string: "$", attributes: [.font: font, .foregroundColor: gray])
-    let size = dollar.size()
-    dollar.draw(at: NSPoint(x: 70 * s, y: (256 - 127) * s - size.height / 2))
-    // 竖线光标：和框一样粗，紧跟在「$」后面靠左（同终端里提示符后的光标；用户：「不要太居中，要靠左」）
-    NSBezierPath(roundedRect: rect(124, 100, 9, 54), xRadius: 4.5 * s, yRadius: 4.5 * s).fill()
+
+    // 「$」：Lucide dollar-sign 的形状（24 格坐标），放大 3.6 倍，竖笔只伸出 S 上下各 1.6 格
+    let scale: CGFloat = 3.6, ox: CGFloat = 66, oy: CGFloat = 102
+    func lucide(_ x: CGFloat, _ y: CGFloat) -> NSPoint { pt(ox + (x - 6) * scale, oy + (y - 5) * scale) }
+    let dollar = NSBezierPath()
+    dollar.move(to: lucide(12, 5 - 1.6))
+    dollar.line(to: lucide(12, 19 + 1.6))
+    dollar.move(to: lucide(17, 5))
+    dollar.line(to: lucide(9.5, 5))
+    for i in 1...48 {
+        let t = -CGFloat.pi / 2 - CGFloat.pi * CGFloat(i) / 48
+        dollar.line(to: lucide(9.5 + 3.5 * cos(t), 8.5 + 3.5 * sin(t)))
+    }
+    dollar.line(to: lucide(14.5, 12))
+    for i in 1...48 {
+        let t = -CGFloat.pi / 2 + CGFloat.pi * CGFloat(i) / 48
+        dollar.line(to: lucide(14.5 + 3.5 * cos(t), 15.5 + 3.5 * sin(t)))
+    }
+    dollar.line(to: lucide(6, 19))
+    // 竖线光标：一整行高，跟在「$」后面隔一小段
+    dollar.move(to: pt(136, 96))
+    dollar.line(to: pt(136, 158))
+    dollar.lineWidth = stroke * s
+    dollar.lineCapStyle = .round
+    dollar.lineJoinStyle = .round
+    dollar.stroke()
     NSGraphicsContext.restoreGraphicsState()
     return rep
 }

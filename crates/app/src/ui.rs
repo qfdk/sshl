@@ -81,6 +81,8 @@ pub enum Variant {
     Outline,
     Ghost,
     Destructive,
+    /// 红字、没有底色，悬停时浅红底：行里的「移除」这类次要的删除按钮（实心红的 Destructive 留给确认框）。
+    DestructiveGhost,
 }
 
 /// 按钮外壳：h-9、圆角 8px、14px 中等字重。调用方加图标 / 文字和 on_click。
@@ -118,6 +120,7 @@ pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
         Variant::Ghost => base
             .text_color(theme::color(ui::FOREGROUND))
             .hover(|s| s.bg(theme::color(ui::ACCENT)).text_color(theme::color(ui::ACCENT_FOREGROUND))),
+        Variant::DestructiveGhost => base.text_color(theme::color(ui::DESTRUCTIVE)).hover(|s| s.bg(theme::alpha(ui::DESTRUCTIVE, 0.1))),
     }
 }
 
