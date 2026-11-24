@@ -43,7 +43,20 @@ function run(argv) {
     const file = url.filePathURL;
     return file.isNil() ? null : file.path.js.replace(/\/+$/, '');
   };
-  const ours = Object.keys(plists).map(Number).filter((i) => ids[i] === LOC && pathOf(plists[i]) === target);
+  // SSHL 被整个换掉（更新、重新安装）后文件引用指着已经没了的那份，访达下次显示时才顺着 alias 里记的路径找回来：
+  // 这期间按 alias 里记的名字认
+  const name = target.split('/').pop();
+  const aliasText = (item) => {
+    const data = item.objectForKey('_CFURLAliasData');
+    if (data.isNil()) return '';
+    const text = $.NSString.alloc.initWithDataEncoding(data, $.NSISOLatin1StringEncoding);
+    return text.isNil() ? '' : text.js;
+  };
+  const isOurs = (item) => {
+    const path = pathOf(item);
+    return path === target || (path === null && aliasText(item).includes(name));
+  };
+  const ours = Object.keys(plists).map(Number).filter((i) => ids[i] === LOC && isOurs(plists[i]));
 
   if (action === 'has') return ours.length > 0 ? 'yes' : 'no';
   if (action === 'dump') {
