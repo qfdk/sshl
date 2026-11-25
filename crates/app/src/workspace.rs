@@ -421,9 +421,14 @@ impl Workspace {
     }
 
     /// 关窗口（红点、没有标签时 ⌘W）：只把应用藏起来，会话、预热连接、界面都留着；记下来，回来时当作重新打开（`reopened`）。
-    pub(crate) fn close_window(&mut self, cx: &mut Context<Self>) {
+    /// 在原生全屏里先退出全屏、退完再藏（系统不藏全屏里的应用，见 `fullscreen.rs`）。
+    pub(crate) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.closed = true;
-        cx.hide();
+        if window.is_fullscreen() {
+            crate::fullscreen::hide_after_exit(window);
+        } else {
+            cx.hide();
+        }
     }
 
     /// 关过窗口之后又回来了（点程序坞、⌘Tab、再 open 一次）：同打开 SSHL——没有标签就开本机终端，检查更新。
@@ -1399,7 +1404,7 @@ impl Workspace {
         self.finish_rename(true, window, cx);
         match self.active.clone() {
             Some(id) => self.disconnect(&id, window, cx),
-            None => self.close_window(cx),
+            None => self.close_window(window, cx),
         }
     }
 

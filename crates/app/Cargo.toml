@@ -24,6 +24,8 @@ accesskit = "0.24.1"
 accesskit_macos = "0.26.3"
 # 启动时自己问一次窗口的焦点元素，把无障碍树提前建好（见 main.rs）；gpui 已经带着这一版。
 objc2 = "0.6"
+# 听 AppKit 的通知要传 block（全屏里关窗口，见 fullscreen.rs）；gpui 已经带着这一版。
+block2 = "0.6"
 
 # 终端模拟：Ghostty 内核 libghostty-vt（C ABI 1.0）。构建要 Zig 0.17（brew install zig）。
 libghostty-vt = { git = "https://github.com/uzaaft/libghostty-rs", rev = "768add93c54ccdba3f5c4d8763789ab6416f3151" }

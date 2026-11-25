@@ -10,6 +10,7 @@ mod connection_dialog;
 mod devhook;
 mod favorites;
 mod files;
+mod fullscreen;
 mod groups;
 mod i18n_en;
 mod import_dialog;
@@ -198,7 +199,7 @@ fn main() {
         let _ = window.update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |window, cx| {
                 match window.root::<gpui_base::Root>().flatten().and_then(|root| workspace_of(root.read(cx))) {
-                    Some(workspace) => workspace.update(cx, |workspace, cx| workspace.close_window(cx)),
+                    Some(workspace) => workspace.update(cx, |workspace, cx| workspace.close_window(window, cx)),
                     None => cx.hide(),
                 }
                 false
