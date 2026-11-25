@@ -2,7 +2,7 @@
 """Shortcut x state matrix for SSHL, driven with real key events.
 
 Each case starts a fresh SSHL (the test-hook build), sets up a state (local tab idle / running a program, SSH tab,
-dialog, prompt, panel, minimized window), presses keys and checks the result through the accessibility tree and the
+dialog, prompt, panel, minimized or full-screen window), presses keys and checks the result through the accessibility tree and the
 process list. Keys go to the process with CGEventPostToPid, so the instance stays in the background and never takes
 the keyboard from whoever is using the machine.
 
@@ -33,6 +33,8 @@ K = dict(w=13, q=12, t=17, n=45, k=40, comma=43, one=18, two=19, rbracket=30, i=
 
 pid = None
 proc = None
+# Where the window opened (the secondary display) before start() moved it into view; full-screen cases go back there.
+home = None
 # Sidebar entries right after launch: typing that leaks into the sidebar search filters them away.
 sidebar = set()
 
@@ -46,7 +48,7 @@ def build_tools():
 
 
 def start():
-    global pid, proc, sidebar
+    global pid, proc, sidebar, home
     stop()
     if os.path.exists(SOCK):
         os.remove(SOCK)
@@ -58,6 +60,9 @@ def start():
             break
         time.sleep(0.1)
     time.sleep(1.2)
+    win = f'window 1 of (first process whose unix id is {pid})'
+    home = subprocess.run(["osascript", "-e", f'tell application "System Events" to get position of {win}'],
+                          capture_output=True, text=True).stdout.strip()
     # 窗口全被别的应用盖住时 GPUI 不重绘、无障碍树也停在旧的一帧：挪到底下露出一条（不激活、不抢焦点）
     subprocess.run(["osascript", "-e", f'tell application "System Events" to set position of window 1 of (first process whose unix id is {pid}) to {{360, 600}}'],
                    capture_output=True)
@@ -117,6 +122,8 @@ def state():
         "find": "关闭（Esc）" in b,
         "sidebar_ok": not sidebar or bool(sidebar & set(b)),
         "minimized": d["minimized"],
+        "fullscreen": d["fullscreen"],
+        "hidden": d["hidden"],
     }
 
 
@@ -293,6 +300,49 @@ def q_while_close_prompt():
     return expect(alive() and s1["prompt_ok"] == ["关闭"] and not s2["prompt"] and running(7014), f"{s1} / {s2}")
 
 
+def frontmost():
+    return subprocess.run(["osascript", "-e", 'tell application "System Events" to get bundle identifier of first process whose frontmost is true'],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def full_screen_case(fn):
+    """全屏要在窗口原来的屏幕（副屏）上进：start() 把它挪到了主屏底下，在那儿全屏会把用户的主屏整个切走。
+    进全屏时系统把测试实例提到前台，测完把前台还给原来的应用。"""
+    def run():
+        front = frontmost()
+        if not home or "," not in home:
+            return False, f"window position unknown: {home!r}"
+        subprocess.run(["osascript", "-e", f'tell application "System Events" to set position of window 1 of (first process whose unix id is {pid}) to {{{home}}}'],
+                       capture_output=True)
+        time.sleep(0.4)
+        try:
+            return fn()
+        finally:
+            if front:
+                subprocess.run(["osascript", "-e", f'tell application id "{front}" to activate'], capture_output=True)
+    return run
+
+
+def w_full_screen_keys():
+    # 🌐F、⌃⌘F 都进出原生全屏（同系统）；动画约 0.6 秒
+    local_tab()
+    seen = []
+    for mods in ("fn", "ctrl+cmd"):
+        for _ in range(2):
+            key("f", mods, wait=1.6)
+            seen.append(state()["fullscreen"])
+    return expect(seen == [True, False, True, False], f"{seen}")
+
+
+def w_full_screen_cmd_w_hides():
+    # 没有标签时 ⌘W = 关窗口 = 藏起来；系统不藏全屏里的应用，要先退出全屏、退完再藏（fullscreen.rs）
+    key("f", "fn", wait=1.6)
+    s0 = state()
+    key("w", "cmd", wait=2.0)
+    s1 = state()
+    return expect(s0["fullscreen"] and alive() and s1["hidden"] and not s1["fullscreen"], f"{s0} / {s1}")
+
+
 def m_prompt_blocks(shortcut, mods, check):
     def run():
         local_tab(7020)
@@ -418,6 +468,8 @@ CASES = [
     ("⌘Q×3 Esc → 只一个框，不退", q_cmd_q_x3_esc),
     ("⌘M 最小化后 ⌘Q → 窗口拿出来并弹框", q_minimized),
     ("没有标签 ⌘Q → 直接退", q_no_tabs),
+    ("🌐F / ⌃⌘F → 进出全屏", full_screen_case(w_full_screen_keys)),
+    ("全屏、没有标签 ⌘W → 退出全屏并藏起来", full_screen_case(w_full_screen_cmd_w_hides)),
     ("关标签确认框开着时 ⌘Q → 不叠退出框", q_while_close_prompt),
     ("确认框开着 ⌘N → 不开新建连接",
      m_prompt_blocks("n", "cmd", lambda b, s: s["conn_dialog"])),

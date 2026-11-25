@@ -258,6 +258,10 @@ pub fn set_menus(cx: &mut App) {
             ],
             disabled: false,
         },
-        Menu { name: tr!("窗口").into(), items: vec![MenuItem::action(tr!("最小化"), workspace::Minimize)], disabled: false },
+        Menu {
+            name: tr!("窗口").into(),
+            items: vec![MenuItem::action(tr!("最小化"), workspace::Minimize), MenuItem::action(tr!("进入 / 退出全屏"), workspace::ToggleFullScreen)],
+            disabled: false,
+        },
     ]);
 }

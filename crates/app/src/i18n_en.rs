@@ -222,6 +222,7 @@ pub const TABLE: sshl_core::i18n::Table = &[
     ("全选", "Select All"),
     ("窗口", "Window"),
     ("最小化", "Minimize"),
+    ("进入 / 退出全屏", "Enter / Exit Full Screen"),
     // update.rs
     ("GitHub 返回的内容和预期的不一样", "GitHub returned something unexpected"),
     ("检查更新的线程没有回音", "The update check didn't finish"),

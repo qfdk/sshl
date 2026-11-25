@@ -35,7 +35,7 @@ use crate::ui as kit;
 
 actions!(
     workspace,
-    [CloseTab, Minimize, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, ShowFavorites, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
+    [CloseTab, Minimize, ToggleFullScreen, ShowTerminal, ShowFiles, ShowSystem, ShowSnippets, ShowFavorites, NewConnection, NewLocalTerminal, NextTab, PrevTab, OpenSettings, ToggleSidebar, OpenQuickConnect]
 );
 
 /// ⌘1 … ⌘9：切到第 n 个标签（从 1 数，标签栏从左到右，本机标签也算）。快捷键都在 `keymap.rs`。
@@ -1438,6 +1438,11 @@ impl Workspace {
         window.minimize_window();
     }
 
+    /// 🌐F / ⌃⌘F / 菜单「窗口 → 进入 / 退出全屏」：同绿色按钮，原生全屏。
+    fn toggle_full_screen(&mut self, _: &ToggleFullScreen, window: &mut Window, _: &mut Context<Self>) {
+        window.toggle_fullscreen();
+    }
+
     pub(crate) fn set_main_tab(&mut self, tab: MainTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.active.is_none() || self.main_tab == tab {
             return;
@@ -1654,6 +1659,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(|this, _: &crate::Quit, window, cx| this.request_quit(window, cx)))
             .on_action(cx.listener(Self::minimize))
+            .on_action(cx.listener(Self::toggle_full_screen))
             .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| this.show_main_tab(MainTab::Terminal, window, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.show_main_tab(MainTab::Files, window, cx)))
             .on_action(cx.listener(|this, _: &ShowSystem, window, cx| this.show_main_tab(MainTab::System, window, cx)))

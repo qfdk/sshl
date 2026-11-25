@@ -15,7 +15,7 @@ use crate::settings;
 use crate::terminal::view::{self as term, Copy, Find, FindNext, FindPrev, Paste, SelectAll, ZoomIn, ZoomOut, ZoomReset};
 use crate::workspace::{
     CloseTab, Minimize, NewConnection, NewLocalTerminal, NextTab, OpenQuickConnect, OpenSettings, PrevTab, SelectTab, ShowFavorites, ShowFiles,
-    ShowSnippets, ShowSystem, ShowTerminal, ToggleSidebar,
+    ShowSnippets, ShowSystem, ShowTerminal, ToggleFullScreen, ToggleSidebar,
 };
 use crate::{Hide, HideOthers, Quit};
 
@@ -128,6 +128,9 @@ pub static COMMANDS: &[Command] = &[
     command!("hide", App, || tr!("隐藏 SSHL").into(), ["cmd-h"], [None], Hide),
     command!("hide-others", App, || tr!("隐藏其他").into(), ["alt-cmd-h"], [None], HideOthers),
     command!("minimize", App, || tr!("最小化").into(), ["cmd-m"], [None], Minimize),
+    // 同系统：🌐F（新版 macOS 菜单上写的就是它）和老的 ⌃⌘F。⌃⌘F 要排第一：菜单栏取第一个键，gpui 写菜单时不带 fn，
+    // 「fn-f」排第一的话菜单登记成光秃秃的 F
+    command!("toggle-full-screen", App, || tr!("进入 / 退出全屏").into(), ["ctrl-cmd-f", "fn-f"], [None], ToggleFullScreen),
 ];
 
 pub fn find(id: &str) -> Option<&'static Command> {
@@ -568,6 +571,23 @@ mod tests {
         assert_eq!(hint_text("cmd-i"), "I");
         assert_eq!(hint_text("cmd-shift-p"), "⇧P");
         assert_eq!(hint_text("ctrl-1"), "⌃1", "不带 ⌘ 的整个写出来");
+    }
+
+    #[test]
+    fn full_screen_is_ctrl_cmd_f_in_the_menu_and_globe_f_too() {
+        let command = find("toggle-full-screen").expect("全屏命令");
+        assert_eq!(command.defaults, ["ctrl-cmd-f", "fn-f"]);
+        assert_eq!(display(command.defaults[0]), "⌃⌘F");
+        assert_eq!(display(command.defaults[1]), "fn F");
+    }
+
+    /// 菜单栏上的快捷键取命令的第一个键，而 gpui 写菜单时不带 fn：「fn-f」排第一，菜单就登记成光秃秃的 F。
+    #[test]
+    fn the_first_default_is_never_fn_plus_a_plain_key() {
+        for command in COMMANDS {
+            let stroke = Keystroke::parse_with_os(command.defaults[0], OperatingSystem::Mac).unwrap();
+            assert!(!(stroke.modifiers.function && !is_function_key(&stroke.key)), "{} 的第一个键不能是 fn + 普通键", command.id);
+        }
     }
 
     #[test]
